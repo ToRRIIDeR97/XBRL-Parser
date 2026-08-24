@@ -1,0 +1,69 @@
+version: 1
+metrics:
+  - code: revenue
+    name: Revenue
+    statement: income_statement
+    period_type: duration
+    unit_family: monetary
+    description: Consolidated top-line revenue as reported by the entity.
+  - code: gross_profit
+    name: Gross Profit
+    statement: income_statement
+    period_type: duration
+    unit_family: monetary
+  - code: operating_income
+    name: Operating Income
+    statement: income_statement
+    period_type: duration
+    unit_family: monetary
+  - code: net_income
+    name: Net Income
+    statement: income_statement
+    period_type: duration
+    unit_family: monetary
+  - code: diluted_eps
+    name: Diluted EPS
+    statement: income_statement
+    period_type: duration
+    unit_family: monetary_per_share
+  - code: total_assets
+    name: Total Assets
+    statement: balance_sheet
+    period_type: instant
+    unit_family: monetary
+  - code: total_liabilities
+    name: Total Liabilities
+    statement: balance_sheet
+    period_type: instant
+    unit_family: monetary
+  - code: stockholders_equity
+    name: Stockholders' Equity
+    statement: balance_sheet
+    period_type: instant
+    unit_family: monetary
+  - code: cash_and_equivalents
+    name: Cash and Cash Equivalents
+    statement: balance_sheet
+    period_type: instant
+    unit_family: monetary
+  - code: operating_cash_flow
+    name: Cash Flow from Operations
+    statement: cash_flow
+    period_type: duration
+    unit_family: monetary
+  - code: capital_expenditures
+    name: Capital Expenditures
+    statement: cash_flow
+    period_type: duration
+    unit_family: monetary
+  - code: free_cash_flow
+    name: Free Cash Flow
+    statement: derived
+    period_type: duration
+    unit_family: monetary
+    formula: operating_cash_flow - capital_expenditures
+  - code: diluted_shares
+    name: Diluted Weighted-Average Shares
+    statement: income_statement
+    period_type: duration
+    unit_family: shares

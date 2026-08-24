@@ -1,0 +1,29 @@
+version: 1
+schema_drift:
+  unknown_column: fail_artifact
+  missing_required_column: fail_artifact
+  changed_column_order: warn
+  duplicate_zip_member: fail_artifact
+
+xbrl:
+  run_xbrl_validation: true
+  run_efm_validation: false
+  reject_severities:
+    - fatal
+  retain_all_messages: true
+
+quality_checks:
+  source_row_count_reconciliation: required
+  duplicate_primary_key_rate_max: 0.0
+  orphan_submission_rate_max: 0.0
+  orphan_tag_rate_max: 0.0
+  orphan_dimension_rate_max: 0.0
+  null_numeric_value_warn_rate: 0.20
+  malformed_decimal_rate_max: 0.0
+  parquet_clickhouse_row_delta_max: 0
+
+reconciliation:
+  compare_incremental_to_bulk: true
+  numeric_tolerance_absolute: "0"
+  numeric_tolerance_relative: "0"
+  text_compare_mode: normalized_whitespace

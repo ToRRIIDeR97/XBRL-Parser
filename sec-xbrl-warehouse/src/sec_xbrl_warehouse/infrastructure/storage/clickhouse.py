@@ -1,0 +1,464 @@
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+import clickhouse_connect
+import pyarrow as pa
+
+from sec_xbrl_warehouse.config import Settings
+from sec_xbrl_warehouse.domain.canonical import CanonicalFact
+from sec_xbrl_warehouse.domain.enums import SecTable
+from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle, XbrlFact
+from sec_xbrl_warehouse.exceptions import WarehouseWriteError
+from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
+    canonical_fact_schema,
+    require_exact_schema,
+    sec_warehouse_schema,
+    xbrl_warehouse_schema,
+)
+from sec_xbrl_warehouse.infrastructure.storage.hashing import stable_json_hash
+
+_SEC_TABLE_NAMES: dict[SecTable, str] = {
+    SecTable.SUB: "sec_submissions",
+    SecTable.TAG: "sec_tags",
+    SecTable.DIM: "sec_dimensions",
+    SecTable.NUM: "sec_numeric_facts",
+    SecTable.TXT: "sec_text_facts",
+    SecTable.REN: "sec_renderings",
+    SecTable.PRE: "sec_presentations",
+    SecTable.CAL: "sec_calculations",
+}
+
+
+class ClickHouseWarehouse:
+    """Arrow-first ClickHouse warehouse adapter.
+
+    All production writes should arrive as `pyarrow.Table` or
+    `pyarrow.RecordBatch`. The adapter intentionally refuses row-at-a-time
+    inserts because they are both slow and easy to make type-inconsistent.
+    """
+
+    def __init__(self, settings: Settings, client: Any | None = None) -> None:
+        self.settings = settings
+        self.database = settings.clickhouse_database
+        self.client = client or clickhouse_connect.get_client(
+            host=settings.clickhouse_host,
+            port=settings.clickhouse_port,
+            username=settings.clickhouse_username,
+            password=settings.clickhouse_password,
+            database=settings.clickhouse_database,
+            secure=settings.clickhouse_secure,
+        )
+
+    def ping(self) -> bool:
+        try:
+            return str(self.client.command("SELECT 1")).strip() == "1"
+        except Exception:
+            return False
+
+    def apply_ddl(self, ddl_directory: Path) -> tuple[str, ...]:
+        """Render and execute all numbered ClickHouse SQL files in lexical order."""
+        executed: list[str] = []
+        for path in sorted(ddl_directory.glob("[0-9][0-9][0-9]_*.sql")):
+            rendered = path.read_text(encoding="utf-8").replace("{{database}}", self.database)
+            for statement in self._split_sql(rendered):
+                self.client.command(statement)
+            executed.append(path.name)
+        return tuple(executed)
+
+    def insert_sec_batch(self, table: SecTable, batch: pa.RecordBatch | pa.Table) -> int:
+        handlers = {
+            SecTable.SUB: self.insert_sec_submissions,
+            SecTable.TAG: self.insert_sec_tags,
+            SecTable.DIM: self.insert_sec_dimensions,
+            SecTable.NUM: self.insert_sec_numeric_facts,
+            SecTable.TXT: self.insert_sec_text_facts,
+            SecTable.REN: self.insert_sec_renderings,
+            SecTable.PRE: self.insert_sec_presentations,
+            SecTable.CAL: self.insert_sec_calculations,
+        }
+        return handlers[table](batch)
+
+    def insert_sec_submissions(self, batch: pa.RecordBatch | pa.Table) -> int:
+        return self._insert_sec_typed(SecTable.SUB, batch)
+
+    def insert_sec_tags(self, batch: pa.RecordBatch | pa.Table) -> int:
+        return self._insert_sec_typed(SecTable.TAG, batch)
+
+    def insert_sec_dimensions(self, batch: pa.RecordBatch | pa.Table) -> int:
+        return self._insert_sec_typed(SecTable.DIM, batch)
+
+    def insert_sec_numeric_facts(self, batch: pa.RecordBatch | pa.Table) -> int:
+        return self._insert_sec_typed(SecTable.NUM, batch)
+
+    def insert_sec_text_facts(self, batch: pa.RecordBatch | pa.Table) -> int:
+        return self._insert_sec_typed(SecTable.TXT, batch)
+
+    def insert_sec_renderings(self, batch: pa.RecordBatch | pa.Table) -> int:
+        return self._insert_sec_typed(SecTable.REN, batch)
+
+    def insert_sec_presentations(self, batch: pa.RecordBatch | pa.Table) -> int:
+        return self._insert_sec_typed(SecTable.PRE, batch)
+
+    def insert_sec_calculations(self, batch: pa.RecordBatch | pa.Table) -> int:
+        return self._insert_sec_typed(SecTable.CAL, batch)
+
+    def _insert_sec_typed(self, table: SecTable, batch: pa.RecordBatch | pa.Table) -> int:
+        """Validate and insert one typed/enriched SEC batch.
+
+        The incoming schema must match `sec_warehouse_schema(table)` exactly —
+        column order, types, decimal precision/scale, nullability, and ingest
+        lineage columns included.
+        """
+        target = _SEC_TABLE_NAMES[table]
+        arrow_table = batch if isinstance(batch, pa.Table) else pa.Table.from_batches([batch])
+        require_exact_schema(
+            arrow_table.schema,
+            sec_warehouse_schema(table),
+            name=f"{self.database}.{target}",
+        )
+        return self._insert_arrow(target, arrow_table)
+
+    def insert_xbrl_bundle(self, bundle: XbrlExtractionBundle) -> dict[str, int]:
+        """Persist all entities from one Arelle extraction at lineage level."""
+        counts: dict[str, int] = {}
+        tables = {
+            "contexts": contexts_table(bundle),
+            "concepts": concepts_table(bundle),
+            "facts": facts_table(bundle),
+            "relationships": relationships_table(bundle),
+            "footnotes": footnotes_table(bundle),
+        }
+        for entity, table in tables.items():
+            if table.num_rows == 0:
+                counts[entity] = 0
+                continue
+            counts[entity] = self._insert_arrow(f"xbrl_{entity}", table)
+        return counts
+
+    def insert_canonical_facts(self, facts: Sequence[CanonicalFact]) -> int:
+        """Insert mapped facts with raw fact and mapping lineage."""
+        if not facts:
+            return 0
+        validate_canonical_facts(facts)
+        rows = [_canonical_fact_row(fact) for fact in facts]
+        table = pa.Table.from_pylist(rows, schema=canonical_fact_schema())
+        return self._insert_arrow("canonical_facts", table)
+
+    def query(self, sql: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        result = self.client.query(sql, parameters=parameters or {})
+        names = list(result.column_names)
+        return [dict(zip(names, row, strict=True)) for row in result.result_rows]
+
+    def _insert_arrow(self, table_name: str, table: pa.Table) -> int:
+        if table.num_rows == 0:
+            return 0
+        if len(set(table.column_names)) != len(table.column_names):
+            raise WarehouseWriteError(f"Duplicate Arrow column names for {table_name}")
+        try:
+            self.client.insert_arrow(f"{self.database}.{table_name}", table)
+        except Exception as exc:
+            raise WarehouseWriteError(
+                f"ClickHouse Arrow insert failed for {table_name}: {exc}"
+            ) from exc
+        return table.num_rows  # type: ignore[no-any-return]
+
+    @staticmethod
+    def _split_sql(sql: str) -> tuple[str, ...]:
+        """Split simple DDL files on semicolons outside quoted strings.
+
+        The checked-in DDL deliberately avoids procedures and semicolons inside
+        string literals. Replace this helper with a real SQL lexer if that changes.
+        """
+        cleaned = re.sub(r"--.*?$", "", sql, flags=re.MULTILINE)
+        return tuple(part.strip() for part in cleaned.split(";") if part.strip())
+
+
+def validate_canonical_facts(facts: Sequence[CanonicalFact]) -> None:
+    """Reject canonical facts missing mapping lineage before any database write."""
+    for fact in facts:
+        if fact.mapping_id == UUID(int=0) or fact.mapping_version < 1:
+            raise WarehouseWriteError(
+                f"CanonicalFact for raw fact {fact.raw_fact_id} is missing mapping lineage"
+            )
+
+
+def contexts_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    rows = []
+    for context in bundle.contexts:
+        rows.append(
+            {
+                "accession": bundle.filing.accession,
+                "cik": bundle.filing.cik,
+                "context_id": context.context_id,
+                "context_hash": context.context_hash,
+                "entity_scheme": context.entity_scheme,
+                "entity_identifier": context.entity_identifier,
+                "period_kind": context.period_kind.value,
+                "period_start": context.period_start,
+                "period_end": context.period_end,
+                "period_instant": context.period_instant,
+                "dimensions_json": _dimensions_json(context.dimensions),
+                "segment_xml": context.segment_xml,
+                "scenario_xml": context.scenario_xml,
+                "source_document": context.source_document,
+                "extraction_revision": bundle.extraction_revision,
+                "_row_hash": stable_json_hash(
+                    {
+                        "accession": bundle.filing.accession,
+                        "context_id": context.context_id,
+                        "context_hash": context.context_hash,
+                    }
+                ),
+                "_ingested_at": _now(),
+            }
+        )
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("contexts"))
+
+
+def concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    rows = []
+    for concept in bundle.concepts:
+        rows.append(
+            {
+                "accession": bundle.filing.accession,
+                "concept_namespace": concept.namespace,
+                "concept_name": concept.name,
+                "concept_qname": concept.qname,
+                "taxonomy_version": concept.taxonomy_version,
+                "datatype_qname": concept.datatype_qname,
+                "substitution_group_qname": concept.substitution_group_qname,
+                "period_type": concept.period_type,
+                "balance": concept.balance,
+                "abstract": int(concept.abstract),
+                "nillable": int(concept.nillable),
+                "is_extension": int(concept.is_extension),
+                "labels_json": _labels_json(concept.labels),
+                "documentation": concept.documentation,
+                "references_json": (None if not concept.references else _json(concept.references)),
+                "extraction_revision": bundle.extraction_revision,
+                "_row_hash": stable_json_hash(
+                    {
+                        "accession": bundle.filing.accession,
+                        "qname": concept.qname,
+                        "taxonomy_version": concept.taxonomy_version,
+                    }
+                ),
+                "_ingested_at": _now(),
+            }
+        )
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("concepts"))
+
+
+def facts_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    rows = []
+    for fact in bundle.facts:
+        rows.append(
+            fact_row(
+                bundle.filing.accession,
+                bundle.filing.cik,
+                bundle.filing.company_name,
+                bundle.filing.form,
+                bundle.filing.filed_date,
+                fact,
+                bundle.extraction_revision,
+            )
+        )
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("facts"))
+
+
+def relationships_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    rows = []
+    for relationship in bundle.relationships:
+        rows.append(
+            {
+                "relationship_id": relationship.relationship_id,
+                "accession": bundle.filing.accession,
+                "network_type": relationship.relationship_type.value,
+                "link_role_uri": relationship.link_role_uri,
+                "arc_role_uri": relationship.arc_role_uri,
+                "from_qname": relationship.from_qname,
+                "to_qname": relationship.to_qname,
+                "arc_order": relationship.order,
+                "priority": relationship.priority,
+                "weight": relationship.weight,
+                "preferred_label": relationship.preferred_label,
+                "use": relationship.use,
+                "closed": _optional_int(relationship.closed),
+                "usable": _optional_int(relationship.usable),
+                "target_role": relationship.target_role,
+                "context_element": relationship.context_element,
+                "attributes_json": _json(relationship.attributes)
+                if relationship.attributes
+                else None,
+                "source_document": relationship.source_document,
+                "extraction_revision": bundle.extraction_revision,
+                "_row_hash": stable_json_hash(
+                    {
+                        "accession": bundle.filing.accession,
+                        "network_type": relationship.relationship_type.value,
+                        "link_role_uri": relationship.link_role_uri,
+                        "arc_role_uri": relationship.arc_role_uri,
+                        "from_qname": relationship.from_qname,
+                        "to_qname": relationship.to_qname,
+                    }
+                ),
+                "_ingested_at": _now(),
+            }
+        )
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("relationships"))
+
+
+def footnotes_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    rows = []
+    for footnote in bundle.footnotes:
+        rows.append(
+            {
+                "footnote_id": footnote.footnote_id,
+                "accession": bundle.filing.accession,
+                "role_uri": footnote.role_uri,
+                "language": footnote.language,
+                "text": footnote.text,
+                "html": footnote.html,
+                "linked_fact_ids": list(footnote.linked_fact_ids),
+                "extraction_revision": bundle.extraction_revision,
+                "_row_hash": stable_json_hash(
+                    {
+                        "accession": bundle.filing.accession,
+                        "footnote_id": footnote.footnote_id,
+                    }
+                ),
+                "_ingested_at": _now(),
+            }
+        )
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("footnotes"))
+
+
+def fact_row(
+    accession: str,
+    cik: int,
+    company_name: str,
+    form: str,
+    filed_date: date,
+    fact: XbrlFact,
+    extraction_revision: int,
+) -> dict[str, Any]:
+    return {
+        "fact_id": fact.fact_id,
+        "accession": accession,
+        "cik": cik,
+        "company_name": company_name,
+        "form": form,
+        "filed_date": filed_date,
+        "fiscal_year": None,
+        "fiscal_period": None,
+        "concept_namespace": fact.concept_namespace,
+        "concept_name": fact.concept_name,
+        "concept_qname": fact.concept_qname,
+        "taxonomy_version": fact.taxonomy_version,
+        "context_id": fact.context_id,
+        "context_hash": fact.context_hash,
+        "unit_id": fact.unit.unit_id if fact.unit else None,
+        "unit_numerator_json": _json(fact.unit.numerator_measures) if fact.unit else None,
+        "unit_denominator_json": _json(fact.unit.denominator_measures) if fact.unit else None,
+        "raw_value": fact.raw_value,
+        "value_decimal": fact.value_decimal,
+        "value_text": fact.value_text,
+        "value_boolean": (1 if fact.value_boolean else 0)
+        if fact.value_boolean is not None
+        else None,
+        "value_date": fact.value_date,
+        "is_nil": int(fact.is_nil),
+        "decimals": fact.decimals,
+        "precision": fact.precision,
+        "language": fact.language,
+        "period_kind": fact.period_kind.value,
+        "period_start": fact.period_start,
+        "period_end": fact.period_end,
+        "period_instant": fact.period_instant,
+        "entity_scheme": fact.entity_scheme,
+        "entity_identifier": fact.entity_identifier,
+        "dimensions_json": _dimensions_json(fact.dimensions),
+        "dimension_hash": fact.dimension_hash,
+        "tuple_path": fact.tuple_path,
+        "duplicate_ordinal": fact.duplicate_ordinal,
+        "duplicate_set_hash": fact.duplicate_set_hash,
+        "footnote_ids": list(fact.footnote_ids),
+        "source_document": fact.source_document,
+        "source_fact_id": fact.source_fact_id,
+        "extraction_revision": extraction_revision,
+        "_row_hash": stable_json_hash(
+            {
+                "fact_id": fact.fact_id,
+                "accession": accession,
+                "extraction_revision": extraction_revision,
+            }
+        ),
+        "_ingested_at": _now(),
+    }
+
+
+def _canonical_fact_row(fact: CanonicalFact) -> dict[str, Any]:
+    return {
+        "canonical_fact_id": fact.canonical_fact_id,
+        "raw_fact_id": fact.raw_fact_id,
+        "accession": fact.accession,
+        "cik": fact.cik,
+        "filed_date": fact.filed_date,
+        "form": fact.form,
+        "canonical_metric": fact.canonical_metric,
+        "normalized_value_decimal": fact.normalized_value_decimal,
+        "normalized_value_text": fact.normalized_value_text,
+        "normalized_unit": fact.normalized_unit,
+        "sign_multiplier": fact.sign_multiplier,
+        "period_kind": fact.period_kind,
+        "period_start": fact.period_start,
+        "period_end": fact.period_end,
+        "period_instant": fact.period_instant,
+        "dimensions_json": fact.dimensions_json,
+        "mapping_id": str(fact.mapping_id),
+        "mapping_version": fact.mapping_version,
+        "mapping_confidence": fact.mapping_confidence,
+        "mapping_explanation": fact.mapping_explanation,
+        "extraction_revision": fact.extraction_revision,
+        "_row_hash": stable_json_hash(
+            {
+                "canonical_fact_id": fact.canonical_fact_id,
+                "raw_fact_id": fact.raw_fact_id,
+                "mapping_version": fact.mapping_version,
+            }
+        ),
+        "_ingested_at": _now(),
+    }
+
+
+def _dimensions_json(dimensions: Any) -> str:
+    from sec_xbrl_warehouse.normalization.dimensions import dimensions_to_json
+
+    return dimensions_to_json(dimensions)
+
+
+def _labels_json(labels: Any) -> str:
+    payload = [label.model_dump(mode="json") for label in labels]
+    return _json(payload)
+
+
+def _json(value: Any) -> str:
+    import json
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def _optional_int(value: bool | None) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)

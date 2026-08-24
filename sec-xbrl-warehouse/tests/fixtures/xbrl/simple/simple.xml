@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+            xmlns:link="http://www.xbrl.org/2003/linkbase"
+            xmlns:xlink="http://www.w3.org/1999/xlink"
+            xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+            xmlns:ex="http://example.com/2026">
+  <link:schemaRef xlink:type="simple" xlink:href="simple.xsd"/>
+  <xbrli:context id="D2025">
+    <xbrli:entity>
+      <xbrli:identifier scheme="https://www.sec.gov/CIK">0000000001</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2025-01-01</xbrli:startDate>
+      <xbrli:endDate>2025-12-31</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
+  <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+  <ex:Revenue contextRef="D2025" unitRef="USD" decimals="-3">123456789</ex:Revenue>
+</xbrli:xbrl>

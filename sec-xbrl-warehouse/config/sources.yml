@@ -1,0 +1,36 @@
+sec:
+  catalog_pages:
+    notes: https://www.sec.gov/data-research/sec-markets-data/financial-statement-notes-data-sets
+    face: https://www.sec.gov/data-research/sec-markets-data/financial-statement-data-sets
+  data_api_base: https://data.sec.gov
+  archive_base: https://www.sec.gov/Archives/edgar/data
+  daily_index_base: https://www.sec.gov/Archives/edgar/daily-index
+  full_index_base: https://www.sec.gov/Archives/edgar/full-index
+  submissions_path_template: /submissions/CIK{cik:010d}.json
+  company_facts_path_template: /api/xbrl/companyfacts/CIK{cik:010d}.json
+  default_forms:
+    - 10-K
+    - 10-K/A
+    - 10-Q
+    - 10-Q/A
+    - 20-F
+    - 20-F/A
+    - 40-F
+    - 40-F/A
+    - 6-K
+    - 6-K/A
+  excluded_fsnds_forms:
+    - 485BPOS
+    - 497
+    - SDR
+    - SDR/A
+    - SDR-A
+    - SDR/W
+
+storage_layout:
+  bronze_bulk: bronze/sec/fsnds/{dataset}/{period}/{filename}
+  bronze_filing: bronze/sec/filings/{cik}/{accession}/{filename}
+  silver_bulk: silver/sec/fsnds/{table}/source_period={period}/artifact={artifact_id}
+  silver_xbrl: silver/xbrl/{entity}/filed_year={year}/accession={accession}
+  quarantine: quarantine/{stage}/{artifact_or_accession}/{timestamp}
+  manifests: manifests/{source}/{artifact_or_accession}.json

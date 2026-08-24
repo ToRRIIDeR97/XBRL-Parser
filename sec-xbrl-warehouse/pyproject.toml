@@ -1,0 +1,122 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sec-xbrl-warehouse"
+version = "0.1.0"
+description = "Historical and incremental SEC XBRL warehouse scaffold using Arelle, ClickHouse, PostgreSQL, Parquet, and object storage"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "MIT" }
+authors = [{ name = "Project scaffold" }]
+dependencies = [
+  "aiofiles>=24.1,<26",
+  "alembic>=1.16,<2",
+  "arelle-release[EFM]>=2.40,<3",
+  "asyncpg>=0.30,<1",
+  "beautifulsoup4>=4.13,<5",
+  "boto3>=1.38,<2",
+  "clickhouse-connect[arrow]>=1.6,<2",
+  "edgartools>=5.40,<6",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "lxml>=5.4,<7",
+  "orjson>=3.10,<4",
+  "polars>=1.30,<2",
+  "prometheus-client>=0.22,<1",
+  "pyarrow>=21,<26",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.9,<3",
+  "python-dateutil>=2.9,<3",
+  "pyyaml>=6,<7",
+  "rich>=14,<15",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "structlog>=25,<26",
+  "tenacity>=9,<10",
+  "typer>=0.16,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.17,<2",
+  "pre-commit>=4.2,<5",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<7",
+  "respx>=0.22,<1",
+  "ruff>=0.12,<1",
+  "types-PyYAML>=6.0,<7",
+]
+
+[project.scripts]
+xbrl-warehouse = "sec_xbrl_warehouse.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sec_xbrl_warehouse"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"migrations/versions/*.py" = ["E501"]
+"tests/**/*.py" = ["S101", "B017"]
+"tests/integration/test_clickhouse_ddl.py" = ["E402"]
+"tests/unit/test_arrow_schemas.py" = ["E402"]
+"tests/unit/test_sec_tsv.py" = ["E402"]
+"tests/unit/test_bulk_loader.py" = ["E402"]
+"tests/unit/test_clickhouse_conversion.py" = ["E402"]
+"tests/unit/test_daily_index.py" = ["E402"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+mypy_path = "src"
+plugins = ["pydantic.mypy"]
+exclude = ["migrations"]
+
+[[tool.mypy.overrides]]
+module = [
+  "arelle.*",
+  "boto3.*",
+  "botocore.*",
+  "bs4.*",
+  "clickhouse_connect.*",
+  "edgar.*",
+  "pyarrow.*",
+  "pyarrow.parquet.*",
+  "aiofiles.*",
+  "lxml.*",
+  "lxml.etree.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "integration: requires Docker services or external dependencies",
+  "slow: long-running corpus or load test",
+  "arelle: requires Arelle extraction implementation",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["sec_xbrl_warehouse"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 35

@@ -1,0 +1,11 @@
+version: 1
+format: json
+include_timestamp: true
+include_process_id: true
+include_thread_name: false
+redact_keys:
+  - password
+  - secret
+  - access_key
+  - authorization
+  - cookie

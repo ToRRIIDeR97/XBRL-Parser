@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Data and local state
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.parquet
+*.arrow
+*.zip
+*.log
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db
+
+# Generated
+PROJECT_TREE.txt
+reports/

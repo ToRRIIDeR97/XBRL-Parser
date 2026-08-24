@@ -1,0 +1,17 @@
+{
+  "name": "Example Corp",
+  "filings": {
+    "recent": {
+      "accessionNumber": ["0000000001-26-000001", "0000000001-26-000002"],
+      "filingDate": ["2026-02-15", "2026-05-01"],
+      "reportDate": ["2025-12-31", "2026-03-31"],
+      "acceptanceDateTime": ["20260215120000", "20260501120000"],
+      "form": ["10-K", "10-Q"],
+      "primaryDocument": ["example.htm", "example-q1.htm"],
+      "isInlineXBRL": [1, 1],
+      "fiscalYear": [2025, 2026],
+      "fiscalPeriod": ["FY", "Q1"]
+    },
+    "files": []
+  }
+}

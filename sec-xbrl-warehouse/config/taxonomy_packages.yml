@@ -1,0 +1,29 @@
+# Taxonomy package registry used by the Arelle adapter.
+#
+# Do not point production parsing at an unversioned remote taxonomy. Download
+# approved taxonomy packages, checksum them, place them under
+# XBRL_ARELLE_TAXONOMY_PACKAGES_DIR, and add one entry per immutable file.
+# The takeover agent should implement loading and checksum verification in
+# ArelleExtractor._create_controller.
+packages: []
+
+# Example only; replace with a real, reviewed package before enabling:
+# packages:
+#   - id: us-gaap-2026
+#     filename: us-gaap-2026-taxonomy-package.zip
+#     sha256: <64-lowercase-hex-characters>
+#     enabled: true
+#     disclosure_system: efm-pragmatic
+#     notes: Pinned local taxonomy package for reproducible SEC parsing.
+
+network_policy:
+  # Filing documents themselves must come from the checksum-addressed filing
+  # package. These hosts are only candidates for controlled standard-taxonomy
+  # cache fills when XBRL_ARELLE_OFFLINE=false.
+  allowed_taxonomy_hosts:
+    - www.sec.gov
+    - xbrl.fasb.org
+    - xbrl.ifrs.org
+    - www.xbrl.org
+  reject_unlisted_hosts: true
+  require_https: true

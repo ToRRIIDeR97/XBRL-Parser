@@ -1,0 +1,49 @@
+version: 1
+status: candidate_only
+notes:
+  - These mappings seed review; they are not automatically authoritative.
+  - Taxonomy version, filing placement, dimensions, and period must still be checked.
+  - Extension concepts must not be mapped from labels alone.
+mappings:
+  - namespace_hint: us-gaap
+    concept: RevenueFromContractWithCustomerExcludingAssessedTax
+    canonical_metric: revenue
+  - namespace_hint: us-gaap
+    concept: Revenues
+    canonical_metric: revenue
+  - namespace_hint: us-gaap
+    concept: SalesRevenueNet
+    canonical_metric: revenue
+  - namespace_hint: us-gaap
+    concept: GrossProfit
+    canonical_metric: gross_profit
+  - namespace_hint: us-gaap
+    concept: OperatingIncomeLoss
+    canonical_metric: operating_income
+  - namespace_hint: us-gaap
+    concept: NetIncomeLoss
+    canonical_metric: net_income
+  - namespace_hint: us-gaap
+    concept: EarningsPerShareDiluted
+    canonical_metric: diluted_eps
+  - namespace_hint: us-gaap
+    concept: Assets
+    canonical_metric: total_assets
+  - namespace_hint: us-gaap
+    concept: Liabilities
+    canonical_metric: total_liabilities
+  - namespace_hint: us-gaap
+    concept: StockholdersEquity
+    canonical_metric: stockholders_equity
+  - namespace_hint: us-gaap
+    concept: CashAndCashEquivalentsAtCarryingValue
+    canonical_metric: cash_and_equivalents
+  - namespace_hint: us-gaap
+    concept: NetCashProvidedByUsedInOperatingActivities
+    canonical_metric: operating_cash_flow
+  - namespace_hint: us-gaap
+    concept: PaymentsToAcquirePropertyPlantAndEquipment
+    canonical_metric: capital_expenditures
+  - namespace_hint: us-gaap
+    concept: WeightedAverageNumberOfDilutedSharesOutstanding
+    canonical_metric: diluted_shares

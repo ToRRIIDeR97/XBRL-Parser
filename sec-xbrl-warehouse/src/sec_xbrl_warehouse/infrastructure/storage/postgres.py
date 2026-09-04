@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -10,11 +11,19 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import ArtifactState, JobState, JobType
-from sec_xbrl_warehouse.domain.models import DatasetArtifact, FilingRef, JobRecord, ValidationIssue
+from sec_xbrl_warehouse.domain.models import (
+    DatasetArtifact,
+    FilingPackageManifest,
+    FilingRef,
+    JobRecord,
+    SourceArtifactRef,
+    ValidationIssue,
+)
 from sec_xbrl_warehouse.exceptions import StateTransitionError
 from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
     FilingRow,
     IngestionJobRow,
+    JobCheckpointRow,
     SourceArtifactRow,
     ValidationIssueRow,
 )
@@ -47,10 +56,8 @@ _ALLOWED_ARTIFACT_TRANSITIONS: dict[ArtifactState, set[ArtifactState]] = {
 class PostgresControlRepository:
     """PostgreSQL implementation of artifact, filing, job, and issue state.
 
-    The methods are intentionally concrete enough to serve as implementation
-    guidance. Before production, add integration tests for every transaction and
-    decide whether `READ COMMITTED` or `REPEATABLE READ` is preferred for your
-    deployment.
+    Transactions stay deliberately narrow. Job claims use SKIP LOCKED and every
+    completion, failure, checkpoint, and heartbeat is fenced by worker and attempt.
     """
 
     def __init__(self, settings: Settings, engine: AsyncEngine | None = None) -> None:
@@ -74,6 +81,38 @@ class PostgresControlRepository:
         except Exception:
             return False
 
+    async def get_source_artifact(self, artifact_id: UUID) -> SourceArtifactRef:
+        async with self.sessions() as session:
+            row = await session.get(SourceArtifactRow, artifact_id)
+            if row is None:
+                raise KeyError(f"Unknown source artifact: {artifact_id}")
+            return SourceArtifactRef.model_validate(
+                {name: getattr(row, name) for name in SourceArtifactRef.model_fields}
+            )
+
+    async def get_checkpoint(
+        self, job_id: UUID, stage: str, key: str = "default"
+    ) -> dict[str, Any] | None:
+        async with self.sessions() as session:
+            return await session.scalar(
+                select(JobCheckpointRow.payload).where(
+                    JobCheckpointRow.job_id == job_id,
+                    JobCheckpointRow.stage == stage,
+                    JobCheckpointRow.checkpoint_key == key,
+                )
+            )
+
+    async def save_checkpoint(
+        self, job_id: UUID, stage: str, payload: dict[str, Any], key: str = "default"
+    ) -> None:
+        statement = (
+            pg_insert(JobCheckpointRow)
+            .values(job_id=job_id, stage=stage, checkpoint_key=key, payload=payload)
+            .on_conflict_do_update(constraint="uq_job_checkpoint", set_={"payload": payload})
+        )
+        async with self.sessions.begin() as session:
+            await session.execute(statement)
+
     async def upsert_source_artifact(
         self,
         artifact: DatasetArtifact,
@@ -91,6 +130,12 @@ class PostgresControlRepository:
            earlier revision.
         """
         async with self.sessions.begin() as session:
+            # Row locks cannot protect the first revision of a previously unseen period.
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"artifact:{artifact.dataset.value}:{artifact.period}"},
+            )
+            checksum_sha256 = checksum_sha256 or artifact.checksum_sha256
             if checksum_sha256:
                 existing = await session.scalar(
                     select(SourceArtifactRow.id).where(
@@ -101,14 +146,6 @@ class PostgresControlRepository:
                 if existing is not None:
                     return existing
 
-            await session.execute(
-                select(SourceArtifactRow.id)
-                .where(
-                    SourceArtifactRow.dataset == artifact.dataset.value,
-                    SourceArtifactRow.period == artifact.period,
-                )
-                .with_for_update()
-            )
             revision = (
                 await session.scalar(
                     select(func.coalesce(func.max(SourceArtifactRow.revision), 0)).where(
@@ -202,7 +239,7 @@ class PostgresControlRepository:
         # Compare freshness against database time: `available_at` is populated by
         # PostgreSQL's clock, so a host-computed "now" can disagree after a
         # container restart or in high-latency deployments.
-        stale_before = datetime.now(UTC) - timedelta(seconds=lock_timeout_seconds)
+        stale_before = func.now() - timedelta(seconds=lock_timeout_seconds)
         async with self.sessions.begin() as session:
             row = await session.scalar(
                 select(IngestionJobRow)
@@ -252,7 +289,7 @@ class PostgresControlRepository:
                 locked_by=worker_id,
             )
 
-    async def heartbeat_job(self, job_id: UUID, worker_id: str) -> None:
+    async def heartbeat_job(self, job_id: UUID, worker_id: str, attempt: int | None = None) -> None:
         async with self.sessions.begin() as session:
             result = await session.execute(
                 update(IngestionJobRow)
@@ -260,19 +297,29 @@ class PostgresControlRepository:
                     IngestionJobRow.id == job_id,
                     IngestionJobRow.state == JobState.RUNNING.value,
                     IngestionJobRow.locked_by == worker_id,
+                    *([IngestionJobRow.attempts == attempt] if attempt is not None else []),
                 )
                 .values(heartbeat_at=func.now(), locked_at=func.now())
             )
             if result.rowcount != 1:  # type: ignore[attr-defined]
                 raise StateTransitionError(f"Worker {worker_id} no longer owns job {job_id}")
 
-    async def complete_job(self, job_id: UUID, result: dict[str, Any] | None = None) -> None:
+    async def complete_job(
+        self,
+        job_id: UUID,
+        result: dict[str, Any] | None = None,
+        *,
+        worker_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
         async with self.sessions.begin() as session:
             changed = await session.execute(
                 update(IngestionJobRow)
                 .where(
                     IngestionJobRow.id == job_id,
                     IngestionJobRow.state == JobState.RUNNING.value,
+                    *([IngestionJobRow.locked_by == worker_id] if worker_id is not None else []),
+                    *([IngestionJobRow.attempts == attempt] if attempt is not None else []),
                 )
                 .values(
                     state=JobState.COMPLETE.value,
@@ -287,13 +334,27 @@ class PostgresControlRepository:
             if changed.rowcount != 1:  # type: ignore[attr-defined]
                 raise StateTransitionError(f"Cannot complete non-running job {job_id}")
 
-    async def fail_job(self, job_id: UUID, error: str, retryable: bool) -> None:
+    async def fail_job(
+        self,
+        job_id: UUID,
+        error: str,
+        retryable: bool,
+        *,
+        worker_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
         async with self.sessions.begin() as session:
             row = await session.scalar(
                 select(IngestionJobRow).where(IngestionJobRow.id == job_id).with_for_update()
             )
             if row is None:
                 raise KeyError(job_id)
+            if (
+                row.state != JobState.RUNNING.value
+                or (worker_id is not None and row.locked_by != worker_id)
+                or (attempt is not None and row.attempts != attempt)
+            ):
+                raise StateTransitionError(f"Cannot fail a job no longer owned: {job_id}")
             can_retry = retryable and row.attempts < row.max_attempts
             row.state = JobState.RETRY.value if can_retry else JobState.DEAD.value
             row.available_at = datetime.now(UTC) + timedelta(
@@ -330,9 +391,7 @@ class PostgresControlRepository:
         async with self.sessions.begin() as session:
             await session.execute(statement)
 
-    async def record_validation_issues(
-        self, issues: list[ValidationIssue] | tuple[ValidationIssue, ...]
-    ) -> None:
+    async def record_validation_issues(self, issues: Sequence[ValidationIssue]) -> None:
         if not issues:
             return
         rows = [
@@ -353,6 +412,24 @@ class PostgresControlRepository:
         ]
         async with self.sessions.begin() as session:
             await session.execute(ValidationIssueRow.__table__.insert(), rows)  # type: ignore[attr-defined]
+
+    async def update_filing_package(
+        self, manifest: FilingPackageManifest, revision: int | None = None
+    ) -> None:
+        values: dict[str, Any] = {
+            "package_object_key": manifest.package_object_key,
+            "package_checksum_sha256": manifest.package_checksum_sha256,
+        }
+        if revision is not None:
+            values["latest_extraction_revision"] = func.greatest(
+                FilingRow.latest_extraction_revision, revision
+            )
+        async with self.sessions.begin() as session:
+            await session.execute(
+                update(FilingRow)
+                .where(FilingRow.accession == manifest.filing.accession)
+                .values(**values)
+            )
 
     @staticmethod
     def _to_job_record(row: IngestionJobRow) -> JobRecord:

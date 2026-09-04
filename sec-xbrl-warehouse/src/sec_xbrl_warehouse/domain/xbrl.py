@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -24,6 +24,7 @@ class DimensionMember(XbrlModel):
     member_namespace: str | None = None
     member_name: str | None = None
     typed_value_xml: str | None = None
+    context_element: str | None = None
 
 
 class XbrlContext(XbrlModel):
@@ -103,6 +104,7 @@ class XbrlFact(XbrlModel):
     footnote_ids: tuple[str, ...] = ()
     source_document: str
     source_fact_id: str | None = None
+    source_attributes: dict[str, str] = Field(default_factory=dict)
 
 
 class XbrlRelationship(XbrlModel):
@@ -141,6 +143,8 @@ class XbrlDocumentMetadata(XbrlModel):
     source_documents: tuple[str, ...]
     software_name: str
     software_version: str
+    extracted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    provenance: dict[str, Any] = Field(default_factory=dict)
 
 
 class XbrlExtractionBundle(XbrlModel):

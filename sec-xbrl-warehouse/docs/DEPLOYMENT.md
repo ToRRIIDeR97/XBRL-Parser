@@ -8,6 +8,14 @@ Use `docker-compose.yml` for PostgreSQL, ClickHouse, and MinIO. Run API and work
 docker compose --profile application up -d
 ```
 
+Add the provisioned Prometheus/Grafana stack with both profiles:
+
+```bash
+docker compose --profile application --profile monitoring up -d
+```
+
+The local API, Prometheus, Grafana, database, and object-store host ports bind to loopback where configured. Do not treat local Compose credentials or anonymous local Grafana access as production security.
+
 ## Single-host production starting point
 
 A small deployment can retain the same service topology on one protected host, but must add:
@@ -39,3 +47,7 @@ Use independent PostgreSQL databases, ClickHouse databases, buckets, credentials
 5. Deploy API, then one canary worker.
 6. Verify metrics/reconciliation and expand worker count.
 7. Retain the prior image and parser revision for rollback/replay.
+
+## Scheduling
+
+Run `xbrl-warehouse filing discover-latest --lookback-days 3` daily with cron, systemd, Kubernetes CronJob, or the platform scheduler. The command only enqueues idempotent work. Keep workers as supervised services and coordinate the aggregate SEC request rate before adding replicas.

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 import shutil
 import tempfile
 import zipfile
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sec_xbrl_warehouse.config import Settings
@@ -47,45 +48,86 @@ class FilingPackageDownloader:
 
     async def download_package(self, filing: FilingRef) -> FilingPackageManifest:
         """Download all filing files required for offline Arelle processing."""
+        self.settings.ensure_directories()
         index_payload = await self.fetch_index(filing)
+        index_checksum = sha256_bytes(
+            json.dumps(index_payload, sort_keys=True, separators=(",", ":")).encode()
+        )
+        cache_key = f"manifests/sec/filings/{filing.accession}/index-sha256={index_checksum}.json"
+        cached = self._cached_manifest(cache_key, filing)
+        if cached is not None:
+            return cached
         selected = select_package_files(index_payload, filing)
         members: list[PackageMember] = []
-        for name in selected:
-            url = f"{filing.archive_directory_url}/{name}"
-            data = await self.http.get_bytes(url)
-            checksum = sha256_bytes(data)
-            key = filing_object_key(filing, name, checksum)
-            self.object_store.put_bytes(
-                data,
-                key,
-                metadata={"accession": filing.accession, "source-url": url},
-            )
-            members.append(
-                PackageMember(
-                    name=name,
-                    source_url=url,
-                    size_bytes=len(data),
-                    content_type=mimetypes.guess_type(name)[0],
-                    checksum_sha256=checksum,
-                    is_primary_document=name == filing.primary_document,
-                    is_xbrl_entrypoint=(
-                        name == filing.primary_document or name == filing.instance_document
-                    ),
+        with tempfile.TemporaryDirectory(
+            prefix="filing-download-", dir=self.settings.temp_dir
+        ) as root:
+            staging = Path(root)
+            for name in selected:
+                url = f"{filing.archive_directory_url}/{name}"
+                destination = staging / _safe_package_name(name)
+                _, checksum, size, headers = await self.http.download(url, destination)
+                key = filing_object_key(filing, name, checksum)
+                self.object_store.put_file(
+                    destination,
+                    key,
+                    expected_sha256=checksum,
+                    metadata={"accession": filing.accession, "source-url": url},
                 )
-            )
+                members.append(
+                    PackageMember(
+                        name=name,
+                        source_url=url,
+                        size_bytes=size,
+                        content_type=headers.get("content-type") or mimetypes.guess_type(name)[0],
+                        checksum_sha256=checksum,
+                        is_primary_document=name == filing.primary_document,
+                        is_xbrl_entrypoint=(
+                            name == filing.primary_document or name == filing.instance_document
+                        ),
+                    )
+                )
         manifest = FilingPackageManifest(
             filing=filing,
             members=tuple(members),
             acquired_at=datetime.now(UTC),
         )
-        manifest_bytes = manifest.model_dump_json(indent=2).encode("utf-8")
-        manifest_checksum = sha256_bytes(manifest_bytes)
-        manifest_key = f"manifests/sec/filings/{filing.accession}/sha256={manifest_checksum}.json"
-        self.object_store.put_bytes(manifest_bytes, manifest_key)
+        cache_bytes = manifest.model_dump_json(indent=2).encode("utf-8")
+        try:
+            self.object_store.put_bytes(cache_bytes, cache_key)
+        except ArtifactIntegrityError:
+            cached = self._cached_manifest(cache_key, filing)
+            if cached is None:
+                raise
+            return cached
+        manifest_checksum = sha256_bytes(cache_bytes)
         return manifest.model_copy(
             update={
-                "manifest_object_key": manifest_key,
+                "manifest_object_key": cache_key,
                 "manifest_checksum_sha256": manifest_checksum,
+            }
+        )
+
+    def _cached_manifest(self, key: str, filing: FilingRef) -> FilingPackageManifest | None:
+        if not self.object_store.exists(key):
+            return None
+        with tempfile.NamedTemporaryFile(dir=self.settings.temp_dir, suffix=".json") as handle:
+            stored = self.object_store.get_file(key, Path(handle.name))
+            manifest = FilingPackageManifest.model_validate_json(Path(handle.name).read_bytes())
+        if manifest.filing.accession != filing.accession:
+            raise ArtifactIntegrityError(f"Cached manifest belongs to another filing: {key}")
+        if any(
+            member.checksum_sha256 is None
+            or not self.object_store.exists(
+                filing_object_key(filing, member.name, member.checksum_sha256)
+            )
+            for member in manifest.members
+        ):
+            return None
+        return manifest.model_copy(
+            update={
+                "manifest_object_key": key,
+                "manifest_checksum_sha256": stored.checksum_sha256,
             }
         )
 
@@ -106,6 +148,7 @@ class FilingPackageDownloader:
             #    caller's directory does not already hold them.
             member_entries: list[tuple[str, Path]] = []
             for member in manifest.members:
+                _safe_package_name(member.name)
                 local = package_directory / member.name
                 if not local.is_file() and member.checksum_sha256:
                     local = self._materialize_member(manifest.filing, member, staging)
@@ -122,7 +165,7 @@ class FilingPackageDownloader:
             serialized_manifest = manifest.model_dump_json(indent=2).encode("utf-8")
             with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for name, source in sorted(member_entries, key=lambda item: item[0]):
-                    _write_member(zf, name, source.read_bytes())
+                    _write_member(zf, name, source)
                 _write_member(zf, "manifest.json", serialized_manifest)
 
             # 3. Checksum and store under an immutable key.
@@ -143,11 +186,19 @@ class FilingPackageDownloader:
             )
             updated_bytes = updated.model_dump_json(indent=2).encode("utf-8")
             updated_checksum = sha256_bytes(updated_bytes)
+            updated_key = (
+                f"manifests/sec/filings/{manifest.filing.accession}/sha256={updated_checksum}.json"
+            )
             self.object_store.put_bytes(
                 updated_bytes,
-                f"manifests/sec/filings/{manifest.filing.accession}/sha256={updated_checksum}.json",
+                updated_key,
             )
-            return updated
+            return updated.model_copy(
+                update={
+                    "manifest_object_key": updated_key,
+                    "manifest_checksum_sha256": updated_checksum,
+                }
+            )
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -182,33 +233,31 @@ class FilingPackageDownloader:
 def select_package_files(index_payload: dict[str, Any], filing: FilingRef) -> tuple[str, ...]:
     """Conservatively select likely XBRL package files from EDGAR index JSON.
 
-    Includes the primary document plus XML/XSD/XBRL and obvious linkbase/inline
-    HTML files. Reference chasing can enrich the selection later.
+    Includes every HTML document in an inline document set plus XML/XSD/XBRL
+    and filing metadata. Binary presentation assets are not XBRL inputs.
     """
     items = index_payload.get("directory", {}).get("item", [])
     names = [str(item.get("name")) for item in items if item.get("name")]
     selected: set[str] = set()
     for name in names:
+        _safe_package_name(name)
         suffix = Path(name).suffix.lower()
         lowered = name.lower()
         if (
             name == filing.primary_document
             or name == filing.instance_document
             or suffix in {".xsd", ".xml", ".xbrl"}
-            or (
-                suffix in {".htm", ".html"}
-                and ("_htm" in lowered or "inline" in lowered or "ix" in lowered)
-            )
+            or suffix in {".htm", ".html"}
             or lowered in {"filingsummary.xml", "metalink.json"}
         ):
             selected.add(name)
     if filing.primary_document:
-        selected.add(filing.primary_document)
+        selected.add(_safe_package_name(filing.primary_document))
     return tuple(sorted(selected))
 
 
 def filing_object_key(filing: FilingRef, filename: str, checksum: str) -> str:
-    safe_name = Path(filename).name
+    safe_name = _safe_package_name(filename)
     return f"bronze/sec/filings/{filing.cik}/{filing.accession}/sha256={checksum}/{safe_name}"
 
 
@@ -219,11 +268,25 @@ def filing_package_key(filing: FilingRef, archive_checksum: str) -> str:
     )
 
 
-def _write_member(zf: zipfile.ZipFile, name: str, data: bytes) -> None:
+def _write_member(zf: zipfile.ZipFile, name: str, data: bytes | Path) -> None:
     info = zipfile.ZipInfo(name)
     info.date_time = (1980, 1, 1, 0, 0, 0)
     info.compress_type = zipfile.ZIP_DEFLATED
-    zf.writestr(info, data)
+    info.create_system = 3
+    info.external_attr = 0o100644 << 16
+    with zf.open(info, "w") as target:
+        if isinstance(data, Path):
+            with data.open("rb") as source:
+                shutil.copyfileobj(source, target, 1024 * 1024)
+        else:
+            target.write(data)
+
+
+def _safe_package_name(name: str) -> str:
+    path = PurePosixPath(name)
+    if not name or "\\" in name or path.is_absolute() or ".." in path.parts or "." in path.parts:
+        raise ArtifactIntegrityError(f"Unsafe package member path: {name}")
+    return path.as_posix()
 
 
 def _package_archive_name(manifest: FilingPackageManifest) -> str:

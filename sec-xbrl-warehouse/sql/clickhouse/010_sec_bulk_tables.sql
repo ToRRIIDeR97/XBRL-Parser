@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_submissions
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 PARTITION BY toYear(filed)
-ORDER BY adsh
+ORDER BY (adsh, _artifact_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_tags
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_tags
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(_source_revision)
-ORDER BY (tag, version)
+ORDER BY (tag, version, _artifact_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_dimensions
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_dimensions
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(_source_revision)
-ORDER BY dimh
+ORDER BY (dimh, _artifact_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_numeric_facts
@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_numeric_facts
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 PARTITION BY toYear(filed)
-ORDER BY (cik, tag, ddate, qtrs, uom, dimh, adsh, iprx)
+ORDER BY (cik, tag, version, ddate, qtrs, uom, dimh, adsh, iprx, _artifact_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_text_facts
@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_text_facts
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 PARTITION BY toYear(filed)
-ORDER BY (cik, tag, ddate, qtrs, dimh, adsh, iprx)
+ORDER BY (cik, tag, version, ddate, qtrs, dimh, adsh, iprx, _artifact_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_renderings
@@ -179,7 +179,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_renderings
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(_source_revision)
-ORDER BY (adsh, report)
+ORDER BY (adsh, report, _artifact_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_presentations
@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_presentations
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(_source_revision)
-ORDER BY (adsh, report, line)
+ORDER BY (adsh, report, line, _artifact_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_calculations
@@ -221,5 +221,5 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_calculations
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(_source_revision)
-ORDER BY (adsh, grp, arc)
+ORDER BY (adsh, grp, arc, _artifact_id)
 SETTINGS index_granularity = 8192;

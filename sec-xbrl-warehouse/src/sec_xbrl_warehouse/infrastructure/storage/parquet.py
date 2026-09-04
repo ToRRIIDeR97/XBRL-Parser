@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
-from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -11,6 +10,7 @@ import pyarrow.parquet as pq
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.models import StoredObject
 from sec_xbrl_warehouse.domain.ports import ObjectStore
+from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file
 
 
 class ParquetBatchWriter:
@@ -39,7 +39,6 @@ class ParquetBatchWriter:
 
         for index, batch in enumerate(batches):
             table = batch if isinstance(batch, pa.Table) else pa.Table.from_batches([batch])
-            object_key = f"{prefix}/part-{index:06d}-{uuid4().hex}.parquet"
             with tempfile.NamedTemporaryFile(
                 dir=self.settings.temp_dir,
                 prefix="xbrl-parquet-",
@@ -58,7 +57,11 @@ class ParquetBatchWriter:
                     use_dictionary=True,
                     write_statistics=True,
                 )
-                objects.append(self.object_store.put_file(tmp_path, object_key))
+                checksum = sha256_file(tmp_path)
+                object_key = f"{prefix}/part-{index:06d}-sha256={checksum}.parquet"
+                objects.append(
+                    self.object_store.put_file(tmp_path, object_key, expected_sha256=checksum)
+                )
             finally:
                 tmp_path.unlink(missing_ok=True)
         return tuple(objects)

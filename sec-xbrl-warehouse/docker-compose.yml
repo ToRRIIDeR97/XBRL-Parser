@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-xbrl}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xbrl_dev_password}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -26,8 +26,8 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-xbrl_dev_password}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ports:
-      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
-      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+      - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "127.0.0.1:${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
@@ -49,8 +49,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-xbrl_minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-xbrl_minio_dev_password}
     ports:
-      - "${MINIO_API_PORT:-9002}:9000"
-      - "${MINIO_CONSOLE_PORT:-9003}:9001"
+      - "127.0.0.1:${MINIO_API_PORT:-9002}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9003}:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -74,7 +74,7 @@ services:
       "
 
   api:
-    profiles: ["application"]
+    profiles: ["application", "monitoring"]
     build:
       context: .
       dockerfile: docker/app.Dockerfile
@@ -83,11 +83,12 @@ services:
       XBRL_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-xbrl}:${POSTGRES_PASSWORD:-xbrl_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
       XBRL_CLICKHOUSE_HOST: clickhouse
       XBRL_OBJECT_STORE_ENDPOINT: http://minio:9000
+      XBRL_API_HOST: 0.0.0.0
     volumes:
       - app_data:/app/data
     command: ["api", "serve"]
     ports:
-      - "${XBRL_API_PORT:-8080}:8080"
+      - "127.0.0.1:${XBRL_API_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,7 +99,7 @@ services:
     restart: unless-stopped
 
   worker:
-    profiles: ["application"]
+    profiles: ["application", "monitoring"]
     build:
       context: .
       dockerfile: docker/app.Dockerfile
@@ -107,6 +108,7 @@ services:
       XBRL_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-xbrl}:${POSTGRES_PASSWORD:-xbrl_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
       XBRL_CLICKHOUSE_HOST: clickhouse
       XBRL_OBJECT_STORE_ENDPOINT: http://minio:9000
+      XBRL_WORKER_METRICS_HOST: 0.0.0.0
     volumes:
       - app_data:/app/data
     command: ["worker", "run"]
@@ -119,9 +121,42 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:${PROMETHEUS_IMAGE_TAG:-latest}
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - api
+      - worker
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:${GRAFANA_IMAGE_TAG:-latest}
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   clickhouse_data:
   clickhouse_logs:
   minio_data:
   app_data:
+  prometheus_data:
+  grafana_data:

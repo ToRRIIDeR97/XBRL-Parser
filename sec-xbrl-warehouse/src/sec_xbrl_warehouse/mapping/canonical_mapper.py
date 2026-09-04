@@ -15,7 +15,11 @@ from sec_xbrl_warehouse.domain.canonical import CanonicalFact, CanonicalMetric, 
 from sec_xbrl_warehouse.domain.models import FilingRef
 from sec_xbrl_warehouse.domain.xbrl import XbrlFact
 from sec_xbrl_warehouse.normalization.dimensions import dimensions_to_json
-from sec_xbrl_warehouse.normalization.facts import normalize_numeric_value, normalize_unit
+from sec_xbrl_warehouse.normalization.facts import (
+    MONETARY_MEASURES,
+    normalize_numeric_value,
+    normalize_unit,
+)
 
 
 class MappingRepository(Protocol):
@@ -106,6 +110,18 @@ class CanonicalMapper:
         )
         if len(approved) == 1:
             mapping = approved[0]
+            metric = self.metrics[mapping.canonical_metric]
+            incompatibility = _incompatibility(metric, fact)
+            if incompatibility:
+                return MappingDecision(
+                    mapping=None,
+                    candidates=(mapping.canonical_metric,),
+                    explanation=f"Approved concept mapping is incompatible: {incompatibility}.",
+                    evidence={
+                        "mapping_id": str(mapping.id),
+                        "incompatibility": incompatibility,
+                    },
+                )
             return MappingDecision(
                 mapping=mapping,
                 candidates=(mapping.canonical_metric,),
@@ -237,3 +253,26 @@ def _namespace_hint(namespace: str) -> str:
         if value in lowered:
             return value
     return "extension"
+
+
+def _incompatibility(metric: CanonicalMetric, fact: XbrlFact) -> str | None:
+    if metric.period_type != "derived" and fact.period_kind.value != metric.period_type:
+        return f"expected {metric.period_type} period, got {fact.period_kind.value}"
+    unit = normalize_unit(fact) or ""
+    if metric.unit_family == "monetary" and (
+        fact.unit is None
+        or len(fact.unit.numerator_measures) != 1
+        or fact.unit.denominator_measures
+        or not (
+            fact.unit.numerator_measures[0] in MONETARY_MEASURES
+            or "iso4217" in fact.unit.numerator_measures[0].lower()
+        )
+    ):
+        return f"expected one monetary measure, got {unit or 'no unit'}"
+    if metric.unit_family == "shares" and "share" not in unit.lower():
+        return f"expected shares, got {unit or 'no unit'}"
+    if metric.unit_family == "monetary_per_share" and (
+        "/" not in unit or "share" not in unit.lower()
+    ):
+        return f"expected monetary per share, got {unit or 'no unit'}"
+    return None

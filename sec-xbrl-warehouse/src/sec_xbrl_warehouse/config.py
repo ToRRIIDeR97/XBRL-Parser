@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -71,8 +72,10 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = Field(default=2.0, gt=0)
     worker_lock_timeout_seconds: int = Field(default=900, gt=30)
     worker_max_attempts: int = Field(default=5, ge=1)
+    worker_metrics_host: str = "127.0.0.1"
+    worker_metrics_port: int = Field(default=9091, ge=1, le=65535)
 
-    api_host: str = "0.0.0.0"
+    api_host: str = "127.0.0.1"
     api_port: int = Field(default=8080, ge=1, le=65535)
 
     @field_validator("log_level")
@@ -83,6 +86,13 @@ class Settings(BaseSettings):
         if normalized not in allowed:
             raise ValueError(f"log_level must be one of {sorted(allowed)}")
         return normalized
+
+    @field_validator("clickhouse_database")
+    @classmethod
+    def validate_clickhouse_database(cls, value: str) -> str:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) is None:
+            raise ValueError("clickhouse_database must be a plain SQL identifier")
+        return value
 
     @model_validator(mode="after")
     def validate_cross_field_settings(self) -> Settings:

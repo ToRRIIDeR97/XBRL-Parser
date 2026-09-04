@@ -4,11 +4,12 @@ from collections.abc import Sequence
 from datetime import date
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from sec_xbrl_warehouse.config import Settings
-from sec_xbrl_warehouse.domain.canonical import ConceptMapping
+from sec_xbrl_warehouse.domain.canonical import CanonicalMetric, ConceptMapping
 from sec_xbrl_warehouse.domain.models import FilingRef
 from sec_xbrl_warehouse.domain.xbrl import XbrlFact
 from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
@@ -60,6 +61,9 @@ class PostgresMappingRepository:
                         ConceptMappingRow.namespace == namespace,
                         ConceptMappingRow.concept_name == concept_name,
                         ConceptMappingRow.status == "approved",
+                        ConceptMappingRow.cik.is_(None) | (ConceptMappingRow.cik == cik),
+                        ConceptMappingRow.taxonomy_version.is_(None)
+                        | (ConceptMappingRow.taxonomy_version == taxonomy_version),
                         ConceptMappingRow.valid_from.is_(None)
                         | (ConceptMappingRow.valid_from <= filed_date),
                         ConceptMappingRow.valid_to.is_(None)
@@ -70,21 +74,145 @@ class PostgresMappingRepository:
         if not rows:
             return ()
 
-        scored: list[tuple[int, int, int, ConceptMapping]] = []
+        latest: dict[tuple[object, ...], tuple[ConceptMappingRow, str]] = {}
         for row, metric_code in rows:
-            exact_cik = row.cik == cik
-            exact_version = row.taxonomy_version == taxonomy_version
-            score = (2 if exact_cik else 0) + (2 if exact_version else 0)
-            scored.append(
-                (
-                    score,
-                    row.mapping_version,
-                    -row.mapping_version,
-                    _to_concept_mapping(row, metric_code),
+            key = (metric_code, row.cik, row.taxonomy_version)
+            if key not in latest or latest[key][0].mapping_version < row.mapping_version:
+                latest[key] = (row, metric_code)
+        best = max(
+            (row.cik is not None, row.taxonomy_version is not None) for row, _ in latest.values()
+        )
+        return tuple(
+            _to_concept_mapping(row, metric_code)
+            for row, metric_code in latest.values()
+            if (row.cik is not None, row.taxonomy_version is not None) == best
+        )
+
+    async def seed_metrics(self, metrics: Sequence[CanonicalMetric]) -> int:
+        async with self.sessions.begin() as session:
+            for metric in metrics:
+                values = metric.model_dump()
+                statement = pg_insert(CanonicalMetricRow).values(**values)
+                await session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[CanonicalMetricRow.code],
+                        set_={key: value for key, value in values.items() if key != "code"},
+                    )
+                )
+        return len(metrics)
+
+    async def approve_mapping(
+        self,
+        *,
+        metric: str,
+        namespace: str,
+        concept_name: str,
+        explanation: str,
+        created_by: str,
+        taxonomy_version: str | None = None,
+        cik: int | None = None,
+        valid_from: date | None = None,
+        valid_to: date | None = None,
+    ) -> ConceptMapping:
+        if not all(
+            (
+                metric.strip(),
+                namespace.strip(),
+                concept_name.strip(),
+                explanation.strip(),
+                created_by.strip(),
+            )
+        ):
+            raise ValueError("Metric, concept, namespace, rationale, and reviewer are required")
+        if valid_from and valid_to and valid_from > valid_to:
+            raise ValueError("Mapping validity dates are reversed")
+        async with self.sessions.begin() as session:
+            metric_id = await session.scalar(
+                select(CanonicalMetricRow.id).where(CanonicalMetricRow.code == metric)
+            )
+            if metric_id is None:
+                raise ValueError(
+                    f"Unknown canonical metric: {metric}; import metric definitions first"
+                )
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"mapping:{metric}:{namespace}:{concept_name}:{taxonomy_version}:{cik}"},
+            )
+            version = (
+                await session.scalar(
+                    select(func.max(ConceptMappingRow.mapping_version)).where(
+                        ConceptMappingRow.metric_id == metric_id,
+                        ConceptMappingRow.namespace == namespace,
+                        ConceptMappingRow.concept_name == concept_name,
+                        ConceptMappingRow.cik == cik,
+                        ConceptMappingRow.taxonomy_version == taxonomy_version,
+                    )
+                )
+                or 0
+            ) + 1
+            row = ConceptMappingRow(
+                metric_id=metric_id,
+                namespace=namespace,
+                concept_name=concept_name,
+                taxonomy_version=taxonomy_version,
+                cik=cik,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                status="approved",
+                confidence=1,
+                rationale=explanation,
+                mapping_version=version,
+                created_by=created_by,
+            )
+            session.add(row)
+            await session.flush()
+            return _to_concept_mapping(row, metric)
+
+    async def list_reviews(self, limit: int = 100, offset: int = 0) -> list[dict[str, object]]:
+        if not 1 <= limit <= 10000 or offset < 0:
+            raise ValueError("Invalid review pagination")
+        async with self.sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(MappingReviewRow)
+                    .where(MappingReviewRow.state == "open")
+                    .order_by(MappingReviewRow.created_at, MappingReviewRow.id)
+                    .limit(limit)
+                    .offset(offset)
+                )
+            ).all()
+            return [
+                {
+                    "id": str(row.id),
+                    "accession": row.accession,
+                    "fact_id": row.fact_id,
+                    "concept": row.concept_qname,
+                    "candidates": row.candidate_metric_codes,
+                    "evidence": row.evidence,
+                }
+                for row in rows
+            ]
+
+    async def resolve_review(self, review_id: UUID, mapping: ConceptMapping) -> None:
+        async with self.sessions.begin() as session:
+            row = await session.get(MappingReviewRow, review_id, with_for_update=True)
+            if row is None:
+                raise KeyError(review_id)
+            evidence = row.evidence
+            if (
+                evidence.get("namespace") != mapping.namespace
+                or evidence.get("concept_name") != mapping.concept_name
+            ):
+                raise ValueError("The approved mapping does not match the review concept")
+            await session.execute(
+                update(MappingReviewRow)
+                .where(MappingReviewRow.id == review_id)
+                .values(
+                    state="resolved",
+                    resolution={"mapping_id": str(mapping.id), "version": mapping.version},
+                    resolved_at=func.now(),
                 )
             )
-        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return tuple(item[3] for item in scored)
 
     async def create_review(
         self,
@@ -96,17 +224,36 @@ class PostgresMappingRepository:
     ) -> UUID:
         """Create an open review candidate for an unmapped fact."""
         async with self.sessions.begin() as session:
-            row = MappingReviewRow(
-                accession=filing.accession,
-                fact_id=fact.fact_id,
-                concept_qname=fact.concept_qname,
-                candidate_metric_codes=list(candidates),
-                evidence=dict(evidence),
-                state="open",
+            statement = (
+                pg_insert(MappingReviewRow)
+                .values(
+                    accession=filing.accession,
+                    fact_id=fact.fact_id,
+                    concept_qname=fact.concept_qname,
+                    candidate_metric_codes=list(candidates),
+                    evidence={
+                        **evidence,
+                        "namespace": fact.concept_namespace,
+                        "concept_name": fact.concept_name,
+                        "taxonomy_version": fact.taxonomy_version,
+                        "cik": filing.cik,
+                    },
+                    state="open",
+                )
+                .on_conflict_do_nothing(constraint="uq_mapping_review_fact")
+                .returning(MappingReviewRow.id)
             )
-            session.add(row)
-            await session.flush()
-            return row.id
+            review_id = await session.scalar(statement)
+            if review_id is None:
+                review_id = await session.scalar(
+                    select(MappingReviewRow.id).where(
+                        MappingReviewRow.accession == filing.accession,
+                        MappingReviewRow.fact_id == fact.fact_id,
+                    )
+                )
+            if review_id is None:
+                raise RuntimeError("PostgreSQL did not return a review ID")
+            return review_id
 
 
 def _to_concept_mapping(row: ConceptMappingRow, metric_code: str) -> ConceptMapping:
@@ -115,8 +262,13 @@ def _to_concept_mapping(row: ConceptMappingRow, metric_code: str) -> ConceptMapp
         namespace=row.namespace,
         concept_name=row.concept_name,
         taxonomy_version=row.taxonomy_version,
+        cik=row.cik,
         canonical_metric=metric_code,
-        mapping_type="exact" if row.cik is not None else "namespace",
+        mapping_type="filing_specific"
+        if row.cik is not None
+        else "exact"
+        if row.taxonomy_version
+        else "namespace",
         confidence=float(row.confidence),
         approved=row.status == "approved",
         valid_from=row.valid_from,

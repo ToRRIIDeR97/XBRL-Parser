@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+defaults:
+  run:
+    working-directory: sec-xbrl-warehouse
+
 jobs:
   unit:
     runs-on: ubuntu-latest
@@ -13,6 +17,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: sec-xbrl-warehouse/pyproject.toml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
       - run: python -m ruff check .
@@ -50,15 +55,13 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: sec-xbrl-warehouse/pyproject.toml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: alembic upgrade head
-        env:
-          XBRL_ENV: test
-      - run: xbrl-warehouse db init-clickhouse
-        env:
-          XBRL_ENV: test
+      - run: cp .env.example .env
+      - run: docker compose up -d --wait minio
       - run: python -m pytest -m integration
         env:
           XBRL_ENV: test
           RUN_XBRL_INTEGRATION: "1"
+          XBRL_OBJECT_STORE_ENDPOINT: http://localhost:9002

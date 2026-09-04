@@ -50,6 +50,8 @@ class SourceArtifactRef(DomainModel):
     checksum_sha256: str | None = None
     revision: int = 1
     state: ArtifactState = ArtifactState.DISCOVERED
+    created_at: datetime | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class FilingRef(DomainModel):

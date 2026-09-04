@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from sec_xbrl_warehouse.domain.models import FilingRef
+from sec_xbrl_warehouse.domain.ports import ObjectStore
 from sec_xbrl_warehouse.exceptions import SecAccessError
 from sec_xbrl_warehouse.infrastructure.http.sec_client import (
     SecHttpClient,
     build_archive_directory_url,
 )
+from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes
 
 
 class SecSubmissionsDiscovery:
@@ -46,12 +49,7 @@ class SecSubmissionsDiscovery:
         filed_to: date | None = None,
         include_older_files: bool = True,
     ) -> tuple[FilingRef, ...]:
-        """Fetch and filter the current and archived submissions blocks for one CIK.
-
-        The baseline is functional. Production hardening must use each archived-file
-        descriptor's date range to avoid unnecessary requests and must surface
-        conflicting accession metadata instead of silently replacing it.
-        """
+        """Fetch and filter current and date-relevant archived submissions for one CIK."""
         url = f"{self.data_api_base}/submissions/CIK{cik:010d}.json"
         payload = await self.http.get_json(url)
         company_name = str(payload.get("name") or f"CIK {cik}")
@@ -111,10 +109,12 @@ class SecDailyIndexDiscovery:
         http: SecHttpClient,
         index_base: str = "https://www.sec.gov/Archives/edgar/daily-index",
         archive_base: str = "https://www.sec.gov/Archives/edgar/data",
+        object_store: ObjectStore | None = None,
     ) -> None:
         self.http = http
         self.index_base = index_base.rstrip("/")
         self.archive_base = archive_base.rstrip("/")
+        self.object_store = object_store
 
     async def discover_date(self, filed_date: date, forms: Sequence[str]) -> tuple[FilingRef, ...]:
         """Discover one date from a checksum-retained EDGAR daily index."""
@@ -123,6 +123,15 @@ class SecDailyIndexDiscovery:
         # SEC publishes quarterly directories; the master file lives under QTR{quarter}.
         url = f"{self.index_base}/{year}/QTR{quarter}/master.{filed_date.strftime('%Y%m%d')}.idx"
         text = await self.http.get_text(url)
+        if self.object_store is not None:
+            data = text.encode("utf-8")
+            checksum = sha256_bytes(data)
+            await asyncio.to_thread(
+                self.object_store.put_bytes,
+                data,
+                f"bronze/sec/daily-index/{filed_date.isoformat()}/sha256={checksum}/master.idx",
+                metadata={"source-url": url},
+            )
         return self._parse_master(text, filed_date=filed_date, forms=set(forms))
 
     async def discover_range(

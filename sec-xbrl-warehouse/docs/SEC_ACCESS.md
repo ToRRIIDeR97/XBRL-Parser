@@ -14,7 +14,7 @@ Do not ship the placeholder from `.env.example` into a running downloader.
 
 ## Rate limiting
 
-The scaffold defaults to 8 requests per second and a concurrency of 4, leaving margin below the SEC's published maximum access rate. The process-wide limiter must be shared by all SEC clients inside a worker.
+The application defaults to 8 requests per second and a concurrency of 4, leaving margin below the configured ceiling. The process-wide limiter is shared by all SEC clients inside a worker; replicas require an externally coordinated aggregate limit.
 
 ## Retry policy
 

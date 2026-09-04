@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import tempfile
+import traceback
 from pathlib import Path
+from typing import Any
+from uuid import UUID
 
-from sec_xbrl_warehouse.domain.models import FilingPackageManifest, FilingRef
+from sec_xbrl_warehouse.config import Settings
+from sec_xbrl_warehouse.config_files import load_yaml
+from sec_xbrl_warehouse.domain.enums import Severity
+from sec_xbrl_warehouse.domain.models import FilingPackageManifest, FilingRef, ValidationIssue
 from sec_xbrl_warehouse.domain.ports import (
     BatchWriter,
     ControlRepository,
     FilingPackageStore,
+    ObjectStore,
     Warehouse,
     XbrlExtractor,
 )
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
+from sec_xbrl_warehouse.exceptions import XbrlExtractionError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     concepts_table,
     contexts_table,
@@ -18,13 +29,20 @@ from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     footnotes_table,
     relationships_table,
 )
-from sec_xbrl_warehouse.logging import get_logger
-
-logger = get_logger(__name__)
+from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes
+from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
+from sec_xbrl_warehouse.observability.metrics import (
+    ROWS_PARSED,
+    ROWS_WRITTEN,
+    STAGE_LATENCY,
+    VALIDATION_ISSUES,
+)
+from sec_xbrl_warehouse.validation.filing_reconciliation import reconcile_filing_rows
+from sec_xbrl_warehouse.validation.xbrl_validation import reject_configured_issues
 
 
 class IncrementalFilingIngestor:
-    """End-to-end stage coordinator for one filing accession."""
+    """Restartable, silver-first ingestion of an immutable extraction revision."""
 
     def __init__(
         self,
@@ -33,134 +51,236 @@ class IncrementalFilingIngestor:
         extractor: XbrlExtractor,
         parquet_writer: BatchWriter,
         warehouse: Warehouse,
+        *,
+        settings: Settings | None = None,
+        object_store: ObjectStore | None = None,
+        mapper: CanonicalMapper | None = None,
     ) -> None:
         self.control = control
         self.package_store = package_store
         self.extractor = extractor
         self.parquet_writer = parquet_writer
         self.warehouse = warehouse
+        self.settings = settings or Settings()
+        self.object_store = object_store
+        self.mapper = mapper
 
-    async def ingest(self, filing: FilingRef, *, extraction_revision: int = 1) -> dict[str, object]:
-        """Download, extract, archive, load, and reconcile a filing.
-
-        Stage order: filing upsert -> package acquire -> materialize -> extract ->
-        silver -> ClickHouse -> validation summary -> reconcile -> complete.
-        """
+    async def ingest(
+        self, filing: FilingRef, *, extraction_revision: int = 1, job_id: UUID | None = None
+    ) -> dict[str, Any]:
+        if extraction_revision < 1:
+            raise ValueError("Extraction revisions start at 1")
+        if job_id and self.object_store is None:
+            raise ValueError("Checkpointed extraction requires object storage")
+        completed = await self._checkpoint(job_id, "complete")
+        if completed is not None:
+            return completed
+        self.settings.ensure_directories()
         await self.control.upsert_filing(filing)
-
-        manifest: FilingPackageManifest = await self.package_store.download_package(filing)
-        manifest = self._archive(manifest, filing)
-        entrypoint = self._materialize(manifest, filing)
-
-        bundle = self.extractor.extract(entrypoint, filing, extraction_revision=extraction_revision)
-        counts = await self._persist_bundle(bundle)
-        reconciliation = await self._reconcile_with_sec_bulk(filing.accession)
-
-        return {
-            "accession": filing.accession,
-            "extraction_revision": extraction_revision,
-            "entity_counts": counts,
-            "validation_issue_count": len(bundle.validation_issues),
-            "reconciliation": reconciliation,
-            "status": "complete",
-        }
-
-    def _archive(self, manifest: FilingPackageManifest, filing: FilingRef) -> FilingPackageManifest:
-        """Archive the package if the store supports it; otherwise return as-is."""
-        archive = getattr(self.package_store, "archive_package", None)
-        if callable(archive) and manifest is not None:
-            package_dir = getattr(manifest, "local_directory", None)
-            if package_dir is not None:
-                result = archive(manifest, Path(package_dir))
-                return (
-                    FilingPackageManifest.model_validate(result.model_dump())
-                    if hasattr(result, "model_dump")
-                    else manifest
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="filing-", dir=self.settings.temp_dir
+            ) as directory:
+                staging = Path(directory)
+                saved = await self._checkpoint(job_id, "package")
+                manifest = (
+                    FilingPackageManifest.model_validate(saved)
+                    if saved
+                    else await self.package_store.download_package(filing)
                 )
-        return manifest
+                if saved is None:
+                    await self._save(job_id, "package", manifest.model_dump(mode="json"))
+                extracted = await self._checkpoint(job_id, "extract")
+                if extracted and self.object_store is not None:
+                    path = staging / "extraction.json"
+                    stored = await asyncio.to_thread(
+                        self.object_store.get_file, extracted["object_key"], path
+                    )
+                    if stored.checksum_sha256 != extracted["sha256"]:
+                        raise XbrlExtractionError("Saved extraction checksum mismatch")
+                    bundle = XbrlExtractionBundle.model_validate_json(
+                        await asyncio.to_thread(path.read_bytes)
+                    )
+                else:
+                    entrypoint = await asyncio.to_thread(
+                        self.package_store.materialize_package, manifest, staging
+                    )
+                    if not manifest.package_object_key:
+                        manifest = await asyncio.to_thread(
+                            self.package_store.archive_package, manifest, staging
+                        )
+                    await self.control.update_filing_package(manifest)
+                    await self._save(job_id, "package", manifest.model_dump(mode="json"))
+                    with STAGE_LATENCY.labels(pipeline="filing", stage="extract").time():
+                        bundle = await asyncio.to_thread(
+                            self.extractor.extract,
+                            entrypoint,
+                            filing,
+                            extraction_revision=extraction_revision,
+                        )
+                    if (
+                        bundle.extraction_revision != extraction_revision
+                        or bundle.filing.accession != filing.accession
+                    ):
+                        raise XbrlExtractionError("Extractor returned a different filing/revision")
+                    for entity, count in {
+                        "contexts": len(bundle.contexts),
+                        "concepts": len(bundle.concepts),
+                        "facts": len(bundle.facts),
+                        "relationships": len(bundle.relationships),
+                        "footnotes": len(bundle.footnotes),
+                    }.items():
+                        ROWS_PARSED.labels(source="arelle", table=entity).inc(count)
+                    if self.object_store is not None:
+                        data = bundle.model_dump_json().encode("utf-8")
+                        checksum = sha256_bytes(data)
+                        key = f"silver/xbrl/extractions/accession={filing.accession}/revision={extraction_revision}/sha256={checksum}.json"
+                        await asyncio.to_thread(self.object_store.put_bytes, data, key)
+                        await self._save(job_id, "extract", {"object_key": key, "sha256": checksum})
 
-    def _materialize(self, manifest: object, filing: FilingRef) -> Path:
-        """Materialize the package locally and return the extraction entrypoint."""
-        materialize = getattr(self.package_store, "materialize_package", None)
-        destination = Path("data/tmp/packages") / filing.accession
-        destination.mkdir(parents=True, exist_ok=True)
-        if callable(materialize) and manifest is not None:
-            result = materialize(manifest, destination)
-            return Path(result)
-        # Fallback: the package store has already placed files locally.
-        for candidate in sorted(destination.iterdir()) if destination.exists() else []:
-            if candidate.suffix in {".xml", ".htm", ".html"}:
-                return candidate
-        raise FileNotFoundError(f"No extractable entrypoint for {filing.accession}")
+                if await self._checkpoint(job_id, "validation") is None:
+                    await self.control.record_validation_issues(bundle.validation_issues)
+                    for issue in bundle.validation_issues:
+                        VALIDATION_ISSUES.labels(
+                            source=issue.source, severity=issue.severity.value, code=issue.code
+                        ).inc()
+                    await self._save(
+                        job_id, "validation", {"issues": len(bundle.validation_issues)}
+                    )
+                policy_path = self.settings.config_dir / "validation.yml"
+                policy = load_yaml(policy_path).get("xbrl", {}) if policy_path.is_file() else {}
+                rejected = reject_configured_issues(
+                    bundle.validation_issues,
+                    tuple(Severity(value) for value in policy.get("reject_severities", ["fatal"])),
+                )
+                if rejected:
+                    raise XbrlExtractionError(
+                        f"Rejected validation issues: {sorted({item.code for item in rejected})}"
+                    )
+                if not bundle.facts:
+                    raise XbrlExtractionError(
+                        "Arelle extracted no facts; the filing was not published"
+                    )
 
-    async def _persist_bundle(self, bundle: object) -> dict[str, int]:
-        """Write each entity to silver Parquet then ClickHouse with checkpoints."""
-        assert isinstance(bundle, XbrlExtractionBundle)
-        tables = {
-            "contexts": contexts_table(bundle),
-            "concepts": concepts_table(bundle),
-            "facts": facts_table(bundle),
-            "relationships": relationships_table(bundle),
-            "footnotes": footnotes_table(bundle),
-        }
-        # Silver first: one immutable Parquet dataset per entity.
-        for entity, table in tables.items():
-            prefix = (
-                f"silver/xbrl/{entity}/filed_year={bundle.filing.filed_date.year}"
-                f"/accession={bundle.filing.accession}/revision={bundle.extraction_revision}"
+                counts = await self._persist_bundle(bundle, job_id)
+                if self.mapper is not None and await self._checkpoint(job_id, "canonical") is None:
+                    canonical = await self.mapper.map_batch(
+                        bundle.facts, filing, extraction_revision=extraction_revision
+                    )
+                    await asyncio.to_thread(self.warehouse.insert_canonical_facts, canonical)
+                    await self._save(job_id, "canonical", {"mapped": len(canonical)})
+                await asyncio.to_thread(self.warehouse.publish_xbrl_bundle, bundle, counts)
+                await self.control.update_filing_package(manifest, extraction_revision)
+                reconciliation = await self.reconcile(filing.accession)
+                result = {
+                    "accession": filing.accession,
+                    "extraction_revision": extraction_revision,
+                    "entity_counts": counts,
+                    "validation_issue_count": len(bundle.validation_issues),
+                    "reconciliation": reconciliation,
+                    "status": "complete",
+                }
+                await self._save(job_id, "complete", result)
+                return result
+        except Exception as exc:
+            details = {
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+                "extraction_revision": extraction_revision,
+            }
+            if self.object_store is not None:
+                payload = json.dumps(details, sort_keys=True).encode()
+                key = f"quarantine/filing/{filing.accession}/sha256={sha256_bytes(payload)}.json"
+                await asyncio.to_thread(self.object_store.put_bytes, payload, key)
+                details = {"diagnostic_object_key": key, "extraction_revision": extraction_revision}
+            engine_issues = getattr(exc, "validation_issues", ())
+            await self.control.record_validation_issues(
+                (
+                    *engine_issues,
+                    ValidationIssue(
+                        source="filing",
+                        code=type(exc).__name__,
+                        severity=Severity.ERROR,
+                        accession=filing.accession,
+                        message=str(exc)[:16000],
+                        details=details,
+                    ),
+                )
             )
-            self.parquet_writer.write_batches(
-                [table],
+            raise
+
+    async def _checkpoint(self, job_id: UUID | None, stage: str) -> dict[str, Any] | None:
+        return await self.control.get_checkpoint(job_id, stage) if job_id else None
+
+    async def _save(self, job_id: UUID | None, stage: str, payload: dict[str, Any]) -> None:
+        if job_id:
+            await self.control.save_checkpoint(job_id, stage, payload)
+
+    async def _persist_bundle(
+        self, bundle: XbrlExtractionBundle, job_id: UUID | None = None
+    ) -> dict[str, int]:
+        for entity, build in {
+            "contexts": contexts_table,
+            "concepts": concepts_table,
+            "facts": facts_table,
+            "relationships": relationships_table,
+            "footnotes": footnotes_table,
+        }.items():
+            if await self._checkpoint(job_id, f"silver:{entity}") is not None:
+                continue
+            table = await asyncio.to_thread(build, bundle)
+            prefix = f"silver/xbrl/{entity}/filed_year={bundle.filing.filed_date.year}/accession={bundle.filing.accession}/revision={bundle.extraction_revision}"
+            objects = await asyncio.to_thread(
+                self.parquet_writer.write_batches,
+                table.to_batches(max_chunksize=self.settings.arrow_batch_rows),
                 destination_prefix=prefix,
-                partition_values={"filed_year": str(bundle.filing.filed_date.year)},
+                partition_values={},
             )
-        # Gold: one atomic bundle insert, returning per-entity row counts.
-        counts = self.warehouse.insert_xbrl_bundle(bundle)
-        return {entity: counts.get(entity, 0) for entity in tables}
-
-    async def _reconcile_with_sec_bulk(self, accession: str) -> dict[str, object]:
-        """Compare Arelle facts with any later SEC bulk representation.
-
-        When the SEC bulk tables already contain this accession, report missing,
-        extra, and differing facts without overwriting either source. A missing
-        bulk representation is not an error: FSNDS publishes with a lag.
-        """
-
-        try:
-            bulk_rows = self.warehouse.query(
-                """
-                SELECT adsh, tag, version, ddate, qtrs, uom, dimh, value_raw
-                FROM sec_numeric_facts
-                WHERE adsh = %(accession)s
-                LIMIT 200000
-                """,
-                {"accession": accession},
+            ROWS_WRITTEN.labels(storage="parquet", table=entity).inc(table.num_rows)
+            await self._save(
+                job_id,
+                f"silver:{entity}",
+                {"rows": table.num_rows, "objects": [item.key for item in objects]},
             )
-        except Exception as exc:
-            return {"available": False, "reason": str(exc)}
-        if not bulk_rows:
+        saved = await self._checkpoint(job_id, "gold")
+        if saved is not None:
+            return {key: int(value) for key, value in saved.items()}
+        # Inserts are replay-safe; publication is a separate, last-written marker.
+        counts = await asyncio.to_thread(self.warehouse.insert_xbrl_bundle, bundle)
+        await self._save(job_id, "gold", counts)
+        return counts
+
+    async def reconcile(self, accession: str) -> dict[str, Any]:
+        params = {"accession": accession}
+        bulk_numeric = await asyncio.to_thread(
+            self.warehouse.query,
+            """
+            SELECT n.*, d.segments, d.segt FROM v_sec_numeric_latest AS n
+            LEFT JOIN sec_dimensions FINAL AS d ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
+            WHERE n.adsh = %(accession)s
+            """,
+            params,
+        )
+        bulk_text = await asyncio.to_thread(
+            self.warehouse.query,
+            """
+            SELECT n.*, d.segments, d.segt FROM v_sec_text_latest AS n
+            LEFT JOIN sec_dimensions FINAL AS d ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
+            WHERE n.adsh = %(accession)s
+            """,
+            params,
+        )
+        if not bulk_numeric and not bulk_text:
             return {"available": False, "reason": "no bulk representation yet"}
-        # Extract the current Arelle facts for this accession from ClickHouse.
-        try:
-            arelle_rows = self.warehouse.query(
-                """
-                SELECT concept_namespace, concept_name, taxonomy_version,
-                       period_kind, period_start, period_end, period_instant,
-                       unit_numerator_json, dimension_hash, language, raw_value
-                FROM xbrl_facts
-                WHERE accession = %(accession)s
-                LIMIT 500000
-                """,
-                {"accession": accession},
-            )
-        except Exception as exc:
-            return {"available": True, "comparison": "unavailable", "reason": str(exc)}
-        bulk_keys = {tuple(row.values()) for row in bulk_rows}
-        arelle_keys = {tuple(row.values()) for row in arelle_rows}
-        return {
-            "available": True,
-            "bulk_count": len(bulk_rows),
-            "arelle_count": len(arelle_rows),
-            "missing": sorted(bulk_keys - arelle_keys)[:10],
-            "extra": sorted(arelle_keys - bulk_keys)[:10],
-        }
+        raw = await asyncio.to_thread(
+            self.warehouse.query,
+            "SELECT * FROM v_xbrl_facts_latest WHERE accession = %(accession)s",
+            params,
+        )
+        result = reconcile_filing_rows(accession, bulk_numeric, bulk_text, raw)
+        if self.object_store is not None:
+            data = json.dumps(result, sort_keys=True, default=str).encode()
+            key = f"reconciliation/filings/{accession}/sha256={sha256_bytes(data)}.json"
+            await asyncio.to_thread(self.object_store.put_bytes, data, key)
+            result["report_object_key"] = key
+        return result

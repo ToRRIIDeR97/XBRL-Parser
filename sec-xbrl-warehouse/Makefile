@@ -2,13 +2,15 @@ SHELL := /bin/bash
 PYTHON ?= python3.12
 VENV ?= .venv
 BIN := $(VENV)/bin
+COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
-.PHONY: help install up down logs migrate init-clickhouse doctor test integration lint format typecheck scan-stubs api worker clean
+.PHONY: help install up monitoring down logs migrate init-clickhouse doctor test integration lint format typecheck scan-stubs api worker clean
 
 help:
 	@echo "Targets:"
 	@echo "  install          Create venv and install runtime + dev dependencies"
 	@echo "  up               Start PostgreSQL, ClickHouse and MinIO"
+	@echo "  monitoring       Start the application, Prometheus and Grafana"
 	@echo "  down             Stop local infrastructure"
 	@echo "  migrate          Apply PostgreSQL Alembic migrations"
 	@echo "  init-clickhouse  Apply ClickHouse DDL"
@@ -26,13 +28,16 @@ install:
 	$(BIN)/python -m pip install -e ".[dev]"
 
 up:
-	docker compose up -d postgres clickhouse minio minio-init
+	$(COMPOSE) up -d postgres clickhouse minio minio-init
+
+monitoring:
+	$(COMPOSE) --profile application --profile monitoring up -d
 
 down:
-	docker compose down
+	$(COMPOSE) down
 
 logs:
-	docker compose logs -f --tail=200
+	$(COMPOSE) logs -f --tail=200
 
 migrate:
 	$(BIN)/alembic upgrade head
@@ -47,7 +52,7 @@ test:
 	$(BIN)/pytest -m "not integration"
 
 integration:
-	$(BIN)/pytest -m integration
+	RUN_XBRL_INTEGRATION=1 $(BIN)/pytest -m integration
 
 lint:
 	$(BIN)/ruff check .

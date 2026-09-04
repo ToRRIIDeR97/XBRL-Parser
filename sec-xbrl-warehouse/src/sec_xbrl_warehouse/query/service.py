@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.ports import Warehouse
 
 
@@ -22,6 +25,8 @@ class FactQuery(BaseModel):
 
     @model_validator(mode="after")
     def require_scan_bound(self) -> FactQuery:
+        if self.filed_from and self.filed_to and self.filed_from > self.filed_to:
+            raise ValueError("filed_from must not exceed filed_to")
         if not any(
             (
                 self.cik is not None,
@@ -40,8 +45,9 @@ class FactQuery(BaseModel):
 class QueryService:
     """Safe, bounded ClickHouse query façade for API and CLI consumers."""
 
-    def __init__(self, warehouse: Warehouse) -> None:
+    def __init__(self, warehouse: Warehouse, metrics_path: Path | None = None) -> None:
         self.warehouse = warehouse
+        self.derived = _derived_metrics(metrics_path) if metrics_path else {}
 
     def raw_facts(self, query: FactQuery) -> list[dict[str, Any]]:
         clauses = ["1 = 1"]
@@ -64,12 +70,17 @@ class QueryService:
         sql = f"""
             SELECT
                 fact_id, accession, cik, company_name, form, filed_date,
+                fiscal_year, fiscal_period,
                 concept_namespace, concept_name, concept_qname,
-                raw_value, value_decimal, value_text, is_nil,
+                value_kind, raw_value, value_decimal, value_text, value_boolean, value_date, is_nil,
+                context_id, context_hash, unit_id, unit_numerator_json, unit_denominator_json,
+                taxonomy_version, decimals, precision, language, source_fact_id, footnote_ids,
                 period_kind, period_start, period_end, period_instant,
-                dimensions_json, dimension_hash, source_document,
+                entity_scheme, entity_identifier, dimensions_json, dimension_hash,
+                tuple_path, duplicate_ordinal, duplicate_set_hash,
+                source_document, source_attributes_json,
                 extraction_revision
-            FROM xbrl_facts
+            FROM v_xbrl_facts_latest
             WHERE {" AND ".join(clauses)}
             ORDER BY filed_date DESC, accession DESC, concept_name, fact_id
             LIMIT %(limit)s OFFSET %(offset)s
@@ -84,23 +95,101 @@ class QueryService:
         filed_from: date | None = None,
         filed_to: date | None = None,
         limit: int = 5_000,
+        offset: int = 0,
+        include_dimensions: bool = False,
     ) -> list[dict[str, Any]]:
+        if metric in self.derived:
+            return self._derived_series(
+                cik=cik,
+                metric=metric,
+                filed_from=filed_from,
+                filed_to=filed_to,
+                limit=limit,
+                offset=offset,
+                include_dimensions=include_dimensions,
+            )
         clauses = ["cik = %(cik)s", "canonical_metric = %(metric)s"]
-        params: dict[str, Any] = {"cik": cik, "metric": metric, "limit": limit}
+        FactQuery(cik=cik, filed_from=filed_from, filed_to=filed_to, limit=limit, offset=offset)
+        params: dict[str, Any] = {"cik": cik, "metric": metric, "limit": limit, "offset": offset}
         if filed_from:
             clauses.append("filed_date >= %(filed_from)s")
             params["filed_from"] = filed_from
         if filed_to:
             clauses.append("filed_date <= %(filed_to)s")
             params["filed_to"] = filed_to
+        if not include_dimensions:
+            clauses.append("dimensions_json = '[]'")
         return self.warehouse.query(
             f"""
             SELECT *
-            FROM canonical_facts
+            FROM v_canonical_facts_latest
             WHERE {" AND ".join(clauses)}
             ORDER BY coalesce(period_end, period_instant), filed_date, accession
-            LIMIT %(limit)s
+            LIMIT %(limit)s OFFSET %(offset)s
             """,
+            params,
+        )
+
+    def _derived_series(
+        self,
+        *,
+        cik: int,
+        metric: str,
+        filed_from: date | None,
+        filed_to: date | None,
+        limit: int,
+        offset: int,
+        include_dimensions: bool,
+    ) -> list[dict[str, Any]]:
+        left, operator, right, formula = self.derived[metric]
+        FactQuery(cik=cik, filed_from=filed_from, filed_to=filed_to, limit=limit, offset=offset)
+        clauses = [
+            "source.cik = %(cik)s",
+            "source.canonical_metric IN (%(left)s, %(right)s)",
+        ]
+        params: dict[str, Any] = {
+            "cik": cik,
+            "left": left,
+            "right": right,
+            "metric": metric,
+            "formula": formula,
+            "limit": limit,
+            "offset": offset,
+        }
+        if filed_from:
+            clauses.append("source.filed_date >= %(filed_from)s")
+            params["filed_from"] = filed_from
+        if filed_to:
+            clauses.append("source.filed_date <= %(filed_to)s")
+            params["filed_to"] = filed_to
+        if not include_dimensions:
+            clauses.append("source.dimensions_json = '[]'")
+        return self.warehouse.query(
+            f"""
+            SELECT accession, cik, any(filed_date) AS filed_date, any(form) AS form,
+                   %(metric)s AS canonical_metric,
+                   maxIf(normalized_value_decimal, source.canonical_metric = %(left)s)
+                       {operator} maxIf(normalized_value_decimal, source.canonical_metric = %(right)s)
+                       AS normalized_value_decimal,
+                   any(normalized_unit) AS normalized_unit,
+                   any(period_kind) AS period_kind, period_start, period_end, period_instant,
+                   dimensions_json,
+                   arraySort(groupArray(raw_fact_id)) AS raw_fact_ids,
+                   arraySort(groupArray(tuple(toString(mapping_id), mapping_version))) AS mapping_lineage,
+                   %(formula)s AS formula,
+                   min(mapping_confidence) AS mapping_confidence,
+                   max(extraction_revision) AS extraction_revision
+            FROM v_canonical_facts_latest AS source
+            WHERE {" AND ".join(clauses)}
+              AND normalized_value_decimal IS NOT NULL
+            GROUP BY accession, cik, period_start, period_end, period_instant,
+                     dimensions_json, normalized_unit
+            HAVING countIf(source.canonical_metric = %(left)s) = 1
+               AND countIf(source.canonical_metric = %(right)s) = 1
+               AND countDistinct(normalized_unit) = 1
+            ORDER BY coalesce(period_end, period_instant), filed_date, accession
+            LIMIT %(limit)s OFFSET %(offset)s
+        """,
             params,
         )
 
@@ -117,10 +206,24 @@ class QueryService:
                 uniqExact(concept_qname) AS concept_count,
                 uniqExact(context_hash) AS context_count,
                 max(extraction_revision) AS latest_extraction_revision
-            FROM xbrl_facts
+            FROM v_xbrl_facts_latest
             WHERE accession = %(accession)s
             GROUP BY accession
             """,
             {"accession": accession},
         )
         return rows[0] if rows else None
+
+
+def _derived_metrics(path: Path) -> dict[str, tuple[str, str, str, str]]:
+    metrics = load_yaml(path).get("metrics", [])
+    result: dict[str, tuple[str, str, str, str]] = {}
+    for item in metrics:
+        formula = item.get("formula")
+        if not formula:
+            continue
+        match = re.fullmatch(r"([a-z][a-z0-9_]*)\s*([+-])\s*([a-z][a-z0-9_]*)", formula)
+        if match is None:
+            raise ValueError(f"Unsupported derived metric formula: {formula}")
+        result[str(item["code"])] = (*match.groups(), formula)
+    return result

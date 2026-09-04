@@ -1,6 +1,6 @@
 # Coding Agent Contract
 
-Read this file, `HANDOFF.md`, `FUNCTION_STUBS.md`, `docs/ARCHITECTURE.md`, and `docs/DATA_MODEL.md` before changing code.
+Read this file, `HANDOFF.md`, `docs/ARCHITECTURE.md`, and `docs/DATA_MODEL.md` before changing code.
 
 ## Mission
 
@@ -21,8 +21,8 @@ Complete a reliable SEC XBRL warehouse without replacing standards-aware XBRL pr
 
 ## How to work
 
-- Search for `IMPLEMENT_ME` and complete stubs in the order listed in `HANDOFF.md`.
-- Add or update tests before removing an `IMPLEMENT_ME` marker.
+- Read the current acceptance boundary in `HANDOFF.md` before changing an ingestion stage.
+- Add or update a focused replay/failure test with every non-trivial ingestion change.
 - Keep external-library calls behind adapters so Arelle, EdgarTools, ClickHouse, or object storage can be upgraded independently.
 - Prefer explicit typed records and Arrow schemas over free-form dictionaries at ingestion boundaries.
 - Log accession, artifact ID, table, batch number, row count, byte count, and elapsed time on every stage transition.

@@ -3,6 +3,7 @@
         xmlns:xbrli="http://www.xbrl.org/2003/instance"
         xmlns:link="http://www.xbrl.org/2003/linkbase"
         xmlns:xlink="http://www.w3.org/1999/xlink"
+        xmlns:xbrldt="http://xbrl.org/2005/xbrldt"
         xmlns:ex="http://example.com/2026"
         targetNamespace="http://example.com/2026"
         elementFormDefault="qualified">
@@ -11,10 +12,31 @@
       <link:linkbaseRef xlink:type="simple" xlink:href="simple-label.xml"
         xlink:role="http://www.xbrl.org/2003/role/labelLinkbaseRef"
         xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
+      <link:linkbaseRef xlink:type="simple" xlink:href="simple-presentation.xml"
+        xlink:role="http://www.xbrl.org/2003/role/presentationLinkbaseRef"
+        xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
+      <link:linkbaseRef xlink:type="simple" xlink:href="simple-calculation.xml"
+        xlink:role="http://www.xbrl.org/2003/role/calculationLinkbaseRef"
+        xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
     </appinfo>
   </annotation>
   <import namespace="http://www.xbrl.org/2003/instance"
           schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <import namespace="http://xbrl.org/2005/xbrldt"
+          schemaLocation="http://www.xbrl.org/2005/xbrldt-2005.xsd"/>
+  <element name="StatementOfIncomeAbstract" id="ex_StatementOfIncomeAbstract"
+           type="xbrli:stringItemType" substitutionGroup="xbrli:item"
+           xbrli:periodType="duration" abstract="true" nillable="true"/>
   <element name="Revenue" id="ex_Revenue" type="xbrli:monetaryItemType"
            substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="Cost" id="ex_Cost" type="xbrli:monetaryItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="Profit" id="ex_Profit" type="xbrli:monetaryItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="RegionAxis" id="ex_RegionAxis" type="xbrli:stringItemType"
+           substitutionGroup="xbrldt:dimensionItem" xbrli:periodType="duration"
+           abstract="true" nillable="true"/>
+  <element name="UnitedStatesMember" id="ex_UnitedStatesMember" type="xbrli:stringItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration"
+           abstract="true" nillable="true"/>
 </schema>

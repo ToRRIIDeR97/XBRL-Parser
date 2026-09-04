@@ -21,21 +21,28 @@ from sec_xbrl_warehouse.domain.models import (
 from sec_xbrl_warehouse.exceptions import StateTransitionError
 from sec_xbrl_warehouse.infrastructure.storage.postgres import PostgresControlRepository
 
-pytestmark = pytest.mark.integration
-
-pytestmark = pytest.mark.skipif(
-    os.getenv("RUN_XBRL_INTEGRATION") != "1",
-    reason="Set RUN_XBRL_INTEGRATION=1 after starting Docker services",
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.getenv("RUN_XBRL_INTEGRATION") != "1",
+        reason="Set RUN_XBRL_INTEGRATION=1 after starting Docker services",
+    ),
+]
 
 
 @pytest.fixture(autouse=True)
-async def _cleanup_jobs() -> None:
-    """Remove leftover jobs so concurrency tests observe only their own queue."""
-    repo = PostgresControlRepository(Settings(env="test"))
+async def _clean_isolated_database(postgres_settings: Settings) -> None:
+    """Keep tests independent inside the session-scoped disposable database."""
+    repo = PostgresControlRepository(postgres_settings)
     try:
         async with repo.sessions.begin() as session:
-            await session.execute(text("DELETE FROM ingestion_jobs"))
+            await session.execute(
+                text(
+                    "TRUNCATE validation_issues, job_checkpoints, ingestion_jobs, "
+                    "mapping_reviews, concept_mappings, canonical_metrics, filings, "
+                    "source_artifacts RESTART IDENTITY CASCADE"
+                )
+            )
     finally:
         await repo.close()
 
@@ -61,8 +68,10 @@ def _filing(accession: str = "0000000001-26-000001") -> FilingRef:
     )
 
 
-async def test_upsert_source_artifact_is_idempotent_on_url_and_checksum() -> None:
-    repo = PostgresControlRepository(Settings(env="test"))
+async def test_upsert_source_artifact_is_idempotent_on_url_and_checksum(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
     try:
         artifact = _artifact()
         first = await repo.upsert_source_artifact(artifact, checksum_sha256="a" * 64)
@@ -76,8 +85,10 @@ async def test_upsert_source_artifact_is_idempotent_on_url_and_checksum() -> Non
         await repo.close()
 
 
-async def test_artifact_state_transitions_reject_impossible_regressions() -> None:
-    repo = PostgresControlRepository(Settings(env="test"))
+async def test_artifact_state_transitions_reject_impossible_regressions(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
     try:
         artifact_id = await repo.upsert_source_artifact(_artifact())
         await repo.mark_artifact_state(artifact_id, ArtifactState.DOWNLOADING)
@@ -95,8 +106,10 @@ async def test_artifact_state_transitions_reject_impossible_regressions() -> Non
         await repo.close()
 
 
-async def test_enqueue_job_same_idempotency_key_returns_same_job() -> None:
-    repo = PostgresControlRepository(Settings(env="test"))
+async def test_enqueue_job_same_idempotency_key_returns_same_job(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
     try:
         key = f"k-{uuid4()}"
         first = await repo.enqueue_job(
@@ -115,8 +128,10 @@ async def test_enqueue_job_same_idempotency_key_returns_same_job() -> None:
         await repo.close()
 
 
-async def test_two_concurrent_workers_never_claim_same_job() -> None:
-    repo = PostgresControlRepository(Settings(env="test"))
+async def test_two_concurrent_workers_never_claim_same_job(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
     try:
         key = f"concurrent-{uuid4()}"
         await repo.enqueue_job(
@@ -134,8 +149,8 @@ async def test_two_concurrent_workers_never_claim_same_job() -> None:
         await repo.close()
 
 
-async def test_stale_lock_is_reclaimable() -> None:
-    repo = PostgresControlRepository(Settings(env="test"))
+async def test_stale_lock_is_reclaimable(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
     try:
         key = f"stale-{uuid4()}"
         await repo.enqueue_job(
@@ -158,12 +173,16 @@ async def test_stale_lock_is_reclaimable() -> None:
         reclaimed = await repo.claim_job("live-worker", lock_timeout_seconds=900)
         assert reclaimed is not None and reclaimed.id == first.id
         assert reclaimed.attempts == 2
+        with pytest.raises(StateTransitionError):
+            await repo.complete_job(first.id, worker_id="dead-worker", attempt=first.attempts)
+        with pytest.raises(StateTransitionError):
+            await repo.heartbeat_job(first.id, "dead-worker", first.attempts)
     finally:
         await repo.close()
 
 
-async def test_fail_job_retry_then_dead_letter() -> None:
-    repo = PostgresControlRepository(Settings(env="test"))
+async def test_fail_job_retry_then_dead_letter(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
     try:
         key = f"retry-{uuid4()}"
         await repo.enqueue_job(
@@ -171,7 +190,13 @@ async def test_fail_job_retry_then_dead_letter() -> None:
         )
         record = await repo.claim_job("w1", lock_timeout_seconds=900)
         assert record is not None
-        await repo.fail_job(record.id, "transient timeout", retryable=True)
+        await repo.fail_job(
+            record.id,
+            "transient timeout",
+            retryable=True,
+            worker_id="w1",
+            attempt=record.attempts,
+        )
         # Backoff puts available_at in the future; reset it to reclaim immediately.
         async with repo.sessions.begin() as session:
             await session.execute(
@@ -180,7 +205,13 @@ async def test_fail_job_retry_then_dead_letter() -> None:
             )
         retry = await repo.claim_job("w2", lock_timeout_seconds=900)
         assert retry is not None and retry.attempts == 2
-        await repo.fail_job(retry.id, "failed again", retryable=True)
+        await repo.fail_job(
+            retry.id,
+            "failed again",
+            retryable=True,
+            worker_id="w2",
+            attempt=retry.attempts,
+        )
         # Exhausted attempts -> dead, not claimable.
         dead = await repo.claim_job("w3", lock_timeout_seconds=900)
         assert dead is None
@@ -188,22 +219,30 @@ async def test_fail_job_retry_then_dead_letter() -> None:
         await repo.close()
 
 
-async def test_complete_job_only_from_running() -> None:
-    repo = PostgresControlRepository(Settings(env="test"))
+async def test_complete_job_only_from_running(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
     try:
         key = f"complete-{uuid4()}"
         await repo.enqueue_job(job_type="load_bulk", idempotency_key=key, payload={"x": 1})
         record = await repo.claim_job("w1", lock_timeout_seconds=900)
         assert record is not None
-        await repo.complete_job(record.id, {"rows": 10})
+        await repo.save_checkpoint(record.id, "load", {"rows": 5})
+        await repo.save_checkpoint(record.id, "load", {"rows": 10})
+        assert await repo.get_checkpoint(record.id, "load") == {"rows": 10}
+        await repo.complete_job(
+            record.id,
+            {"rows": 10},
+            worker_id="w1",
+            attempt=record.attempts,
+        )
         with pytest.raises(StateTransitionError):
             await repo.complete_job(record.id)
     finally:
         await repo.close()
 
 
-async def test_upsert_filing_and_validation_issues() -> None:
-    repo = PostgresControlRepository(Settings(env="test"))
+async def test_upsert_filing_and_validation_issues(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
     try:
         accession = "0000000001-26-000001"
         await repo.upsert_filing(_filing(accession))

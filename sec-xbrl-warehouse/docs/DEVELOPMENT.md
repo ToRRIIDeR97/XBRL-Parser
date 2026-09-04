@@ -46,6 +46,6 @@ make scan-stubs
 - Upgrade one storage/parser dependency at a time and re-run the filing corpus.
 - Pin container digests before production deployment.
 
-## Definition of a completed stub
+## Definition of a completed ingestion change
 
-A stub is complete only when its marker is removed, its contract tests pass, failure/retry behavior is covered, and the relevant runbook is updated. Do not remove `IMPLEMENT_ME` merely because a happy-path implementation exists.
+An ingestion change is complete only when its contract tests pass, failure/retry behavior is covered, and the relevant runbook is updated. Preserve the 70% repository branch-coverage floor and add a focused regression check for every changed trust boundary.

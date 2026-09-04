@@ -26,5 +26,5 @@ CREATE TABLE IF NOT EXISTS {{database}}.canonical_facts
 )
 ENGINE = ReplacingMergeTree(mapping_version)
 PARTITION BY toYear(filed_date)
-ORDER BY (cik, canonical_metric, ifNull(period_end, toDate('1970-01-01')), ifNull(period_instant, toDate('1970-01-01')), accession, raw_fact_id)
+ORDER BY (cik, canonical_metric, ifNull(period_end, toDate('1970-01-01')), ifNull(period_instant, toDate('1970-01-01')), accession, extraction_revision, raw_fact_id, mapping_id, mapping_version)
 SETTINGS index_granularity = 8192;

@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -33,23 +33,50 @@ class _FakeWarehouse:
     def __init__(self) -> None:
         self.inserted: list[tuple[str, int]] = []
         self.counts: dict[str, int] = {}
+        self.fail_table: SecTable | None = None
 
     def insert_sec_batch(self, table, batch) -> int:
+        if self.fail_table is table:
+            self.fail_table = None
+            raise ConnectionError("temporary warehouse failure")
         count = batch.num_rows
         self.inserted.append((table.value, count))
         self.counts[table.value] = self.counts.get(table.value, 0) + count
         return count
 
     def query(self, sql, parameters=None) -> list[dict]:
-        return [{"n": self.counts.get("sub", 1)}] if "sub" in sql else [{"n": 1}]
+        if " NOT IN" in sql:
+            return [{"n": 0}]
+        for table, count in self.counts.items():
+            if f"sec_{table}" in sql or (table == "sub" and "sec_submissions" in sql):
+                return [{"n": count}]
+        return [{"n": 1}]
 
 
 class _FakeControl:
-    def __init__(self) -> None:
+    def __init__(self, artifact: SourceArtifactRef) -> None:
+        self.artifact = artifact
         self.states: list[ArtifactState] = []
+        self.checkpoints = {}
+
+    async def get_source_artifact(self, artifact_id):
+        assert artifact_id == self.artifact.id
+        return self.artifact
 
     async def mark_artifact_state(self, artifact_id, state, *, details=None) -> None:
         self.states.append(state)
+        self.artifact = self.artifact.model_copy(
+            update={"state": state, "details": details or self.artifact.details}
+        )
+
+    async def record_validation_issues(self, issues) -> None:
+        self.issues = tuple(issues)
+
+    async def get_checkpoint(self, job_id, stage, key="default"):
+        return self.checkpoints.get((stage, key))
+
+    async def save_checkpoint(self, job_id, stage, payload, key="default") -> None:
+        self.checkpoints[(stage, key)] = payload
 
 
 def _artifact() -> SourceArtifactRef:
@@ -92,9 +119,10 @@ def test_load_artifact_runs_stages() -> None:
     reader = SecTsvBatchReader(batch_rows=1)
     writer = _FakeWriter()
     warehouse = _FakeWarehouse()
-    control = _FakeControl()
+    artifact = _artifact()
+    control = _FakeControl(artifact)
     loader = BulkArtifactLoader(reader, writer, warehouse, control)
-    stats = asyncio.run(loader.load_artifact(_artifact(), FIXTURE))
+    stats = asyncio.run(loader.load_artifact(artifact, FIXTURE))
     assert stats.rows_by_table["sub"] == 1
     assert len(stats.parquet_objects) == 8
     assert control.states[0] is ArtifactState.VALIDATING
@@ -104,6 +132,20 @@ def test_load_artifact_runs_stages() -> None:
 def test_load_artifact_rejects_checksum_mismatch() -> None:
     reader = SecTsvBatchReader(batch_rows=1)
     artifact = _artifact().model_copy(update={"checksum_sha256": "f" * 64})
-    loader = BulkArtifactLoader(reader, _FakeWriter(), _FakeWarehouse(), _FakeControl())
+    loader = BulkArtifactLoader(reader, _FakeWriter(), _FakeWarehouse(), _FakeControl(artifact))
     with pytest.raises(ArtifactIntegrityError):
         asyncio.run(loader.load_artifact(artifact, FIXTURE))
+
+
+def test_load_artifact_resumes_after_completed_batch() -> None:
+    artifact = _artifact()
+    control = _FakeControl(artifact)
+    warehouse = _FakeWarehouse()
+    warehouse.fail_table = SecTable.TAG
+    loader = BulkArtifactLoader(SecTsvBatchReader(batch_rows=1), _FakeWriter(), warehouse, control)
+    job_id = uuid4()
+    with pytest.raises(ConnectionError):
+        asyncio.run(loader.load_artifact(artifact, FIXTURE, job_id=job_id))
+    stats = asyncio.run(loader.load_artifact(artifact, FIXTURE, job_id=job_id))
+    assert stats.rows_by_table["sub"] == 1
+    assert [table for table, _ in warehouse.inserted].count("sub") == 1

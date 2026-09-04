@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"
+               xmlns:xlink="http://www.w3.org/1999/xlink">
+  <link:presentationLink xlink:type="extended" xlink:role="http://www.xbrl.org/2003/role/link">
+    <link:loc xlink:type="locator" xlink:href="simple.xsd#ex_StatementOfIncomeAbstract" xlink:label="statement"/>
+    <link:loc xlink:type="locator" xlink:href="simple.xsd#ex_Revenue" xlink:label="revenue"/>
+    <link:loc xlink:type="locator" xlink:href="simple.xsd#ex_Cost" xlink:label="cost"/>
+    <link:loc xlink:type="locator" xlink:href="simple.xsd#ex_Profit" xlink:label="profit"/>
+    <link:presentationArc xlink:type="arc" xlink:from="statement" xlink:to="revenue"
+                          xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" order="1"/>
+    <link:presentationArc xlink:type="arc" xlink:from="statement" xlink:to="cost"
+                          xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" order="2"/>
+    <link:presentationArc xlink:type="arc" xlink:from="statement" xlink:to="profit"
+                          xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" order="3"/>
+  </link:presentationLink>
+</link:linkbase>

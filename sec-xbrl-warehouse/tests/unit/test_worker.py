@@ -1,8 +1,16 @@
 import asyncio
+from datetime import date
+
+import httpx
+import pytest
 
 from sec_xbrl_warehouse.domain.enums import JobType
-from sec_xbrl_warehouse.domain.models import JobRecord
-from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, SchemaDriftError
+from sec_xbrl_warehouse.domain.models import FilingRef, JobRecord
+from sec_xbrl_warehouse.exceptions import (
+    ArtifactIntegrityError,
+    SchemaDriftError,
+    StateTransitionError,
+)
 from sec_xbrl_warehouse.worker import build_handlers, is_retryable_exception
 
 
@@ -14,15 +22,19 @@ def test_is_retryable_classifies_network_and_schema_errors() -> None:
     assert is_retryable_exception(ValueError("plain")) is False
 
 
-def test_build_handlers_without_services_returns_empty() -> None:
-    assert build_handlers() == {}
+def test_build_handlers_requires_runtime_services() -> None:
+    with pytest.raises(ValueError, match="services"):
+        build_handlers()
 
 
 class _FakeOrchestrator:
     def __init__(self) -> None:
         self.reconciled = []
 
-    async def run_artifact_job(self, payload):
+    async def download_artifact_job(self, payload, *, job_id=None):
+        return {"artifact_id": "A", "job_id": str(job_id)}
+
+    async def run_artifact_job(self, payload, *, job_id=None):
         return {"artifact_id": "A"}
 
     async def reconcile_artifact(self, artifact_id, *, expected_rows=None):
@@ -51,12 +63,9 @@ def test_build_handlers_wires_orchestrator() -> None:
     orchestrator = _FakeOrchestrator()
     handlers = build_handlers(services={"orchestrator": orchestrator})
     assert set(handlers) >= {JobType.DOWNLOAD_BULK, JobType.RECONCILE_ARTIFACT}
-    result = asyncio.run(
-        handlers[JobType.DOWNLOAD_BULK](
-            _job(JobType.DOWNLOAD_BULK, {"artifact": {"dataset": "notes"}})
-        )
-    )
-    assert result == {"artifact_id": "A"}
+    job = _job(JobType.DOWNLOAD_BULK, {"artifact": {"dataset": "notes"}})
+    result = asyncio.run(handlers[JobType.DOWNLOAD_BULK](job))
+    assert result == {"artifact_id": "A", "job_id": str(job.id)}
     asyncio.run(
         handlers[JobType.RECONCILE_ARTIFACT](
             _job(JobType.RECONCILE_ARTIFACT, {"artifact_id": "X", "expected_rows": {"sub": 1}})
@@ -77,10 +86,10 @@ def test_worker_executes_and_completes_job() -> None:
         async def heartbeat_job(self, job_id, worker_id):
             return None
 
-        async def complete_job(self, job_id, result=None):
+        async def complete_job(self, job_id, result=None, *, worker_id=None, attempt=None):
             self.completed.append((job_id, result))
 
-        async def fail_job(self, job_id, error, retryable):
+        async def fail_job(self, job_id, error, retryable, *, worker_id=None, attempt=None):
             self.failed.append((job_id, error, retryable))
 
     control = _Control()
@@ -108,10 +117,10 @@ def test_worker_fails_job_on_handler_error() -> None:
         async def heartbeat_job(self, job_id, worker_id):
             return None
 
-        async def complete_job(self, job_id, result=None):
+        async def complete_job(self, job_id, result=None, *, worker_id=None, attempt=None):
             raise AssertionError("should not complete")
 
-        async def fail_job(self, job_id, error, retryable):
+        async def fail_job(self, job_id, error, retryable, *, worker_id=None, attempt=None):
             self.captured = (job_id, error, retryable)
 
     control = _Control()
@@ -127,3 +136,165 @@ def test_worker_fails_job_on_handler_error() -> None:
     job = _job(JobType.DOWNLOAD_BULK)
     asyncio.run(worker._execute(job))
     assert control.captured[2] is False  # SchemaDrift is not retryable
+
+
+def test_worker_cancels_handler_when_lease_is_lost() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.worker import Worker
+
+    class _Control:
+        async def complete_job(self, *args, **kwargs):
+            raise AssertionError("lost worker must not complete")
+
+        async def fail_job(self, *args, **kwargs):
+            raise AssertionError("lost worker must not fail the reclaimed job")
+
+    cancelled = False
+
+    async def handler(job):
+        nonlocal cancelled
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled = True
+
+    worker = Worker(Settings(env="test"), _Control(), {JobType.DOWNLOAD_BULK: handler})  # type: ignore[arg-type]
+
+    async def lost(job):
+        raise StateTransitionError("reclaimed")
+
+    worker._heartbeat = lost  # type: ignore[method-assign]
+    asyncio.run(worker._execute(_job(JobType.DOWNLOAD_BULK)))
+    assert cancelled
+
+
+def _filing() -> FilingRef:
+    return FilingRef(
+        accession="0000000001-26-000001",
+        cik=1,
+        company_name="Example",
+        form="10-K",
+        filed_date=date(2026, 1, 2),
+        archive_directory_url="https://www.sec.gov/Archives/edgar/data/1/1",
+    )
+
+
+def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
+    class _Ingestor:
+        async def ingest(self, filing, *, extraction_revision, job_id):
+            return {"accession": filing.accession, "revision": extraction_revision}
+
+        async def reconcile(self, accession):
+            return {"accession": accession}
+
+    class _Mapper:
+        async def map_batch(self, facts, filing, *, extraction_revision):
+            self.received = (facts, filing, extraction_revision)
+            return ()
+
+    class _Warehouse:
+        def insert_canonical_facts(self, facts):
+            self.facts = facts
+            return len(facts)
+
+    class _Discovery:
+        async def discover_range(self, filed_from, filed_to, forms):
+            self.received = (filed_from, filed_to, forms)
+            return (_filing(),)
+
+    class _Control:
+        def __init__(self):
+            self.jobs = []
+
+        async def enqueue_job(self, **kwargs):
+            self.jobs.append(kwargs)
+
+    mapper = _Mapper()
+    warehouse = _Warehouse()
+    discovery = _Discovery()
+    control = _Control()
+    handlers = build_handlers(
+        services={
+            "ingestor": _Ingestor(),
+            "mapper": mapper,
+            "warehouse": warehouse,
+            "discovery": discovery,
+            "forms": ["10-K"],
+            "control": control,
+        }
+    )
+    filing_payload = _filing().model_dump(mode="json")
+
+    ingested = asyncio.run(
+        handlers[JobType.INGEST_FILING](
+            _job(JobType.INGEST_FILING, {"filing": filing_payload, "extraction_revision": 2})
+        )
+    )
+    assert ingested == {"accession": _filing().accession, "revision": 2}
+    reconciled = asyncio.run(
+        handlers[JobType.RECONCILE_FILING](
+            _job(JobType.RECONCILE_FILING, {"accession": _filing().accession})
+        )
+    )
+    assert reconciled == {"accession": _filing().accession}
+    mapped = asyncio.run(
+        handlers[JobType.MAP_CANONICAL](
+            _job(JobType.MAP_CANONICAL, {"filing": filing_payload, "facts": []})
+        )
+    )
+    assert mapped == {"mapped": 0, "unmapped": 0}
+    discovered = asyncio.run(
+        handlers[JobType.DISCOVER_FILINGS](
+            _job(
+                JobType.DISCOVER_FILINGS,
+                {"filed_from": "2026-01-01", "filed_to": "2026-01-02"},
+            )
+        )
+    )
+    assert discovered == {"filings_enqueued": 1}
+    assert control.jobs[0]["idempotency_key"] == "filing:0000000001-26-000001:1"
+
+
+def test_worker_handles_missing_handler_and_stops_while_idle() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.worker import Worker
+
+    class _Control:
+        def __init__(self) -> None:
+            self.failed = []
+
+        async def claim_job(self, worker_id, lock_timeout_seconds):
+            return None
+
+        async def fail_job(self, *args, **kwargs):
+            self.failed.append((args, kwargs))
+
+    control = _Control()
+    worker = Worker(
+        Settings(env="test", worker_poll_seconds=0.01),
+        control,
+        {},  # type: ignore[arg-type]
+    )
+    asyncio.run(worker._execute(_job(JobType.DOWNLOAD_BULK)))
+    assert control.failed
+
+    async def run_until_stopped() -> None:
+        task = asyncio.create_task(worker.run())
+        await asyncio.sleep(0)
+        worker.stop()
+        await task
+
+    asyncio.run(run_until_stopped())
+
+
+def test_retryable_exception_unwraps_causes_and_database_errors() -> None:
+    wrapped = RuntimeError("wrapped")
+    wrapped.__cause__ = httpx.ReadTimeout("timeout")
+    assert is_retryable_exception(wrapped)
+
+    class DatabaseError(Exception):
+        pass
+
+    DatabaseError.__module__ = "sqlalchemy.exc"
+    assert is_retryable_exception(DatabaseError("deadlock detected"))
+    assert not is_retryable_exception(DatabaseError("invalid statement"))

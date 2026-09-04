@@ -25,7 +25,7 @@ class _FakeWarehouse:
 
     def query(self, sql, parameters=None) -> list[dict]:
         self.queries.append(sql)
-        if "LEFT JOIN" in sql:
+        if " NOT IN" in sql:
             return [{"n": 0}]  # no orphans
         if "count()" in sql:
             return [{"n": 1}]

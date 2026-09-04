@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOTS = (Path("src"), Path("scripts"), Path("tests"), Path("docs"), Path("HANDOFF.md"))
 PATTERN = re.compile(r"IMPLEMENT_ME")
+SCANNER_SOURCES = {Path("scripts/scan_stubs.py"), Path("scripts/generate_stub_index.py")}
 
 
 def iter_files() -> list[Path]:
@@ -20,6 +21,8 @@ def iter_files() -> list[Path]:
 def main() -> int:
     count = 0
     for path in iter_files():
+        if path in SCANNER_SOURCES:
+            continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError:

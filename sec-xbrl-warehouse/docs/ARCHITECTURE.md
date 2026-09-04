@@ -129,4 +129,4 @@ This keeps the local deployment small and avoids Redis/Kafka until throughput ev
 - No SEC API key is required for public data, but every request uses the configured identifying user agent.
 - Credentials are supplied through environment variables and never committed.
 - Object storage is private by default.
-- Query API is intentionally unauthenticated only in the local scaffold; add authentication before exposing it beyond localhost.
+- Query API is intentionally unauthenticated only for loopback/local deployment; add authentication before exposing it beyond localhost.

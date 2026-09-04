@@ -133,9 +133,9 @@ def main() -> None:
         protocols.extend(interfaces)
 
     content = [
-        "# Function Stub and Interface Index",
+        "# Implementation and Interface Index",
         "",
-        "This generated index tells the takeover agent which symbols still require implementation or production hardening. The full docstring beside each symbol and `HANDOFF.md` are authoritative for invariants, failure behavior, and acceptance tests.",
+        "This generated index lists intentionally marked implementation work and the current adapter protocols. `HANDOFF.md` is authoritative for the production acceptance boundary.",
         "",
         f"- Implementation/hardening symbols: **{len(implementation)}**",
         f"- Protocol/interface methods: **{len(protocols)}**",

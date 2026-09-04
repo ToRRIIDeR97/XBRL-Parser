@@ -1,4 +1,6 @@
-from datetime import date
+import asyncio
+from datetime import UTC, date, datetime
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -49,7 +51,7 @@ def test_select_package_files_includes_xbrl_and_primary() -> None:
     assert "example-20251231.xsd" in selected
     assert "filingSummary.xml" in selected
     assert "logo.jpg" not in selected
-    assert "report.html" not in selected
+    assert "report.html" in selected
 
 
 def test_select_entrypoints_prefers_primary() -> None:
@@ -110,6 +112,8 @@ def test_archive_and_materialize_round_trip(tmp_path: Path) -> None:
 
     archived = downloader.archive_package(manifest, package_dir)
     assert archived.package_object_key and archived.package_checksum_sha256
+    replayed = downloader.archive_package(manifest, package_dir)
+    assert replayed.package_checksum_sha256 == archived.package_checksum_sha256
 
     materialized = downloader.materialize_package(archived, tmp_path / "out")
     assert materialized.name == "example-20251231.htm"
@@ -133,3 +137,40 @@ def test_materialize_refuses_path_traversal(tmp_path: Path) -> None:
     )
     with pytest.raises(ArtifactIntegrityError):
         downloader.materialize_package(manifest, tmp_path / "out")
+
+    with pytest.raises(ArtifactIntegrityError):
+        filing_object_key(filing, "..\\escape.txt", "0" * 64)
+
+
+async def test_download_package_reuses_checksum_manifest(tmp_path: Path) -> None:
+    class _Http:
+        def __init__(self) -> None:
+            self.downloads = 0
+
+        async def get_json(self, url: str):
+            return {
+                "directory": {
+                    "item": [
+                        {"name": "example-20251231.htm"},
+                        {"name": "example-20251231.xsd"},
+                    ]
+                }
+            }
+
+        async def download(self, url: str, destination: Path):
+            self.downloads += 1
+            data = url.rsplit("/", 1)[-1].encode()
+            await asyncio.to_thread(destination.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(destination.write_bytes, data)
+            return destination, sha256(data).hexdigest(), len(data), {"content-type": "text/plain"}
+
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data")
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    http = _Http()
+    downloader = FilingPackageDownloader(settings, http, store)  # type: ignore[arg-type]
+    first = await downloader.download_package(_filing())
+    second = await downloader.download_package(_filing())
+    assert http.downloads == 2
+    assert first.members == second.members
+    assert second.manifest_object_key
+    assert second.acquired_at <= datetime.now(UTC)

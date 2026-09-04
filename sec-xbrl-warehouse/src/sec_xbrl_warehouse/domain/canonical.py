@@ -27,6 +27,7 @@ class ConceptMapping(CanonicalModel):
     namespace: str
     concept_name: str
     taxonomy_version: str | None = None
+    cik: int | None = None
     canonical_metric: str
     mapping_type: Literal["exact", "namespace", "filing_specific", "candidate"]
     confidence: float = Field(ge=0, le=1)

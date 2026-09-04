@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import re
 from collections.abc import Iterable
 from pathlib import PurePosixPath
@@ -27,7 +29,48 @@ class BulkCatalogService:
     async def sync(self, dataset: DatasetKind) -> tuple[DatasetArtifact, ...]:
         url = self.catalog_urls[dataset]
         html = await self.http.get_text(url)
-        return parse_catalog_html(html, page_url=url, dataset=dataset)
+        artifacts = parse_catalog_html(html, page_url=url, dataset=dataset)
+        if not hasattr(self.http, "head"):
+            return artifacts
+
+        async def enrich(artifact: DatasetArtifact) -> DatasetArtifact:
+            try:
+                headers = await self.http.head(artifact.source_url)
+            except Exception:
+                return artifact
+            return artifact.model_copy(
+                update={
+                    "expected_size_bytes": _integer(headers.get("content-length"))
+                    or artifact.expected_size_bytes,
+                    "etag": headers.get("etag"),
+                    "last_modified": headers.get("last-modified"),
+                    "checksum_sha256": _sha256_digest(
+                        headers.get("digest") or headers.get("content-digest")
+                    ),
+                }
+            )
+
+        return tuple(await asyncio.gather(*(enrich(artifact) for artifact in artifacts)))
+
+
+def _integer(value: str | None) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _sha256_digest(value: str | None) -> str | None:
+    if not value:
+        return None
+    candidate = value.split("sha-256=", 1)[-1].strip(' :"')
+    if re.fullmatch(r"[0-9a-fA-F]{64}", candidate):
+        return candidate.lower()
+    try:
+        decoded = base64.b64decode(candidate, validate=True)
+        return decoded.hex() if len(decoded) == 32 else None
+    except ValueError:
+        return None
 
 
 def parse_catalog_html(

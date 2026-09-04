@@ -57,5 +57,4 @@ For sampled filings compare:
 - discrepancies recorded with source attribution.
 ## Coverage gates
 
-The scaffold starts with a **35% repository-wide coverage floor** because large adapter and orchestration surfaces are intentionally stubbed. Do not lower this threshold. Raise it as milestones land: at least 60% after the historical loader, 70% after Arelle/incremental ingestion, and 75% or higher before calling the first production backfill complete. Newly implemented modules should target substantially higher direct coverage than the repository-wide floor.
-
+The repository-wide branch-coverage floor is **70%** and is enforced in `pyproject.toml`. Do not lower it. Raise it to at least 75% before calling the first production backfill complete. Trust boundaries and newly changed ingestion modules should have direct failure/replay tests rather than relying only on the aggregate number.

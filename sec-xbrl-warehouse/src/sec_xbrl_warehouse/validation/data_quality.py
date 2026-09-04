@@ -92,7 +92,7 @@ class ArtifactReconciler:
                 continue
             try:
                 rows = self.warehouse.query(
-                    f"SELECT count() AS n FROM {table_name} WHERE _artifact_id = %(aid)s",
+                    f"SELECT count() AS n FROM {table_name} FINAL WHERE _artifact_id = %(aid)s",
                     {"aid": artifact_id},
                 )
                 actual = int(rows[0]["n"]) if rows else 0
@@ -133,12 +133,12 @@ def _uniqueness_checks(
         return []
     try:
         rows = warehouse.query(
-            f"SELECT count() AS n FROM (SELECT {key} AS k FROM {table_name} "
+            f"SELECT count() AS n FROM (SELECT {key} AS k FROM {table_name} FINAL "
             f"WHERE _artifact_id = %(aid)s GROUP BY k)",
             {"aid": artifact_id},
         )
         total_rows = warehouse.query(
-            f"SELECT count() AS n FROM {table_name} WHERE _artifact_id = %(aid)s",
+            f"SELECT count() AS n FROM {table_name} FINAL WHERE _artifact_id = %(aid)s",
             {"aid": artifact_id},
         )
         distinct = int(rows[0]["n"]) if rows else 0
@@ -167,13 +167,14 @@ def _reference_checks(
         "sec_text_facts",
         "sec_presentations",
         "sec_calculations",
+        "sec_renderings",
     }
     if table_name in fact_tables:
         try:
             orphan_rows = warehouse.query(
-                f"""SELECT count() AS n FROM {table_name} AS a
-                    LEFT JOIN sec_submissions AS s ON a.adsh = s.adsh
-                    WHERE a._artifact_id = %(aid)s AND s.adsh IS NULL""",
+                f"""SELECT count() AS n FROM {table_name} FINAL
+                    WHERE _artifact_id = %(aid)s AND adsh NOT IN
+                    (SELECT adsh FROM sec_submissions FINAL WHERE _artifact_id = %(aid)s)""",
                 {"aid": artifact_id},
             )
             orphans = int(orphan_rows[0]["n"]) if orphan_rows else 0
@@ -195,6 +196,32 @@ def _reference_checks(
                     details={"error": str(exc)[:1000]},
                 )
             )
+    columns = (
+        [("tag", "version")]
+        if table_name in {"sec_numeric_facts", "sec_text_facts", "sec_presentations"}
+        else [("ptag", "pversion"), ("ctag", "cversion")]
+        if table_name == "sec_calculations"
+        else []
+    )
+    for tag, version in columns:
+        rows = warehouse.query(
+            f"SELECT count() AS n FROM {table_name} FINAL WHERE _artifact_id = %(aid)s "
+            f"AND ({tag}, {version}) NOT IN (SELECT tag, version FROM sec_tags FINAL WHERE _artifact_id = %(aid)s)",
+            {"aid": artifact_id},
+        )
+        orphans = int(rows[0]["n"]) if rows else 0
+        results.append(QualityCheckResult(f"{table_name}.{tag}_orphans", orphans == 0, orphans, 0))
+    if table_name in {"sec_numeric_facts", "sec_text_facts"}:
+        rows = warehouse.query(
+            f"SELECT count() AS n FROM {table_name} FINAL WHERE _artifact_id = %(aid)s "
+            "AND trim(BOTH '\\0' FROM dimh) NOT IN ('', '0', repeat('0', 32)) "
+            "AND dimh NOT IN (SELECT dimh FROM sec_dimensions FINAL WHERE _artifact_id = %(aid)s)",
+            {"aid": artifact_id},
+        )
+        orphans = int(rows[0]["n"]) if rows else 0
+        results.append(
+            QualityCheckResult(f"{table_name}.dimension_orphans", orphans == 0, orphans, 0)
+        )
     return results
 
 

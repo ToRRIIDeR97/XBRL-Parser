@@ -302,6 +302,8 @@ def xbrl_warehouse_schema(entity: str) -> Any:
             pa.field("footnote_ids", pa.list_(pa.string()), False),
             pa.field("source_document", pa.string(), False),
             pa.field("source_fact_id", pa.string()),
+            pa.field("source_attributes_json", pa.string(), False),
+            pa.field("value_kind", pa.string(), False),
             *common_revision,
         ],
         "relationships": [

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sec_xbrl_warehouse.domain.models import ValidationIssue
+
 
 class XbrlWarehouseError(Exception):
     """Base class for application-specific errors."""
@@ -23,6 +28,8 @@ class SchemaDriftError(XbrlWarehouseError):
 
 class XbrlExtractionError(XbrlWarehouseError):
     """Arelle could not load, validate, or extract an XBRL document set."""
+
+    validation_issues: tuple[ValidationIssue, ...] = ()
 
 
 class DataQualityError(XbrlWarehouseError):

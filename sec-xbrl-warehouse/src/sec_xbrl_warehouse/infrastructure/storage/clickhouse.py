@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import clickhouse_connect
 import pyarrow as pa
@@ -14,7 +14,7 @@ from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
 from sec_xbrl_warehouse.domain.enums import SecTable
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle, XbrlFact
-from sec_xbrl_warehouse.exceptions import WarehouseWriteError
+from sec_xbrl_warehouse.exceptions import ConfigurationError, WarehouseWriteError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     canonical_fact_schema,
     require_exact_schema,
@@ -22,6 +22,7 @@ from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     xbrl_warehouse_schema,
 )
 from sec_xbrl_warehouse.infrastructure.storage.hashing import stable_json_hash
+from sec_xbrl_warehouse.observability.metrics import ROWS_WRITTEN
 
 _SEC_TABLE_NAMES: dict[SecTable, str] = {
     SecTable.SUB: "sec_submissions",
@@ -61,8 +62,17 @@ class ClickHouseWarehouse:
         except Exception:
             return False
 
+    def close(self) -> None:
+        self.client.close()
+
     def apply_ddl(self, ddl_directory: Path) -> tuple[str, ...]:
         """Render and execute all numbered ClickHouse SQL files in lexical order."""
+        drift = self.schema_drift(ddl_directory)
+        if drift:
+            raise ConfigurationError(
+                "ClickHouse tables require a preserving upgrade: "
+                f"{', '.join(drift)}. Run `xbrl-warehouse db upgrade-clickhouse --yes`."
+            )
         executed: list[str] = []
         for path in sorted(ddl_directory.glob("[0-9][0-9][0-9]_*.sql")):
             rendered = path.read_text(encoding="utf-8").replace("{{database}}", self.database)
@@ -70,6 +80,127 @@ class ClickHouseWarehouse:
                 self.client.command(statement)
             executed.append(path.name)
         return tuple(executed)
+
+    def schema_drift(self, ddl_directory: Path) -> tuple[str, ...]:
+        definitions = self._table_definitions(ddl_directory)
+        result = self.client.query(
+            "SELECT name, sorting_key FROM system.tables WHERE database = %(database)s",
+            parameters={"database": self.database},
+        )
+        current = {str(name): str(key) for name, key in result.result_rows}
+        return tuple(
+            sorted(
+                name
+                for name, (_, expected_key) in definitions.items()
+                if name in current and _normalize_sql(current[name]) != _normalize_sql(expected_key)
+            )
+        )
+
+    def upgrade_ddl(self, ddl_directory: Path) -> dict[str, str]:
+        """Copy, count, atomically exchange, and retain every incompatible table."""
+        definitions = self._table_definitions(ddl_directory)
+        drift = self.schema_drift(ddl_directory)
+        if drift:
+            sizes = (
+                self.client.query(
+                    "SELECT sum(total_bytes) FROM system.tables "
+                    "WHERE database = %(database)s AND name IN %(tables)s",
+                    parameters={"database": self.database, "tables": drift},
+                ).result_rows[0][0]
+                or 0
+            )
+            free = self.client.query("SELECT min(free_space) FROM system.disks").result_rows[0][0]
+            if int(free or 0) < int(sizes) * 11 // 10:
+                raise WarehouseWriteError(
+                    f"Insufficient ClickHouse disk space for preserving upgrade: need about {int(sizes) * 11 // 10} bytes"
+                )
+        backups: dict[str, str] = {}
+        for name in drift:
+            statement, _ = definitions[name]
+            token = uuid4().hex[:8]
+            temporary = f"{name}__upgrade_{token}"
+            backup = f"{name}__backup_{token}"
+            create = re.sub(
+                rf"CREATE TABLE IF NOT EXISTS\s+{re.escape(self.database)}\.{re.escape(name)}",
+                f"CREATE TABLE {self.database}.{temporary}",
+                statement,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            self.client.command(create)
+            exchanged = False
+            try:
+                source_columns = self._columns(name)
+                target_columns = self._columns(temporary)
+                common = [column for column in target_columns if column in source_columns]
+                selects = list(common)
+                if name == "xbrl_facts" and "value_kind" not in source_columns:
+                    common.append("value_kind")
+                    selects.append(
+                        "if(is_nil = 1, 'nil', if(value_decimal IS NOT NULL OR unit_id IS NOT NULL, "
+                        "'numeric', if(value_boolean IS NOT NULL, 'boolean', "
+                        "if(value_date IS NOT NULL, 'date', 'text'))))"
+                    )
+                columns = ", ".join(common)
+                projection = ", ".join(selects)
+                self.client.command(
+                    f"INSERT INTO {self.database}.{temporary} ({columns}) "
+                    f"SELECT {projection} FROM {self.database}.{name}"
+                )
+                before = int(
+                    self.client.query(f"SELECT count() FROM {self.database}.{name}").result_rows[0][
+                        0
+                    ]
+                )
+                after = int(
+                    self.client.query(
+                        f"SELECT count() FROM {self.database}.{temporary}"
+                    ).result_rows[0][0]
+                )
+                if before != after:
+                    raise WarehouseWriteError(
+                        f"Upgrade row-count mismatch for {name}: {before} != {after}"
+                    )
+                self.client.command(
+                    f"EXCHANGE TABLES {self.database}.{name} AND {self.database}.{temporary}"
+                )
+                exchanged = True
+                self.client.command(
+                    f"RENAME TABLE {self.database}.{temporary} TO {self.database}.{backup}"
+                )
+                backups[name] = backup
+            except Exception:
+                if not exchanged:
+                    self.client.command(f"DROP TABLE IF EXISTS {self.database}.{temporary}")
+                raise
+        # Create newly introduced tables and refresh views only after all swaps succeed.
+        self.apply_ddl(ddl_directory)
+        return backups
+
+    def _columns(self, table: str) -> list[str]:
+        result = self.client.query(
+            "SELECT name FROM system.columns WHERE database = %(database)s AND table = %(table)s "
+            "ORDER BY position",
+            parameters={"database": self.database, "table": table},
+        )
+        return [str(row[0]) for row in result.result_rows]
+
+    def _table_definitions(self, ddl_directory: Path) -> dict[str, tuple[str, str]]:
+        definitions: dict[str, tuple[str, str]] = {}
+        for path in sorted(ddl_directory.glob("[0-9][0-9][0-9]_*.sql")):
+            rendered = path.read_text(encoding="utf-8").replace("{{database}}", self.database)
+            for statement in self._split_sql(rendered):
+                match = re.match(
+                    rf"CREATE TABLE IF NOT EXISTS\s+{re.escape(self.database)}\.([A-Za-z0-9_]+)",
+                    statement,
+                    re.IGNORECASE,
+                )
+                order = re.search(
+                    r"\bORDER BY\s+(.+?)(?:\nSETTINGS|;|$)", statement, re.DOTALL | re.IGNORECASE
+                )
+                if match and order:
+                    definitions[match.group(1)] = (statement, order.group(1).strip())
+        return definitions
 
     def insert_sec_batch(self, table: SecTable, batch: pa.RecordBatch | pa.Table) -> int:
         handlers = {
@@ -150,6 +281,40 @@ class ClickHouseWarehouse:
         table = pa.Table.from_pylist(rows, schema=canonical_fact_schema())
         return self._insert_arrow("canonical_facts", table)
 
+    def publish_xbrl_bundle(self, bundle: XbrlExtractionBundle, counts: dict[str, int]) -> None:
+        """Verify all raw entities before exposing this immutable revision to readers."""
+        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+            result = self.query(
+                f"SELECT count() AS count FROM xbrl_{entity} FINAL WHERE accession = %(accession)s AND extraction_revision = %(revision)s",
+                {"accession": bundle.filing.accession, "revision": bundle.extraction_revision},
+            )
+            if not result or int(result[0]["count"]) != counts[entity]:
+                raise WarehouseWriteError(f"Extraction row count mismatch for {entity}")
+        schema = pa.schema(
+            [
+                pa.field("accession", pa.string(), False),
+                pa.field("extraction_revision", pa.uint32(), False),
+                pa.field("entity_counts_json", pa.string(), False),
+                pa.field("metadata_json", pa.string(), False),
+                pa.field("completed_at", pa.timestamp("ms", tz="UTC"), False),
+            ]
+        )
+        self._insert_arrow(
+            "xbrl_extractions",
+            pa.Table.from_pylist(
+                [
+                    {
+                        "accession": bundle.filing.accession,
+                        "extraction_revision": bundle.extraction_revision,
+                        "entity_counts_json": _json(counts),
+                        "metadata_json": bundle.metadata.model_dump_json(),
+                        "completed_at": bundle.metadata.extracted_at,
+                    }
+                ],
+                schema=schema,
+            ),
+        )
+
     def query(self, sql: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         result = self.client.query(sql, parameters=parameters or {})
         names = list(result.column_names)
@@ -161,7 +326,11 @@ class ClickHouseWarehouse:
         if len(set(table.column_names)) != len(table.column_names):
             raise WarehouseWriteError(f"Duplicate Arrow column names for {table_name}")
         try:
-            self.client.insert_arrow(f"{self.database}.{table_name}", table)
+            for batch in table.to_batches(max_chunksize=self.settings.arrow_batch_rows):
+                self.client.insert_arrow(
+                    f"{self.database}.{table_name}", pa.Table.from_batches([batch])
+                )
+                ROWS_WRITTEN.labels(table=table_name, storage="clickhouse").inc(batch.num_rows)
         except Exception as exc:
             raise WarehouseWriteError(
                 f"ClickHouse Arrow insert failed for {table_name}: {exc}"
@@ -211,11 +380,10 @@ def contexts_table(bundle: XbrlExtractionBundle) -> pa.Table:
                 "_row_hash": stable_json_hash(
                     {
                         "accession": bundle.filing.accession,
-                        "context_id": context.context_id,
-                        "context_hash": context.context_hash,
+                        "context": context.model_dump(mode="json"),
                     }
                 ),
-                "_ingested_at": _now(),
+                "_ingested_at": bundle.metadata.extracted_at,
             }
         )
     return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("contexts"))
@@ -245,11 +413,10 @@ def concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
                 "_row_hash": stable_json_hash(
                     {
                         "accession": bundle.filing.accession,
-                        "qname": concept.qname,
-                        "taxonomy_version": concept.taxonomy_version,
+                        "concept": concept.model_dump(mode="json"),
                     }
                 ),
-                "_ingested_at": _now(),
+                "_ingested_at": bundle.metadata.extracted_at,
             }
         )
     return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("concepts"))
@@ -267,6 +434,9 @@ def facts_table(bundle: XbrlExtractionBundle) -> pa.Table:
                 bundle.filing.filed_date,
                 fact,
                 bundle.extraction_revision,
+                fiscal_year=bundle.filing.fiscal_year,
+                fiscal_period=bundle.filing.fiscal_period,
+                ingested_at=bundle.metadata.extracted_at,
             )
         )
     return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("facts"))
@@ -301,14 +471,10 @@ def relationships_table(bundle: XbrlExtractionBundle) -> pa.Table:
                 "_row_hash": stable_json_hash(
                     {
                         "accession": bundle.filing.accession,
-                        "network_type": relationship.relationship_type.value,
-                        "link_role_uri": relationship.link_role_uri,
-                        "arc_role_uri": relationship.arc_role_uri,
-                        "from_qname": relationship.from_qname,
-                        "to_qname": relationship.to_qname,
+                        "relationship": relationship.model_dump(mode="json"),
                     }
                 ),
-                "_ingested_at": _now(),
+                "_ingested_at": bundle.metadata.extracted_at,
             }
         )
     return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("relationships"))
@@ -330,10 +496,10 @@ def footnotes_table(bundle: XbrlExtractionBundle) -> pa.Table:
                 "_row_hash": stable_json_hash(
                     {
                         "accession": bundle.filing.accession,
-                        "footnote_id": footnote.footnote_id,
+                        "footnote": footnote.model_dump(mode="json"),
                     }
                 ),
-                "_ingested_at": _now(),
+                "_ingested_at": bundle.metadata.extracted_at,
             }
         )
     return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("footnotes"))
@@ -347,6 +513,10 @@ def fact_row(
     filed_date: date,
     fact: XbrlFact,
     extraction_revision: int,
+    *,
+    fiscal_year: int | None = None,
+    fiscal_period: str | None = None,
+    ingested_at: datetime | None = None,
 ) -> dict[str, Any]:
     return {
         "fact_id": fact.fact_id,
@@ -355,8 +525,8 @@ def fact_row(
         "company_name": company_name,
         "form": form,
         "filed_date": filed_date,
-        "fiscal_year": None,
-        "fiscal_period": None,
+        "fiscal_year": fiscal_year,
+        "fiscal_period": fiscal_period,
         "concept_namespace": fact.concept_namespace,
         "concept_name": fact.concept_name,
         "concept_qname": fact.concept_qname,
@@ -391,15 +561,18 @@ def fact_row(
         "footnote_ids": list(fact.footnote_ids),
         "source_document": fact.source_document,
         "source_fact_id": fact.source_fact_id,
+        "source_attributes_json": _json(fact.source_attributes),
+        "value_kind": fact.value_kind.value,
         "extraction_revision": extraction_revision,
         "_row_hash": stable_json_hash(
             {
-                "fact_id": fact.fact_id,
+                "fact": fact.model_dump(mode="json"),
                 "accession": accession,
                 "extraction_revision": extraction_revision,
+                "filing": [cik, company_name, form, filed_date, fiscal_year, fiscal_period],
             }
         ),
-        "_ingested_at": _now(),
+        "_ingested_at": ingested_at or _now(),
     }
 
 
@@ -426,13 +599,7 @@ def _canonical_fact_row(fact: CanonicalFact) -> dict[str, Any]:
         "mapping_confidence": fact.mapping_confidence,
         "mapping_explanation": fact.mapping_explanation,
         "extraction_revision": fact.extraction_revision,
-        "_row_hash": stable_json_hash(
-            {
-                "canonical_fact_id": fact.canonical_fact_id,
-                "raw_fact_id": fact.raw_fact_id,
-                "mapping_version": fact.mapping_version,
-            }
-        ),
+        "_row_hash": stable_json_hash(fact.model_dump(mode="json")),
         "_ingested_at": _now(),
     }
 
@@ -462,3 +629,10 @@ def _optional_int(value: bool | None) -> int | None:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _normalize_sql(value: str) -> str:
+    value = value.strip()
+    if value.startswith("(") and value.endswith(")"):
+        value = value[1:-1]
+    return re.sub(r"\s+", "", value).lower()

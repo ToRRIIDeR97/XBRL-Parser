@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "sec-xbrl-warehouse"
 version = "0.1.0"
-description = "Historical and incremental SEC XBRL warehouse scaffold using Arelle, ClickHouse, PostgreSQL, Parquet, and object storage"
+description = "Historical and incremental SEC XBRL warehouse using Arelle, ClickHouse, PostgreSQL, Parquet, and object storage"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 license = { text = "MIT" }
-authors = [{ name = "Project scaffold" }]
+authors = [{ name = "SEC XBRL Warehouse contributors" }]
 dependencies = [
   "aiofiles>=24.1,<26",
   "alembic>=1.16,<2",
@@ -66,6 +66,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "ASYNC"]
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
+"src/sec_xbrl_warehouse/cli.py" = ["B008"]
 "migrations/versions/*.py" = ["E501"]
 "tests/**/*.py" = ["S101", "B017"]
 "tests/integration/test_clickhouse_ddl.py" = ["E402"]
@@ -119,4 +120,4 @@ source = ["sec_xbrl_warehouse"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 35
+fail_under = 70

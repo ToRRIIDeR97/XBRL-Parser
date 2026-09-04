@@ -12,7 +12,11 @@ fi
 "${PYTHON_BIN}" -m venv "${VENV}"
 "${VENV}/bin/python" -m pip install --upgrade pip
 "${VENV}/bin/python" -m pip install -e '.[dev]'
-docker compose up -d postgres clickhouse minio minio-init
+if docker compose version >/dev/null 2>&1; then
+  docker compose up -d postgres clickhouse minio minio-init
+else
+  docker-compose up -d postgres clickhouse minio minio-init
+fi
 "${VENV}/bin/alembic" upgrade head
 "${VENV}/bin/xbrl-warehouse" db init-clickhouse
 "${VENV}/bin/xbrl-warehouse" doctor --skip-sec-identity

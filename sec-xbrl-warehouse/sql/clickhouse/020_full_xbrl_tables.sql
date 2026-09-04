@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_contexts
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
 PARTITION BY toUInt16OrZero(substring(accession, 12, 2))
-ORDER BY (accession, context_id)
+ORDER BY (accession, extraction_revision, source_document, context_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_concepts
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_concepts
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
-ORDER BY (accession, concept_namespace, concept_name)
+ORDER BY (accession, extraction_revision, concept_namespace, concept_name)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_facts
@@ -90,13 +90,15 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_facts
     footnote_ids Array(String),
     source_document String,
     source_fact_id Nullable(String),
+    source_attributes_json String DEFAULT '{}' CODEC(ZSTD(6)),
+    value_kind LowCardinality(String) DEFAULT 'text',
     extraction_revision UInt32,
     _row_hash FixedString(64),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
 PARTITION BY toYear(filed_date)
-ORDER BY (cik, concept_namespace, concept_name, ifNull(period_end, toDate('1970-01-01')), ifNull(period_instant, toDate('1970-01-01')), accession, context_hash, fact_id)
+ORDER BY (cik, concept_namespace, concept_name, ifNull(period_end, toDate('1970-01-01')), ifNull(period_instant, toDate('1970-01-01')), accession, extraction_revision, context_hash, fact_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_relationships
@@ -124,7 +126,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_relationships
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
-ORDER BY (accession, network_type, link_role_uri, from_qname, to_qname, relationship_id)
+ORDER BY (accession, extraction_revision, network_type, link_role_uri, from_qname, to_qname, relationship_id)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_footnotes
@@ -141,5 +143,17 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_footnotes
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
-ORDER BY (accession, footnote_id)
+ORDER BY (accession, extraction_revision, footnote_id)
 SETTINGS index_granularity = 8192;
+
+-- Written last: readers never observe a partially loaded extraction revision.
+CREATE TABLE IF NOT EXISTS {{database}}.xbrl_extractions
+(
+    accession String,
+    extraction_revision UInt32,
+    entity_counts_json String,
+    metadata_json String CODEC(ZSTD(6)),
+    completed_at DateTime64(3, 'UTC')
+)
+ENGINE = ReplacingMergeTree(completed_at)
+ORDER BY (accession, extraction_revision);

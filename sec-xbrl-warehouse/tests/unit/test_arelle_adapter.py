@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from sec_xbrl_warehouse.config import Settings
-from sec_xbrl_warehouse.domain.enums import FactValueKind, PeriodKind
+from sec_xbrl_warehouse.domain.enums import FactValueKind, PeriodKind, RelationshipType
 from sec_xbrl_warehouse.domain.models import FilingRef
 from sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter import ArelleExtractor
 
@@ -38,13 +38,13 @@ def test_simple_fixture_extracts_core_entities(bundle) -> None:
 
     assert isinstance(bundle, XbrlExtractionBundle)
     assert len(bundle.contexts) == 1
-    assert len(bundle.facts) == 1
+    assert len(bundle.facts) == 3
     assert len(bundle.relationships) >= 1
     assert bundle.extraction_revision == 1
 
 
 def test_fact_carries_value_and_identity(bundle) -> None:
-    fact = bundle.facts[0]
+    fact = next(fact for fact in bundle.facts if fact.concept_name == "Revenue")
     assert fact.concept_qname == "ex:Revenue"
     assert fact.concept_name == "Revenue"
     assert fact.value_kind is FactValueKind.NUMERIC
@@ -65,9 +65,26 @@ def test_context_has_deterministic_hash(bundle) -> None:
     assert len(context.context_hash) == 64
     assert context.entity_scheme == "https://www.sec.gov/CIK"
     assert context.period_kind is PeriodKind.DURATION
+    assert context.dimensions[0].axis_name == "RegionAxis"
+    assert context.dimensions[0].member_name == "UnitedStatesMember"
+    assert context.dimensions[0].context_element == "segment"
 
 
 def test_document_metadata_reports_source(bundle) -> None:
     assert bundle.metadata.entrypoint == "simple.xml"
     assert bundle.metadata.software_name == "arelle"
     assert "http://example.com/2026" in bundle.metadata.taxonomy_namespaces
+
+
+def test_networks_and_footnotes_keep_fact_lineage(bundle) -> None:
+    kinds = {relationship.relationship_type for relationship in bundle.relationships}
+    assert {
+        RelationshipType.PRESENTATION,
+        RelationshipType.CALCULATION,
+        RelationshipType.LABEL,
+        RelationshipType.FOOTNOTE,
+    } <= kinds
+    revenue = next(fact for fact in bundle.facts if fact.concept_name == "Revenue")
+    assert len(bundle.footnotes) == 1
+    assert bundle.footnotes[0].linked_fact_ids == (revenue.fact_id,)
+    assert revenue.footnote_ids == (bundle.footnotes[0].footnote_id,)

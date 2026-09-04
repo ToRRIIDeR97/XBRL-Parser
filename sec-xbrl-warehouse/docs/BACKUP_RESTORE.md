@@ -11,20 +11,47 @@
 
 1. Pause new producers.
 2. Record a run watermark and active job list.
-3. Back up PostgreSQL with a consistent snapshot.
-4. Replicate/version object storage to another failure domain.
+3. Back up PostgreSQL with `pg_dump --format=custom`; record its SHA-256 and the Alembic revision.
+4. Replicate/version object storage to another failure domain without deleting the destination's older versions.
 5. Optionally create ClickHouse backups.
-6. Store a manifest with checksums, schema revisions, and software versions.
+6. Store a manifest with checksums, object count/bytes, schema revisions, Git commit, dependency lock, ClickHouse version, and Arelle version.
+
+Example control-plane backup (supply credentials through the environment or a password file, not the command line):
+
+```bash
+install -d -m 0700 /srv/backups/xbrl/2026-09-04
+pg_dump --dbname=postgresql://xbrl@127.0.0.1:5432/xbrl_control \
+  --format=custom --no-owner \
+  --file=/srv/backups/xbrl/2026-09-04/control.dump
+sha256sum /srv/backups/xbrl/2026-09-04/control.dump
+mc mirror production/sec-xbrl replica/sec-xbrl/2026-09-04
+```
+
+Use the storage provider's versioned replication instead of `mc mirror` when available. Never use a mirror option that deletes destination objects.
 
 ## Restore procedure
 
-1. Restore PostgreSQL and object storage.
-2. Deploy the exact recorded code/dependency versions.
-3. Apply migrations only up to the recorded versions.
-4. Restore ClickHouse snapshot or recreate schemas and replay silver Parquet.
-5. Reconcile artifact/accession counts and hashes before resuming workers.
-6. Reclaim only jobs whose lock is stale and whose checkpoint inputs still match.
+1. Create new, empty PostgreSQL/ClickHouse databases and a new object-store bucket. Never test a restore over live names.
+2. Verify backup-manifest and object checksums before reading them.
+3. Restore PostgreSQL and object storage into those isolated names.
+4. Deploy the exact recorded code/dependency versions and apply migrations only up to the recorded revisions.
+5. Restore a ClickHouse snapshot or recreate schemas and replay silver Parquet.
+6. Run `doctor`, then reconcile artifact/accession counts, checksums, sampled raw facts, canonical lineage, and dead/running jobs.
+7. Reclaim only jobs whose lock is stale and whose checkpoint inputs still match.
+
+Example isolated PostgreSQL validation:
+
+```bash
+createdb --host=127.0.0.1 --username=xbrl xbrl_restore_drill_20260904
+pg_restore --host=127.0.0.1 --username=xbrl \
+  --dbname=xbrl_restore_drill_20260904 --exit-on-error --no-owner \
+  /srv/backups/xbrl/2026-09-04/control.dump
+psql --host=127.0.0.1 --username=xbrl --dbname=xbrl_restore_drill_20260904 \
+  --command='SELECT version_num FROM alembic_version;'
+```
+
+Set all application DSNs/database/bucket names to the drill targets before running `doctor`; stop immediately if any resolves to production.
 
 ## Required drills
 
-Run quarterly restore drills against a clean environment. A backup is not accepted until representative source artifacts, Arelle bundles, canonical facts, and lineage queries are recovered and reconciled.
+Run quarterly restore drills against a clean environment. Record start/end time, recovery point, checksum/object/row comparisons, failed steps, and cleanup. A backup is not accepted until representative source artifacts, Arelle bundles, canonical facts, mapping reviews, checkpoints, and lineage queries are recovered and reconciled.

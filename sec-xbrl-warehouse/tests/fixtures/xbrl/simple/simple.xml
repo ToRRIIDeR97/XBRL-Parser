@@ -2,12 +2,16 @@
 <xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
             xmlns:link="http://www.xbrl.org/2003/linkbase"
             xmlns:xlink="http://www.w3.org/1999/xlink"
+            xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
             xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
             xmlns:ex="http://example.com/2026">
   <link:schemaRef xlink:type="simple" xlink:href="simple.xsd"/>
   <xbrli:context id="D2025">
     <xbrli:entity>
       <xbrli:identifier scheme="https://www.sec.gov/CIK">0000000001</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="ex:RegionAxis">ex:UnitedStatesMember</xbrldi:explicitMember>
+      </xbrli:segment>
     </xbrli:entity>
     <xbrli:period>
       <xbrli:startDate>2025-01-01</xbrli:startDate>
@@ -15,5 +19,16 @@
     </xbrli:period>
   </xbrli:context>
   <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
-  <ex:Revenue contextRef="D2025" unitRef="USD" decimals="-3">123456789</ex:Revenue>
+  <ex:Revenue id="revenue-fact" contextRef="D2025" unitRef="USD" decimals="-3">123456789</ex:Revenue>
+  <ex:Cost contextRef="D2025" unitRef="USD" decimals="-3">23456789</ex:Cost>
+  <ex:Profit contextRef="D2025" unitRef="USD" decimals="-3">100000000</ex:Profit>
+  <link:footnoteLink xlink:type="extended" xlink:role="http://www.xbrl.org/2003/role/link">
+    <link:loc xlink:type="locator" xlink:href="#revenue-fact" xlink:label="loc_revenue"/>
+    <link:footnote xlink:type="resource" xlink:label="note_revenue"
+                   xlink:role="http://www.xbrl.org/2003/role/footnote" xml:lang="en">
+      Revenue includes subscription sales.
+    </link:footnote>
+    <link:footnoteArc xlink:type="arc" xlink:from="loc_revenue" xlink:to="note_revenue"
+                      xlink:arcrole="http://www.xbrl.org/2003/arcrole/fact-footnote"/>
+  </link:footnoteLink>
 </xbrli:xbrl>

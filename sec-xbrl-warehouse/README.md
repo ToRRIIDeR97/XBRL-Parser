@@ -1,6 +1,6 @@
 # SEC XBRL Warehouse
 
-A handoff-ready Python scaffold for building a local, open-source fundamentals warehouse from SEC XBRL data.
+A local-first, open-source fundamentals warehouse built from SEC XBRL data.
 
 The project separates the system into four durable layers:
 
@@ -9,21 +9,20 @@ The project separates the system into four durable layers:
 3. **Authoritative parsing:** Arelle for XBRL/iXBRL semantics and validation; EdgarTools only as a convenience adapter for discovery and developer-facing filing access.
 4. **Storage:** PostgreSQL for the control plane, ClickHouse for analytical facts, and S3-compatible object storage/MinIO for immutable raw files and Parquet.
 
-This repository intentionally contains implementation stubs in the places where the next coding agent must make project-specific choices. Search for `IMPLEMENT_ME` to find every required implementation point. Each stub has input/output contracts, invariants, failure behavior, and acceptance criteria in its docstring.
+The historical and incremental ingestion paths are implemented end to end. Production use still requires a real SEC identity, an acceptance corpus, a controlled backfill, and infrastructure-specific backup and security configuration.
 
-## What is already included
+## Included
 
 - Docker Compose services for PostgreSQL, ClickHouse, and MinIO.
 - PostgreSQL SQLAlchemy models and an initial Alembic migration.
 - ClickHouse DDL for SEC bulk tables, full-fidelity XBRL facts, concepts, contexts, relationships, and canonical facts.
 - Typed domain models for the SEC FSNDS tables and Arelle extraction results.
 - SEC-aware HTTP client with an explicit user agent, throttling, retries, and resumable-download hooks.
-- Bulk catalog parsing, ZIP/TSV streaming interfaces, Parquet/object-store abstractions, job contracts, CLI commands, API routes, tests, and synthetic fixtures.
-- A file-by-file implementation handoff in [`HANDOFF.md`](HANDOFF.md).
-- A generated symbol-level stub and interface index in [`FUNCTION_STUBS.md`](FUNCTION_STUBS.md).
+- Bulk catalog acquisition, bounded ZIP/TSV streaming, deterministic Parquet, resumable workers, reconciliation, and replay-safe publication.
+- Full-fidelity Arelle extraction, filing-package archiving, canonical mapping review, raw/canonical APIs, Prometheus metrics, and a Grafana dashboard.
+- Current implementation and acceptance status in [`HANDOFF.md`](HANDOFF.md).
 - A coding-agent operating contract in [`AGENTS.md`](AGENTS.md).
 - A transparent build/validation record in [`BUILD_REPORT.md`](BUILD_REPORT.md).
-- A per-file integrity list in `MANIFEST.sha256`.
 
 ## Quick start
 
@@ -76,29 +75,39 @@ xbrl-warehouse catalog sync --dataset notes
 xbrl-warehouse backfill plan --dataset notes --from-year 2016 --to-year 2026 --output data/plans/fsnds-2016-2026.json
 ```
 
-`backfill run`, Arelle extraction, and production warehouse writes remain explicit stubs. Their implementation order is documented in `HANDOFF.md`.
+Enqueue the reviewed plan and run a worker:
 
-## Recommended implementation sequence
+```bash
+xbrl-warehouse backfill enqueue data/plans/fsnds-2016-2026.json
+xbrl-warehouse worker run
+```
 
-1. Make the bulk FSNDS loader complete and idempotent.
-2. Implement ClickHouse Arrow inserts and PostgreSQL artifact/job state transitions.
-3. Implement Arelle extraction against the synthetic fixture, then a small SEC filing corpus.
-4. Add incremental EDGAR discovery and filing-package acquisition.
-5. Build canonical concept mapping only after the raw/as-filed layer is verified.
-6. Enable the API and scheduled workers after replay and recovery tests pass.
+For recurring incremental discovery, schedule the idempotent rolling command:
+
+```bash
+xbrl-warehouse filing discover-latest --lookback-days 3
+```
+
+## Production acceptance sequence
+
+1. Configure a real SEC identity and checksum-pinned taxonomy packages.
+2. Run the documented real-filing corpus and compare it with the bulk source.
+3. Restore a fresh copy of control state and immutable objects in an isolated environment.
+4. Canary one recent bulk artifact and one incremental filing before the historical backfill.
+5. Expand workers only after measuring SEC rate, Arelle memory, and ClickHouse throughput.
 
 ## Repository map
 
 ```text
 sec-xbrl-warehouse/
-├── AGENTS.md                 # Instructions for the coding agent taking over
+├── AGENTS.md                 # Development and validation contract
 ├── BUILD_REPORT.md           # Delivered scope, validation, and known limitations
-├── HANDOFF.md                # File-by-file implementation contract
-├── FUNCTION_STUBS.md         # Exact implementation symbols and signatures
-├── MANIFEST.sha256           # Integrity digest for every packaged repository file
-├── PROJECT_STRUCTURE.md      # Complete inventory of files and responsibilities
+├── HANDOFF.md                # Current operations and acceptance boundary
+├── FUNCTION_STUBS.md         # Protocol/interface index
+├── PROJECT_STRUCTURE.md      # Component ownership map
 ├── PROJECT_TREE.txt          # Generated full repository tree
-├── docker-compose.yml        # PostgreSQL, ClickHouse, MinIO, API and worker profiles
+├── docker-compose.yml        # Storage, application, and monitoring profiles
+├── ops/                      # Prometheus and Grafana provisioning
 ├── pyproject.toml            # Runtime/dev dependencies and tooling configuration
 ├── config/                   # Source, metric, mapping and validation configuration
 ├── docker/                   # Application image and database initialization assets
@@ -124,6 +133,7 @@ sec-xbrl-warehouse/
 ```bash
 make help
 make up
+make monitoring
 make install
 make migrate
 make init-clickhouse
@@ -136,4 +146,4 @@ make scan-stubs
 
 ## Status
 
-This ZIP is a **complete engineering scaffold, not a finished extractor**. It is designed so another agent can continue without having to rediscover the architecture, table contracts, infrastructure, or implementation boundaries. See `BUILD_REPORT.md` for the exact checks run and the runtime checks that remain for CI or a Docker-enabled machine.
+Implementation phases A–F are complete. See [`HANDOFF.md`](HANDOFF.md) for verified checks and the external production acceptance gates that remain; no live SEC corpus or production backfill is claimed.

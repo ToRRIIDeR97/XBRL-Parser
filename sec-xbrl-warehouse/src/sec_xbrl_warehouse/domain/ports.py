@@ -12,6 +12,7 @@ from sec_xbrl_warehouse.domain.models import (
     FilingPackageManifest,
     FilingRef,
     JobRecord,
+    SourceArtifactRef,
     StoredObject,
     ValidationIssue,
 )
@@ -46,6 +47,16 @@ class ObjectStore(Protocol):
 
 @runtime_checkable
 class ControlRepository(Protocol):
+    async def get_source_artifact(self, artifact_id: UUID) -> SourceArtifactRef: ...
+
+    async def get_checkpoint(
+        self, job_id: UUID, stage: str, key: str = "default"
+    ) -> dict[str, Any] | None: ...
+
+    async def save_checkpoint(
+        self, job_id: UUID, stage: str, payload: dict[str, Any], key: str = "default"
+    ) -> None: ...
+
     async def upsert_source_artifact(
         self,
         artifact: DatasetArtifact,
@@ -74,11 +85,30 @@ class ControlRepository(Protocol):
 
     async def claim_job(self, worker_id: str, lock_timeout_seconds: int) -> JobRecord | None: ...
 
-    async def complete_job(self, job_id: UUID, result: dict[str, Any] | None = None) -> None: ...
+    async def complete_job(
+        self,
+        job_id: UUID,
+        result: dict[str, Any] | None = None,
+        *,
+        worker_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None: ...
 
-    async def fail_job(self, job_id: UUID, error: str, retryable: bool) -> None: ...
+    async def fail_job(
+        self,
+        job_id: UUID,
+        error: str,
+        retryable: bool,
+        *,
+        worker_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None: ...
 
     async def upsert_filing(self, filing: FilingRef) -> None: ...
+
+    async def update_filing_package(
+        self, manifest: FilingPackageManifest, revision: int | None = None
+    ) -> None: ...
 
     async def record_validation_issues(self, issues: Sequence[ValidationIssue]) -> None: ...
 
@@ -90,6 +120,8 @@ class Warehouse(Protocol):
     def insert_sec_batch(self, table: SecTable, batch: Any) -> int: ...
 
     def insert_xbrl_bundle(self, bundle: XbrlExtractionBundle) -> dict[str, int]: ...
+
+    def publish_xbrl_bundle(self, bundle: XbrlExtractionBundle, counts: dict[str, int]) -> None: ...
 
     def insert_canonical_facts(self, facts: Sequence[CanonicalFact]) -> int: ...
 
@@ -115,6 +147,12 @@ class FilingDiscovery(Protocol):
 @runtime_checkable
 class FilingPackageStore(Protocol):
     async def download_package(self, filing: FilingRef) -> FilingPackageManifest: ...
+
+    def materialize_package(self, manifest: FilingPackageManifest, destination: Path) -> Path: ...
+
+    def archive_package(
+        self, manifest: FilingPackageManifest, package_directory: Path
+    ) -> FilingPackageManifest: ...
 
 
 @runtime_checkable

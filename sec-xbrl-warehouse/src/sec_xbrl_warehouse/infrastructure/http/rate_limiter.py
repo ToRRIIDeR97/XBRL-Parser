@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+from sec_xbrl_warehouse.observability.metrics import SEC_THROTTLE_SECONDS
+
 
 class AsyncRateLimiter:
     """Process-local leaky-bucket limiter with evenly spaced requests.
@@ -20,13 +22,17 @@ class AsyncRateLimiter:
         self._next_allowed = 0.0
 
     async def acquire(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            wait_seconds = max(0.0, self._next_allowed - now)
-            if wait_seconds:
-                await asyncio.sleep(wait_seconds)
+        started = time.monotonic()
+        try:
+            async with self._lock:
                 now = time.monotonic()
-            self._next_allowed = max(now, self._next_allowed) + self._interval
+                wait_seconds = max(0.0, self._next_allowed - now)
+                if wait_seconds:
+                    await asyncio.sleep(wait_seconds)
+                    now = time.monotonic()
+                self._next_allowed = max(now, self._next_allowed) + self._interval
+        finally:
+            SEC_THROTTLE_SECONDS.observe(time.monotonic() - started)
 
     async def __aenter__(self) -> AsyncRateLimiter:
         await self.acquire()

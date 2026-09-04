@@ -14,7 +14,11 @@ if ($Python -eq "py") {
 }
 & "$Venv\Scripts\python.exe" -m pip install --upgrade pip
 & "$Venv\Scripts\python.exe" -m pip install -e ".[dev]"
-docker compose up -d postgres clickhouse minio minio-init
+if (Get-Command docker-compose -ErrorAction SilentlyContinue) {
+    & docker-compose up -d postgres clickhouse minio minio-init
+} else {
+    & docker compose up -d postgres clickhouse minio minio-init
+}
 & "$Venv\Scripts\alembic.exe" upgrade head
 & "$Venv\Scripts\xbrl-warehouse.exe" db init-clickhouse
 & "$Venv\Scripts\xbrl-warehouse.exe" doctor --skip-sec-identity

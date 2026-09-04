@@ -21,9 +21,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     control = PostgresControlRepository(settings)
     app.state.warehouse = warehouse
     app.state.control = control
-    app.state.query_service = QueryService(warehouse)
-    yield
-    await control.close()
+    app.state.query_service = QueryService(warehouse, settings.config_dir / "canonical_metrics.yml")
+    try:
+        yield
+    finally:
+        await control.close()
+        warehouse.close()
 
 
 def create_app() -> FastAPI:

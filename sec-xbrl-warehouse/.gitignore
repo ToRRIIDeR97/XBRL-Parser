@@ -26,6 +26,7 @@ data/*
 *.parquet
 *.arrow
 *.zip
+!tests/fixtures/fsnds-mini.zip
 *.log
 
 # IDE / OS

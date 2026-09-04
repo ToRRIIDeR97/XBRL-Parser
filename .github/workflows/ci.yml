@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+defaults:
+  run:
+    working-directory: sec-xbrl-warehouse
+
 jobs:
   unit:
     runs-on: ubuntu-latest
@@ -13,6 +17,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: sec-xbrl-warehouse/pyproject.toml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
       - run: python -m ruff check .
@@ -50,6 +55,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: sec-xbrl-warehouse/pyproject.toml
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
       - run: cp .env.example .env

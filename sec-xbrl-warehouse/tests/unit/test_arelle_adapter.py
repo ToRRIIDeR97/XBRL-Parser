@@ -88,3 +88,30 @@ def test_networks_and_footnotes_keep_fact_lineage(bundle) -> None:
     assert len(bundle.footnotes) == 1
     assert bundle.footnotes[0].linked_fact_ids == (revenue.fact_id,)
     assert revenue.footnote_ids == (bundle.footnotes[0].footnote_id,)
+
+
+def test_parser_process_timeout_cleans_up(tmp_path):
+    import multiprocessing
+
+    from sec_xbrl_warehouse.exceptions import XbrlExtractionError
+
+    settings = Settings(
+        _env_file=None,
+        env="test",
+        data_dir=tmp_path / "data",
+        temp_dir=tmp_path / "tmp",
+        arelle_timeout_seconds=0.0001,
+    )
+    filing = FilingRef(
+        accession="0000000001-26-000001",
+        cik=1,
+        company_name="Test",
+        form="10-K",
+        filed_date=date(2026, 2, 15),
+        archive_directory_url="https://www.sec.gov/Archives/edgar/data/1/1",
+    )
+    before = {child.pid for child in multiprocessing.active_children()}
+    with pytest.raises(XbrlExtractionError, match="time budget"):
+        ArelleExtractor(settings).extract(FIXTURE, filing)
+    assert {child.pid for child in multiprocessing.active_children()} == before
+    assert not list(settings.temp_dir.glob("arelle-*"))

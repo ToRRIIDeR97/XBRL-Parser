@@ -6,6 +6,8 @@ Implementation phases A–F are complete. The repository contains working histor
 
 No live SEC production corpus or historical backfill was run while completing the implementation. Those require the operator's identifying user agent, network access, storage budget, and explicit production scope.
 
+The nine ranked performance/security audit findings have code fixes and regression coverage. See the [implementation plan and completion record](</Users/japardinathaniel/Documents/GitHub/XBRL Parser for SEC/sec-xbrl-warehouse/docs/AUDIT_IMPLEMENTATION_PLAN_2026-09-07.md>) for query budgets, production reader credentials, ingestion limits, and validation evidence. Configure the production API key and reader profile before deployment; recreate services to apply the new Compose memory limits.
+
 ## Verified locally
 
 Run the same gates before release:

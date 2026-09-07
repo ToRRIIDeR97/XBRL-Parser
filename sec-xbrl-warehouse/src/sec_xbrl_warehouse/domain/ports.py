@@ -44,6 +44,8 @@ class ObjectStore(Protocol):
         metadata: dict[str, str] | None = None,
     ) -> StoredObject: ...
 
+    def delete(self, key: str) -> None: ...
+
 
 @runtime_checkable
 class ControlRepository(Protocol):
@@ -153,6 +155,8 @@ class FilingPackageStore(Protocol):
     def archive_package(
         self, manifest: FilingPackageManifest, package_directory: Path
     ) -> FilingPackageManifest: ...
+
+    def delete_source_files(self, manifest: FilingPackageManifest) -> None: ...
 
 
 @runtime_checkable

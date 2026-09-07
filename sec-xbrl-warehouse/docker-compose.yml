@@ -32,7 +32,7 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -75,6 +75,7 @@ services:
 
   api:
     profiles: ["application", "monitoring"]
+    mem_limit: ${API_MEMORY_LIMIT:-2g}
     build:
       context: .
       dockerfile: docker/app.Dockerfile
@@ -100,6 +101,7 @@ services:
 
   worker:
     profiles: ["application", "monitoring"]
+    mem_limit: ${WORKER_MEMORY_LIMIT:-4g}
     build:
       context: .
       dockerfile: docker/app.Dockerfile

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Response, status
 
 from sec_xbrl_warehouse.api.dependencies import get_control, get_warehouse
@@ -20,7 +22,7 @@ async def ready(
     warehouse: ClickHouseWarehouse = Depends(get_warehouse),
     control: PostgresControlRepository = Depends(get_control),
 ) -> dict[str, object]:
-    clickhouse_ok = warehouse.ping()
+    clickhouse_ok = await asyncio.to_thread(warehouse.ping)
     postgres_ok = await control.ping()
     ready_state = clickhouse_ok and postgres_ok
     if not ready_state:

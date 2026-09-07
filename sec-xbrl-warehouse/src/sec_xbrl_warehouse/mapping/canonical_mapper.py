@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -21,8 +21,14 @@ from sec_xbrl_warehouse.normalization.facts import (
     normalize_unit,
 )
 
+ReviewRequest = tuple[XbrlFact, Sequence[str], dict[str, object]]
+
 
 class MappingRepository(Protocol):
+    async def create_reviews(
+        self, filing: FilingRef, reviews: Sequence[ReviewRequest]
+    ) -> dict[str, UUID]: ...
+
     async def approved_mappings_for_concept(
         self,
         namespace: str,
@@ -108,6 +114,9 @@ class CanonicalMapper:
             filing.cik,
             filing.filed_date,
         )
+        return self._decide(fact, approved)
+
+    def _decide(self, fact: XbrlFact, approved: Sequence[ConceptMapping]) -> MappingDecision:
         if len(approved) == 1:
             mapping = approved[0]
             metric = self.metrics[mapping.canonical_metric]
@@ -207,21 +216,55 @@ class CanonicalMapper:
         *,
         extraction_revision: int,
     ) -> tuple[CanonicalFact, ...]:
-        mapped: list[CanonicalFact] = []
-        for fact in facts:
-            decision = await self.map_fact(fact, filing)
-            if decision.mapping is None:
-                await self.enqueue_review(decision, fact, filing)
-                continue
-            mapped.append(
-                self.to_canonical_fact(
-                    decision,
-                    fact,
-                    filing,
-                    extraction_revision=extraction_revision,
+        return tuple(
+            [
+                fact
+                async for batch in self.map_batches(
+                    facts, filing, extraction_revision=extraction_revision
                 )
-            )
-        return tuple(mapped)
+                for fact in batch
+            ]
+        )
+
+    async def map_batches(
+        self,
+        facts: Iterable[XbrlFact],
+        filing: FilingRef,
+        *,
+        extraction_revision: int,
+        batch_rows: int = 500,
+    ) -> AsyncIterator[tuple[CanonicalFact, ...]]:
+        if batch_rows < 1:
+            raise ValueError("Mapping batch size must be positive")
+        approved: dict[tuple[str, str, str | None], Sequence[ConceptMapping]] = {}
+        mapped: list[CanonicalFact] = []
+        reviews: list[ReviewRequest] = []
+        count = 0
+        for fact in facts:
+            key = (fact.concept_namespace, fact.concept_name, fact.taxonomy_version)
+            if key not in approved:
+                approved[key] = await self.repository.approved_mappings_for_concept(
+                    *key, filing.cik, filing.filed_date
+                )
+            decision = self._decide(fact, approved[key])
+            if decision.mapping is None:
+                reviews.append((fact, decision.candidates, self.explain_mapping(decision)))
+            else:
+                mapped.append(
+                    self.to_canonical_fact(
+                        decision, fact, filing, extraction_revision=extraction_revision
+                    )
+                )
+            count += 1
+            if count == batch_rows:
+                if reviews:
+                    await self.repository.create_reviews(filing, reviews)
+                yield tuple(mapped)
+                mapped, reviews, count = [], [], 0
+        if count:
+            if reviews:
+                await self.repository.create_reviews(filing, reviews)
+            yield tuple(mapped)
 
     def explain_mapping(self, decision: MappingDecision) -> dict[str, object]:
         return {

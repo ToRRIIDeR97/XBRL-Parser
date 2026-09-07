@@ -20,6 +20,14 @@ def test_numeric_coercion_uses_decimal() -> None:
     assert value == Decimal("0.1")
 
 
+def test_invalid_numeric_coercion_preserves_numeric_fact_without_value() -> None:
+    kind, value = coerce_typed_value(
+        "(ixTransformValueError)", is_nil=False, is_numeric=True, base_xsd_type=None
+    )
+    assert kind is FactValueKind.NUMERIC
+    assert value is None
+
+
 def test_period_and_relationship_classification() -> None:
     assert classify_period(start=None, end=None, instant=date(2025, 1, 1)) is PeriodKind.INSTANT
     assert (

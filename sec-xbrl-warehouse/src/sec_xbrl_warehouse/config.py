@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sec_xbrl_warehouse.exceptions import ConfigurationError
@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     sec_connect_timeout_seconds: float = Field(default=20.0, gt=0)
     sec_read_timeout_seconds: float = Field(default=120.0, gt=0)
     sec_max_retries: int = Field(default=6, ge=0, le=20)
+    download_max_bytes: int = Field(default=32 * 1024**3, gt=0)
+    response_max_bytes: int = Field(default=64 * 1024**2, gt=0)
+    zip_max_members: int = Field(default=10_000, gt=0)
+    zip_max_directory_bytes: int = Field(default=64 * 1024**2, ge=1024 * 1024)
+    zip_max_member_bytes: int = Field(default=64 * 1024**3, gt=0)
+    zip_max_total_bytes: int = Field(default=128 * 1024**3, gt=0)
+    zip_max_compression_ratio: float = Field(default=200, gt=0)
+    filing_max_members: int = Field(default=1_000, gt=0)
+    filing_max_bytes: int = Field(default=512 * 1024**2, gt=0)
+    retain_filing_source_files: bool = True
 
     postgres_dsn: str = "postgresql+asyncpg://xbrl:xbrl_dev_password@localhost:5432/xbrl_control"
 
@@ -57,6 +67,7 @@ class Settings(BaseSettings):
     object_store_secure: bool = False
 
     arrow_batch_rows: int = Field(default=50_000, gt=0)
+    arrow_batch_bytes: int = Field(default=32 * 1024**2, gt=0)
     parquet_compression: Literal["zstd", "snappy", "gzip", "none"] = "zstd"
     parquet_compression_level: int | None = Field(default=6, ge=1, le=22)
 
@@ -67,6 +78,9 @@ class Settings(BaseSettings):
     arelle_taxonomy_packages_dir: Path = Path("data/taxonomy-packages")
     arelle_offline: bool = False
     arelle_allowed_taxonomy_hosts: str = "www.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org"
+    arelle_timeout_seconds: float = Field(default=600, gt=0)
+    arelle_memory_limit_bytes: int = Field(default=2 * 1024**3, gt=0)
+    extraction_max_bytes: int = Field(default=512 * 1024**2, gt=0)
 
     worker_id: str = "local-worker"
     worker_poll_seconds: float = Field(default=2.0, gt=0)
@@ -77,6 +91,15 @@ class Settings(BaseSettings):
 
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8080, ge=1, le=65535)
+    api_key: SecretStr | None = Field(default=None, min_length=32)
+    api_max_concurrency: int = Field(default=4, gt=0, le=64)
+    api_clickhouse_username: str | None = None
+    api_clickhouse_password: SecretStr | None = None
+    api_query_timeout_seconds: int = Field(default=30, gt=0)
+    api_query_max_memory_bytes: int = Field(default=512 * 1024**2, gt=0)
+    api_query_max_rows: int = Field(default=5_000_000, gt=0)
+    api_query_max_bytes: int = Field(default=1024**3, gt=0)
+    api_result_max_bytes: int = Field(default=16 * 1024**2, gt=0)
 
     @field_validator("log_level")
     @classmethod

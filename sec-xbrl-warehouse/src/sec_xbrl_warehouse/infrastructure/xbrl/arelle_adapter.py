@@ -4,7 +4,10 @@ import contextlib
 import hashlib
 import json
 import logging
+import multiprocessing
 import re
+import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterable
@@ -33,6 +36,7 @@ from sec_xbrl_warehouse.domain.xbrl import (
 )
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file
+from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
 from sec_xbrl_warehouse.validation.xbrl_validation import ArelleIssueNormalizer
 
 # ponytail: Arelle's legacy registries are process-global; use worker processes for parallelism.
@@ -76,9 +80,49 @@ class ArelleExtractor:
         *,
         extraction_revision: int = 1,
     ) -> XbrlExtractionBundle:
-        """Load, validate, and normalize one filing package."""
-        with _ARELLE_LOCK:
-            return self._extract(entrypoint.resolve(), filing, extraction_revision)
+        """Keep the parser's model in a killable process with a finite lifetime."""
+        if not entrypoint.is_file():
+            raise FileNotFoundError(entrypoint)
+        self.settings.ensure_directories()
+        with tempfile.TemporaryDirectory(prefix="arelle-", dir=self.settings.temp_dir) as directory:
+            output = Path(directory) / "bundle.json"
+            error_path = Path(directory) / "error.json"
+            process = multiprocessing.get_context("spawn").Process(
+                target=_extract_child,
+                args=(
+                    self.settings,
+                    entrypoint.resolve(),
+                    filing,
+                    extraction_revision,
+                    output,
+                    error_path,
+                ),
+            )
+            process.start()
+            try:
+                process.join(self.settings.arelle_timeout_seconds)
+                if process.is_alive():
+                    raise XbrlExtractionError("Arelle exceeded its extraction time budget")
+                if error_path.is_file():
+                    error = json.loads(error_path.read_bytes())
+                    failure = XbrlExtractionError(error["message"])
+                    failure.validation_issues = tuple(
+                        ValidationIssue.model_validate(item) for item in error["issues"]
+                    )
+                    raise failure
+                if process.exitcode != 0 or not output.is_file():
+                    raise XbrlExtractionError(
+                        f"Arelle process failed (exit {process.exitcode}); check its memory budget"
+                    )
+                return read_bundle(output, self.settings.extraction_max_bytes)
+            finally:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(5)
+                    if process.is_alive():
+                        process.kill()
+                        process.join()
+                process.close()
 
     def _extract(
         self, entrypoint: Path, filing: FilingRef, extraction_revision: int
@@ -598,6 +642,31 @@ class ArelleExtractor:
 # ---------------------------------------------------------------------------
 
 
+def _extract_child(
+    settings: Settings,
+    entrypoint: Path,
+    filing: FilingRef,
+    revision: int,
+    output: Path,
+    error_path: Path,
+) -> None:
+    try:
+        # ponytail: Linux enforces address-space limits; macOS/Windows use the Compose memory limit.
+        if sys.platform == "linux":
+            import resource
+
+            resource.setrlimit(resource.RLIMIT_AS, (settings.arelle_memory_limit_bytes,) * 2)
+        with _ARELLE_LOCK:
+            bundle = ArelleExtractor(settings)._extract(entrypoint, filing, revision)
+        write_json(bundle, output, settings.extraction_max_bytes)
+    except Exception as exc:
+        write_json(
+            {"message": str(exc), "issues": getattr(exc, "validation_issues", ())},
+            error_path,
+            settings.extraction_max_bytes,
+        )
+
+
 def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
     """Use pinned caches first and enforce policy on initial requests and redirects."""
     original = cache.getfilename
@@ -776,8 +845,10 @@ def _coerce_fact_value(
             value = Decimal(str(raw_value))
             # Arrow decimals cannot store INF/NaN; the as-filed lexical remains intact.
             return FactValueKind.NUMERIC, value if value.is_finite() else None
-        except Exception as exc:
-            raise XbrlExtractionError(f"Invalid numeric lexical value: {raw_value!r}") from exc
+        except Exception:
+            # Arelle reports invalid inline transformations in its validation log.
+            # Preserve the fact and its as-filed lexical value instead of aborting the filing.
+            return FactValueKind.NUMERIC, None
     normalized = base_xsd_type.lower()
     if "boolean" in normalized or "bool" in normalized:
         lowered = raw_value.strip().lower()

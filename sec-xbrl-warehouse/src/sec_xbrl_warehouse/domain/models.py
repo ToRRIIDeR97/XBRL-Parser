@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from sec_xbrl_warehouse.domain.enums import (
     ArtifactState,
@@ -30,6 +30,20 @@ class DatasetArtifact(DomainModel):
     checksum_sha256: str | None = None
     etag: str | None = None
     last_modified: str | None = None
+
+    @field_validator("filename")
+    @classmethod
+    def safe_filename(cls, value: str) -> str:
+        if (
+            not value
+            or value in {".", ".."}
+            or any(char in value for char in "/\\:\x00")
+            or any(ord(char) < 32 for char in value)
+            or value.endswith((".", " "))
+            or PureWindowsPath(value).is_reserved()
+        ):
+            raise ValueError("Artifact filename must be a safe single filename")
+        return value
 
 
 class StoredObject(DomainModel):

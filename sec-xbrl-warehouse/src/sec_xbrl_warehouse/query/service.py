@@ -15,29 +15,27 @@ class FactQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cik: int | None = Field(default=None, ge=0)
-    accession: str | None = None
-    concept_namespace: str | None = None
-    concept_name: str | None = None
+    accession: str | None = Field(default=None, pattern=r"^\d{10}-\d{2}-\d{6}$")
+    concept_namespace: str | None = Field(default=None, max_length=2048)
+    concept_name: str | None = Field(default=None, max_length=512)
     filed_from: date | None = None
     filed_to: date | None = None
     limit: int = Field(default=500, ge=1, le=10_000)
-    offset: int = Field(default=0, ge=0)
+    offset: int = Field(default=0, ge=0, le=10_000)
 
     @model_validator(mode="after")
     def require_scan_bound(self) -> FactQuery:
         if self.filed_from and self.filed_to and self.filed_from > self.filed_to:
             raise ValueError("filed_from must not exceed filed_to")
-        if not any(
-            (
-                self.cik is not None,
-                self.accession,
-                self.concept_name,
-                self.filed_from,
-                self.filed_to,
+        if (
+            self.cik is None
+            and not self.accession
+            and not (
+                self.filed_from and self.filed_to and (self.filed_to - self.filed_from).days <= 366
             )
         ):
             raise ValueError(
-                "At least one company, filing, concept, or date constraint is required"
+                "A company, accession, or complete date window of at most 366 days is required"
             )
         return self
 

@@ -114,5 +114,23 @@ async def test_mapping_specificity_and_review_workflow(postgres_settings: Settin
         assert len(await repository.list_reviews()) == 1
         await repository.resolve_review(review, cik_mapping)
         assert await repository.list_reviews() == []
+        from sqlalchemy import event
+
+        statements = []
+
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            if "mapping_reviews" in statement:
+                statements.append(statement)
+
+        event.listen(repository.engine.sync_engine, "before_cursor_execute", capture)
+        requests = [
+            (fact.model_copy(update={"fact_id": str(i)}), (), {"reason": "bulk"})
+            for i in range(1001)
+        ]
+        first = await repository.create_reviews(filing, requests)
+        replay = await repository.create_reviews(filing, requests)
+        assert first == replay
+        assert len(first) == 1001
+        assert len(statements) == 9  # 3 inserts, then 3 replay inserts + 3 lookups
     finally:
         await repository.close()

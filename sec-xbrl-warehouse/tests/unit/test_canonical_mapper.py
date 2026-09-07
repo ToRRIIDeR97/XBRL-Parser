@@ -77,11 +77,23 @@ class _FakeRepository:
         self.mappings = list(mappings)
         self.reviews = reviews if reviews is not None else []
         self.review_calls = 0
+        self.lookup_calls = 0
+        self.batch_calls = 0
 
     async def approved_mappings_for_concept(
         self, namespace, concept_name, taxonomy_version, cik, filed_date
     ):
+        self.lookup_calls += 1
         return tuple(m for m in self.mappings if m.approved)
+
+    async def create_reviews(self, filing, reviews):
+        self.batch_calls += 1
+        return {
+            fact.fact_id: await self.create_review(
+                filing=filing, fact=fact, candidates=candidates, evidence=evidence
+            )
+            for fact, candidates, evidence in reviews
+        }
 
     async def create_review(self, *, filing, fact, candidates, evidence) -> UUID:
         self.review_calls += 1
@@ -194,3 +206,19 @@ def test_load_rules_from_yaml(tmp_path) -> None:
     mapper = CanonicalMapper.load_rules(metrics_path, seed_path, _FakeRepository())
     assert "Revenue" in mapper.metrics
     assert mapper.candidate_rules[("us-gaap", "Revenues")] == ("Revenue",)
+
+
+def test_mapping_batches_cache_lookups_but_check_each_facts_period():
+    repo = _FakeRepository(mappings=[_mapping()])
+    mapper = CanonicalMapper({"Revenue": _metric()}, {}, repo)
+    facts = [_fact().model_copy(update={"fact_id": str(i)}) for i in range(1001)]
+    facts[-1] = facts[-1].model_copy(update={"period_kind": PeriodKind.INSTANT})
+    mapped = asyncio.run(mapper.map_batch(facts, _filing(), extraction_revision=1))
+    assert len(mapped) == 1000
+    assert repo.lookup_calls == 1
+    assert repo.review_calls == 1
+    # A new invocation sees newly approved/revoked mappings.
+    repo.mappings = []
+    assert asyncio.run(mapper.map_batch(facts, _filing(), extraction_revision=1)) == ()
+    assert repo.lookup_calls == 2
+    assert repo.batch_calls == 4  # one incompatible review, then 500 + 500 + 1

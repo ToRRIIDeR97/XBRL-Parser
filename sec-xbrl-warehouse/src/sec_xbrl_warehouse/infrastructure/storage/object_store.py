@@ -117,6 +117,9 @@ class LocalObjectStore:
             local_path=destination,
         )
 
+    def delete(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+
     @staticmethod
     def _install(source: Path, destination: Path, checksum: str, key: str) -> None:
         try:
@@ -259,6 +262,9 @@ class S3ObjectStore:
             checksum_sha256=sha256,
             etag=str(head.get("ETag", "")).strip('"') or None,
         )
+
+    def delete(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
 
     def _put_file_once(
         self, source: Path, key: str, metadata: dict[str, str], checksum: str

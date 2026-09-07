@@ -119,6 +119,14 @@ def test_archive_and_materialize_round_trip(tmp_path: Path) -> None:
     assert materialized.name == "example-20251231.htm"
     assert materialized.is_file()
 
+    downloader.delete_source_files(archived)
+    assert archived.package_object_key and not store.exists(archived.package_object_key)
+    assert all(
+        not store.exists(filing_object_key(filing, member.name, member.checksum_sha256))
+        for member in members
+        if member.checksum_sha256
+    )
+
 
 def test_materialize_refuses_path_traversal(tmp_path: Path) -> None:
     settings = Settings(env="test", temp_dir=tmp_path / "tmp")
@@ -157,7 +165,7 @@ async def test_download_package_reuses_checksum_manifest(tmp_path: Path) -> None
                 }
             }
 
-        async def download(self, url: str, destination: Path):
+        async def download(self, url: str, destination: Path, **kwargs):
             self.downloads += 1
             data = url.rsplit("/", 1)[-1].encode()
             await asyncio.to_thread(destination.parent.mkdir, parents=True, exist_ok=True)
@@ -174,3 +182,37 @@ async def test_download_package_reuses_checksum_manifest(tmp_path: Path) -> None
     assert first.members == second.members
     assert second.manifest_object_key
     assert second.acquired_at <= datetime.now(UTC)
+
+
+async def test_storage_upload_keeps_event_loop_responsive(tmp_path):
+    import threading
+
+    pulse = threading.Event()
+    threads = []
+
+    class Store(LocalObjectStore):
+        def put_file(self, *args, **kwargs):
+            threads.append(threading.get_ident())
+            assert pulse.wait(2), "Event loop was blocked by upload"
+            return super().put_file(*args, **kwargs)
+
+    class Http:
+        async def get_json(self, url):
+            return {"directory": {"item": []}}
+
+        async def download(self, url, destination, **kwargs):
+            destination.write_bytes(b"x")
+            return destination, sha256(b"x").hexdigest(), 1, {}
+
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data")
+
+    async def heartbeat():
+        await asyncio.sleep(0.01)
+        pulse.set()
+
+    beat = asyncio.create_task(heartbeat())
+    await FilingPackageDownloader(
+        settings, Http(), Store(tmp_path / "objects", "test")
+    ).download_package(_filing())
+    await beat
+    assert threads and threading.get_ident() not in threads

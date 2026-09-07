@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
 import shutil
@@ -54,11 +55,14 @@ class FilingPackageDownloader:
             json.dumps(index_payload, sort_keys=True, separators=(",", ":")).encode()
         )
         cache_key = f"manifests/sec/filings/{filing.accession}/index-sha256={index_checksum}.json"
-        cached = self._cached_manifest(cache_key, filing)
+        cached = await asyncio.to_thread(self._cached_manifest, cache_key, filing)
         if cached is not None:
             return cached
         selected = select_package_files(index_payload, filing)
+        if len(selected) > self.settings.filing_max_members:
+            raise ArtifactIntegrityError("Filing exceeds configured member count")
         members: list[PackageMember] = []
+        remaining = self.settings.filing_max_bytes
         with tempfile.TemporaryDirectory(
             prefix="filing-download-", dir=self.settings.temp_dir
         ) as root:
@@ -66,9 +70,13 @@ class FilingPackageDownloader:
             for name in selected:
                 url = f"{filing.archive_directory_url}/{name}"
                 destination = staging / _safe_package_name(name)
-                _, checksum, size, headers = await self.http.download(url, destination)
+                _, checksum, size, headers = await self.http.download(
+                    url, destination, max_bytes=remaining
+                )
+                remaining -= size
                 key = filing_object_key(filing, name, checksum)
-                self.object_store.put_file(
+                await asyncio.to_thread(
+                    self.object_store.put_file,
                     destination,
                     key,
                     expected_sha256=checksum,
@@ -94,9 +102,9 @@ class FilingPackageDownloader:
         )
         cache_bytes = manifest.model_dump_json(indent=2).encode("utf-8")
         try:
-            self.object_store.put_bytes(cache_bytes, cache_key)
+            await asyncio.to_thread(self.object_store.put_bytes, cache_bytes, cache_key)
         except ArtifactIntegrityError:
-            cached = self._cached_manifest(cache_key, filing)
+            cached = await asyncio.to_thread(self._cached_manifest, cache_key, filing)
             if cached is None:
                 raise
             return cached
@@ -205,7 +213,15 @@ class FilingPackageDownloader:
     def materialize_package(self, manifest: FilingPackageManifest, destination: Path) -> Path:
         """Materialize all members locally and return the chosen entrypoint."""
         destination.mkdir(parents=True, exist_ok=True)
+        if len(manifest.members) > self.settings.filing_max_members:
+            raise ArtifactIntegrityError("Filing exceeds configured member count")
+        total = 0
         for member in manifest.members:
+            if (
+                member.size_bytes is not None
+                and total + member.size_bytes > self.settings.filing_max_bytes
+            ):
+                raise ArtifactIntegrityError("Filing exceeds configured byte limit")
             target = (destination / member.name).resolve()
             root = destination.resolve()
             if root not in target.parents and target != root:
@@ -214,11 +230,26 @@ class FilingPackageDownloader:
                 raise ArtifactIntegrityError(f"Member {member.name} has no checksum to locate")
             key = filing_object_key(manifest.filing, member.name, member.checksum_sha256)
             stored = self.object_store.get_file(key, target)
+            total += stored.size_bytes
+            if total > self.settings.filing_max_bytes:
+                raise ArtifactIntegrityError("Filing exceeds configured byte limit")
             if member.checksum_sha256 and stored.checksum_sha256 != member.checksum_sha256:
                 raise ArtifactIntegrityError(
                     f"Materialized member checksum mismatch: {member.name}"
                 )
         return destination / _choose_entrypoint(manifest)
+
+    def delete_source_files(self, manifest: FilingPackageManifest) -> None:
+        """Delete downloaded filing bytes while retaining lightweight manifests."""
+        keys = [
+            filing_object_key(manifest.filing, member.name, member.checksum_sha256)
+            for member in manifest.members
+            if member.checksum_sha256
+        ]
+        if manifest.package_object_key:
+            keys.append(manifest.package_object_key)
+        for key in keys:
+            self.object_store.delete(key)
 
     def _materialize_member(self, filing: FilingRef, member: PackageMember, staging: Path) -> Path:
         if member.checksum_sha256 is None:

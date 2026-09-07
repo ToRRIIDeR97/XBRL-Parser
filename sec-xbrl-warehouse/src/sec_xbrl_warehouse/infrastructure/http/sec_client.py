@@ -57,9 +57,39 @@ class SecHttpClient:
             await self.client.aclose()
 
     def _validate_url(self, url: str) -> None:
-        host = urlparse(url).hostname
-        if host not in self.ALLOWED_HOSTS:
-            raise SecAccessError(f"Refusing non-SEC host through SecHttpClient: {host!r}")
+        try:
+            parsed = urlparse(url)
+            if parsed.hostname not in self.ALLOWED_HOSTS:
+                raise SecAccessError(
+                    f"Refusing non-SEC host through SecHttpClient: {parsed.hostname!r}"
+                )
+            if (
+                parsed.scheme != "https"
+                or parsed.port not in {None, 443}
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                raise SecAccessError("SEC URLs must use HTTPS port 443 without credentials")
+        except ValueError as exc:
+            raise SecAccessError("Invalid SEC URL") from exc
+
+    async def _buffered_request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        async with self.client.stream(method, url, **kwargs) as response:
+            body = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                if len(body) + len(chunk) > self.settings.response_max_bytes:
+                    raise ArtifactIntegrityError("SEC response exceeds configured byte limit")
+                body.extend(chunk)
+            headers = dict(response.headers)
+            if method != "HEAD":
+                headers.pop("content-encoding", None)
+                headers.pop("content-length", None)
+            return httpx.Response(
+                response.status_code,
+                headers=headers,
+                content=bytes(body),
+                request=response.request,
+            )
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         self.settings.assert_sec_identity()
@@ -72,7 +102,7 @@ class SecHttpClient:
             await self.rate_limiter.acquire()
             try:
                 async with self._semaphore:
-                    response = await self.client.request(method, url, **kwargs)
+                    response = await self._buffered_request(method, url, **kwargs)
                 _observe_response(method, url, response)
                 for _ in range(10):
                     if not response.is_redirect:
@@ -83,7 +113,7 @@ class SecHttpClient:
                     url = redirected
                     await self.rate_limiter.acquire()
                     async with self._semaphore:
-                        response = await self.client.request(method, url, **kwargs)
+                        response = await self._buffered_request(method, url, **kwargs)
                     _observe_response(method, url, response)
                 if response.is_redirect:
                     raise SecAccessError(f"Too many SEC redirects: {url}")
@@ -161,6 +191,7 @@ class SecHttpClient:
         destination: Path,
         *,
         expected_sha256: str | None = None,
+        max_bytes: int | None = None,
     ) -> tuple[Path, str, int, dict[str, str]]:
         """Download a source artifact to `destination` and return metadata.
 
@@ -170,6 +201,13 @@ class SecHttpClient:
         """
         self._validate_url(url)
         self.settings.assert_sec_identity()
+        byte_limit = (
+            min(max_bytes, self.settings.download_max_bytes)
+            if max_bytes is not None
+            else self.settings.download_max_bytes
+        )
+        if byte_limit <= 0:
+            raise ArtifactIntegrityError("Download byte budget exhausted")
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_suffix(destination.suffix + ".part")
         sidecar = partial.with_suffix(partial.suffix + ".json")
@@ -190,8 +228,10 @@ class SecHttpClient:
         except (OSError, TypeError, ValueError):
             reusable_partial = False
         if reusable_partial:
-            with partial.open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
+            if partial.stat().st_size > byte_limit:
+                raise ArtifactIntegrityError("Partial download exceeds configured byte limit")
+            async with aiofiles.open(partial, "rb") as partial_handle:
+                while chunk := await partial_handle.read(1024 * 1024):
                     digest.update(chunk)
                     total += len(chunk)
             resume_from = total
@@ -255,9 +295,12 @@ class SecHttpClient:
                         raise ArtifactIntegrityError(
                             f"{name} changed during resumed download: {url}"
                         )
+            if expected_total is not None and expected_total > byte_limit:
+                raise ArtifactIntegrityError("Download exceeds configured byte limit")
             headers = _download_headers(response)
             mode = "ab" if resume_from > 0 and response.status_code == 206 else "wb"
-            sidecar.write_text(
+            await asyncio.to_thread(
+                sidecar.write_text,
                 json.dumps(
                     {
                         "url": url,
@@ -272,13 +315,16 @@ class SecHttpClient:
                 async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
                     if not chunk:
                         continue
+                    if total + len(chunk) > byte_limit:
+                        raise ArtifactIntegrityError("Download exceeds configured byte limit")
                     await handle.write(chunk)
                     digest.update(chunk)
                     total += len(chunk)
                     SOURCE_BYTES.labels(
                         source=urlparse(url).hostname or "unknown", dataset="sec"
                     ).inc(len(chunk))
-                    sidecar.write_text(
+                    await asyncio.to_thread(
+                        sidecar.write_text,
                         json.dumps(
                             {
                                 "url": url,
@@ -313,6 +359,7 @@ class SecHttpClient:
             for attempt in range(self.settings.sec_max_retries + 1):
                 current = url
                 response: httpx.Response | None = None
+                yielded = False
                 try:
                     for _ in range(10):
                         self._validate_url(current)
@@ -320,6 +367,7 @@ class SecHttpClient:
                         response = await self.client.send(
                             self.client.build_request("GET", current, headers=headers),
                             stream=True,
+                            follow_redirects=False,
                         )
                         SEC_REQUESTS.labels(
                             host=urlparse(current).hostname or "unknown",
@@ -343,6 +391,7 @@ class SecHttpClient:
                                     f"SEC request failed permanently: {current}: {exc}"
                                 ) from exc
                         try:
+                            yielded = True
                             yield response
                         finally:
                             await response.aclose()
@@ -352,6 +401,8 @@ class SecHttpClient:
                     )
                     await response.aclose()
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    if yielded:
+                        raise
                     SEC_REQUESTS.labels(
                         host=urlparse(current).hostname or "unknown", status="error"
                     ).inc()

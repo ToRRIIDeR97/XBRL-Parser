@@ -23,13 +23,10 @@ from sec_xbrl_warehouse.domain.ports import (
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
-    concepts_table,
-    contexts_table,
-    facts_table,
-    footnotes_table,
-    relationships_table,
+    iter_xbrl_tables,
 )
-from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes
+from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha256_file
+from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
 from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
 from sec_xbrl_warehouse.observability.metrics import (
     ROWS_PARSED,
@@ -98,8 +95,8 @@ class IncrementalFilingIngestor:
                     )
                     if stored.checksum_sha256 != extracted["sha256"]:
                         raise XbrlExtractionError("Saved extraction checksum mismatch")
-                    bundle = XbrlExtractionBundle.model_validate_json(
-                        await asyncio.to_thread(path.read_bytes)
+                    bundle = await asyncio.to_thread(
+                        read_bundle, path, self.settings.extraction_max_bytes
                     )
                 else:
                     entrypoint = await asyncio.to_thread(
@@ -132,10 +129,15 @@ class IncrementalFilingIngestor:
                     }.items():
                         ROWS_PARSED.labels(source="arelle", table=entity).inc(count)
                     if self.object_store is not None:
-                        data = bundle.model_dump_json().encode("utf-8")
-                        checksum = sha256_bytes(data)
+                        path = staging / "extraction.json"
+                        await asyncio.to_thread(
+                            write_json, bundle, path, self.settings.extraction_max_bytes
+                        )
+                        checksum = await asyncio.to_thread(sha256_file, path)
                         key = f"silver/xbrl/extractions/accession={filing.accession}/revision={extraction_revision}/sha256={checksum}.json"
-                        await asyncio.to_thread(self.object_store.put_bytes, data, key)
+                        await asyncio.to_thread(
+                            self.object_store.put_file, path, key, expected_sha256=checksum
+                        )
                         await self._save(job_id, "extract", {"object_key": key, "sha256": checksum})
 
                 if await self._checkpoint(job_id, "validation") is None:
@@ -164,11 +166,13 @@ class IncrementalFilingIngestor:
 
                 counts = await self._persist_bundle(bundle, job_id)
                 if self.mapper is not None and await self._checkpoint(job_id, "canonical") is None:
-                    canonical = await self.mapper.map_batch(
+                    mapped = 0
+                    async for canonical in self.mapper.map_batches(
                         bundle.facts, filing, extraction_revision=extraction_revision
-                    )
-                    await asyncio.to_thread(self.warehouse.insert_canonical_facts, canonical)
-                    await self._save(job_id, "canonical", {"mapped": len(canonical)})
+                    ):
+                        await asyncio.to_thread(self.warehouse.insert_canonical_facts, canonical)
+                        mapped += len(canonical)
+                    await self._save(job_id, "canonical", {"mapped": mapped})
                 await asyncio.to_thread(self.warehouse.publish_xbrl_bundle, bundle, counts)
                 await self.control.update_filing_package(manifest, extraction_revision)
                 reconciliation = await self.reconcile(filing.accession)
@@ -180,6 +184,8 @@ class IncrementalFilingIngestor:
                     "reconciliation": reconciliation,
                     "status": "complete",
                 }
+                if not self.settings.retain_filing_source_files:
+                    await asyncio.to_thread(self.package_store.delete_source_files, manifest)
                 await self._save(job_id, "complete", result)
                 return result
         except Exception as exc:
@@ -219,28 +225,25 @@ class IncrementalFilingIngestor:
     async def _persist_bundle(
         self, bundle: XbrlExtractionBundle, job_id: UUID | None = None
     ) -> dict[str, int]:
-        for entity, build in {
-            "contexts": contexts_table,
-            "concepts": concepts_table,
-            "facts": facts_table,
-            "relationships": relationships_table,
-            "footnotes": footnotes_table,
-        }.items():
+        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
             if await self._checkpoint(job_id, f"silver:{entity}") is not None:
                 continue
-            table = await asyncio.to_thread(build, bundle)
+            tables = iter_xbrl_tables(
+                bundle, entity, self.settings.arrow_batch_rows, self.settings.arrow_batch_bytes
+            )
             prefix = f"silver/xbrl/{entity}/filed_year={bundle.filing.filed_date.year}/accession={bundle.filing.accession}/revision={bundle.extraction_revision}"
             objects = await asyncio.to_thread(
                 self.parquet_writer.write_batches,
-                table.to_batches(max_chunksize=self.settings.arrow_batch_rows),
+                tables,
                 destination_prefix=prefix,
                 partition_values={},
             )
-            ROWS_WRITTEN.labels(storage="parquet", table=entity).inc(table.num_rows)
+            count = len(getattr(bundle, entity))
+            ROWS_WRITTEN.labels(storage="parquet", table=entity).inc(count)
             await self._save(
                 job_id,
                 f"silver:{entity}",
-                {"rows": table.num_rows, "objects": [item.key for item in objects]},
+                {"rows": count, "objects": [item.key for item in objects]},
             )
         saved = await self._checkpoint(job_id, "gold")
         if saved is not None:
@@ -256,7 +259,7 @@ class IncrementalFilingIngestor:
             self.warehouse.query,
             """
             SELECT n.*, d.segments, d.segt FROM v_sec_numeric_latest AS n
-            LEFT JOIN sec_dimensions FINAL AS d ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
+            LEFT JOIN sec_dimensions AS d FINAL ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
             WHERE n.adsh = %(accession)s
             """,
             params,
@@ -265,7 +268,7 @@ class IncrementalFilingIngestor:
             self.warehouse.query,
             """
             SELECT n.*, d.segments, d.segt FROM v_sec_text_latest AS n
-            LEFT JOIN sec_dimensions FINAL AS d ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
+            LEFT JOIN sec_dimensions AS d FINAL ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
             WHERE n.adsh = %(accession)s
             """,
             params,
@@ -277,7 +280,9 @@ class IncrementalFilingIngestor:
             "SELECT * FROM v_xbrl_facts_latest WHERE accession = %(accession)s",
             params,
         )
-        result = reconcile_filing_rows(accession, bulk_numeric, bulk_text, raw)
+        result = await asyncio.to_thread(
+            reconcile_filing_rows, accession, bulk_numeric, bulk_text, raw
+        )
         if self.object_store is not None:
             data = json.dumps(result, sort_keys=True, default=str).encode()
             key = f"reconciliation/filings/{accession}/sha256={sha256_bytes(data)}.json"

@@ -17,6 +17,7 @@ from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
     ConceptMappingRow,
     MappingReviewRow,
 )
+from sec_xbrl_warehouse.mapping.canonical_mapper import ReviewRequest
 
 
 class PostgresMappingRepository:
@@ -222,38 +223,51 @@ class PostgresMappingRepository:
         candidates: Sequence[str],
         evidence: dict[str, object],
     ) -> UUID:
-        """Create an open review candidate for an unmapped fact."""
-        async with self.sessions.begin() as session:
-            statement = (
-                pg_insert(MappingReviewRow)
-                .values(
-                    accession=filing.accession,
-                    fact_id=fact.fact_id,
-                    concept_qname=fact.concept_qname,
-                    candidate_metric_codes=list(candidates),
-                    evidence={
+        return (await self.create_reviews(filing, [(fact, candidates, evidence)]))[fact.fact_id]
+
+    async def create_reviews(
+        self, filing: FilingRef, reviews: Sequence[ReviewRequest]
+    ) -> dict[str, UUID]:
+        result: dict[str, UUID] = {}
+        for offset in range(0, len(reviews), 500):
+            rows = {
+                fact.fact_id: {
+                    "accession": filing.accession,
+                    "fact_id": fact.fact_id,
+                    "concept_qname": fact.concept_qname,
+                    "candidate_metric_codes": list(candidates),
+                    "evidence": {
                         **evidence,
                         "namespace": fact.concept_namespace,
                         "concept_name": fact.concept_name,
                         "taxonomy_version": fact.taxonomy_version,
                         "cik": filing.cik,
                     },
-                    state="open",
+                    "state": "open",
+                }
+                for fact, candidates, evidence in reviews[offset : offset + 500]
+            }
+            async with self.sessions.begin() as session:
+                inserted = await session.execute(
+                    pg_insert(MappingReviewRow)
+                    .values(list(rows.values()))
+                    .on_conflict_do_nothing(constraint="uq_mapping_review_fact")
+                    .returning(MappingReviewRow.fact_id, MappingReviewRow.id)
                 )
-                .on_conflict_do_nothing(constraint="uq_mapping_review_fact")
-                .returning(MappingReviewRow.id)
-            )
-            review_id = await session.scalar(statement)
-            if review_id is None:
-                review_id = await session.scalar(
-                    select(MappingReviewRow.id).where(
-                        MappingReviewRow.accession == filing.accession,
-                        MappingReviewRow.fact_id == fact.fact_id,
+                found = {fact_id: review_id for fact_id, review_id in inserted.all()}
+                missing = rows.keys() - found.keys()
+                if missing:
+                    existing = await session.execute(
+                        select(MappingReviewRow.fact_id, MappingReviewRow.id).where(
+                            MappingReviewRow.accession == filing.accession,
+                            MappingReviewRow.fact_id.in_(missing),
+                        )
                     )
-                )
-            if review_id is None:
-                raise RuntimeError("PostgreSQL did not return a review ID")
-            return review_id
+                    found.update({fact_id: review_id for fact_id, review_id in existing.all()})
+                if found.keys() != rows.keys():
+                    raise RuntimeError("PostgreSQL did not return all review IDs")
+                result.update(found)
+        return result
 
 
 def _to_concept_mapping(row: ConceptMappingRow, metric_code: str) -> ConceptMapping:

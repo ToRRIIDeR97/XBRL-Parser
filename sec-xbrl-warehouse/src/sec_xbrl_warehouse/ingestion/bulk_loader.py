@@ -13,6 +13,7 @@ from uuid import UUID
 
 import pyarrow as pa
 
+from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import SEC_TABLE_LOAD_ORDER, ArtifactState, SecTable, Severity
 from sec_xbrl_warehouse.domain.models import LoadStats, SourceArtifactRef, ValidationIssue
 from sec_xbrl_warehouse.domain.ports import BatchWriter, ControlRepository, ObjectStore, Warehouse
@@ -46,12 +47,15 @@ class BulkArtifactLoader:
         warehouse: Warehouse,
         control: ControlRepository,
         object_store: ObjectStore | None = None,
+        *,
+        settings: Settings | None = None,
     ) -> None:
         self.reader = reader
         self.parquet_writer = parquet_writer
         self.warehouse = warehouse
         self.control = control
         self.object_store = object_store
+        self.settings = settings or Settings()
 
     async def load_artifact(
         self,
@@ -154,7 +158,7 @@ class BulkArtifactLoader:
             raise ArtifactIntegrityError(
                 f"Checksum mismatch for {local_zip}: expected {artifact.checksum_sha256}"
             )
-        validate_zip_integrity(local_zip)
+        validate_zip_integrity(local_zip, self.settings)
         with zipfile.ZipFile(local_zip) as archive:
             manifest = self.reader.validate_manifest(archive)
             for table in SEC_TABLE_LOAD_ORDER:
@@ -210,8 +214,11 @@ class BulkArtifactLoader:
             if checkpoint is None:
                 with STAGE_LATENCY.labels(pipeline="bulk", stage=table.value).time():
                     batch_lookup = (
-                        sub_lookup.select(
-                            {str(row["adsh"]) for row in batch.to_pylist() if row.get("adsh")}
+                        await asyncio.to_thread(
+                            sub_lookup.select,
+                            set(filter(None, batch.column("adsh").to_pylist()))
+                            if "adsh" in batch.schema.names
+                            else set(),
                         )
                         if isinstance(sub_lookup, _SubLookup)
                         else sub_lookup

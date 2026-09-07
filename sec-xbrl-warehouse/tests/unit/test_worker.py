@@ -188,9 +188,9 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
             return {"accession": accession}
 
     class _Mapper:
-        async def map_batch(self, facts, filing, *, extraction_revision):
-            self.received = (facts, filing, extraction_revision)
-            return ()
+        async def map_batches(self, facts, filing, *, extraction_revision):
+            self.received = (tuple(facts), filing, extraction_revision)
+            yield ()
 
     class _Warehouse:
         def insert_canonical_facts(self, facts):

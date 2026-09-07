@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -44,17 +44,68 @@ class ClickHouseWarehouse:
     inserts because they are both slow and easy to make type-inconsistent.
     """
 
-    def __init__(self, settings: Settings, client: Any | None = None) -> None:
+    def __init__(
+        self, settings: Settings, client: Any | None = None, *, read_only: bool = False
+    ) -> None:
         self.settings = settings
         self.database = settings.clickhouse_database
+        query_settings = (
+            {
+                "readonly": 1,
+                "max_execution_time": settings.api_query_timeout_seconds,
+                "timeout_before_checking_execution_speed": 0,
+                "max_memory_usage": settings.api_query_max_memory_bytes,
+                "max_rows_to_read": settings.api_query_max_rows,
+                "max_bytes_to_read": settings.api_query_max_bytes,
+                "max_result_bytes": settings.api_result_max_bytes,
+                "max_result_rows": 10_000,
+                "result_overflow_mode": "throw",
+                "read_overflow_mode": "throw",
+                "timeout_overflow_mode": "throw",
+                "max_threads": 2,
+            }
+            if read_only
+            else {}
+        )
         self.client = client or clickhouse_connect.get_client(
             host=settings.clickhouse_host,
             port=settings.clickhouse_port,
-            username=settings.clickhouse_username,
-            password=settings.clickhouse_password,
+            username=(settings.api_clickhouse_username or settings.clickhouse_username)
+            if read_only
+            else settings.clickhouse_username,
+            password=settings.api_clickhouse_password.get_secret_value()
+            if read_only and settings.api_clickhouse_password is not None
+            else settings.clickhouse_password,
             database=settings.clickhouse_database,
             secure=settings.clickhouse_secure,
+            autogenerate_session_id=False,
+            settings=query_settings,
         )
+        if read_only:
+            try:
+                effective = {
+                    row["name"]: row["value"]
+                    for row in self.query(
+                        "SELECT name, value FROM system.settings WHERE name IN %(names)s",
+                        {"names": tuple(query_settings)},
+                    )
+                }
+                for name, budget in query_settings.items():
+                    value = effective.get(name)
+                    if (
+                        value is None
+                        or (isinstance(budget, str) and value != budget)
+                        or (
+                            isinstance(budget, int)
+                            and (float(value) > budget or (budget > 0 and float(value) <= 0))
+                        )
+                    ):
+                        raise ConfigurationError(
+                            f"API query budget {name} is not enforced; configure the reader's ClickHouse settings profile"
+                        )
+            except Exception:
+                self.client.close()
+                raise
 
     def ping(self) -> bool:
         try:
@@ -258,18 +309,13 @@ class ClickHouseWarehouse:
     def insert_xbrl_bundle(self, bundle: XbrlExtractionBundle) -> dict[str, int]:
         """Persist all entities from one Arelle extraction at lineage level."""
         counts: dict[str, int] = {}
-        tables = {
-            "contexts": contexts_table(bundle),
-            "concepts": concepts_table(bundle),
-            "facts": facts_table(bundle),
-            "relationships": relationships_table(bundle),
-            "footnotes": footnotes_table(bundle),
-        }
-        for entity, table in tables.items():
-            if table.num_rows == 0:
-                counts[entity] = 0
-                continue
-            counts[entity] = self._insert_arrow(f"xbrl_{entity}", table)
+        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+            counts[entity] = sum(
+                self._insert_arrow(f"xbrl_{entity}", table)
+                for table in iter_xbrl_tables(
+                    bundle, entity, self.settings.arrow_batch_rows, self.settings.arrow_batch_bytes
+                )
+            )
         return counts
 
     def insert_canonical_facts(self, facts: Sequence[CanonicalFact]) -> int:
@@ -355,6 +401,48 @@ def validate_canonical_facts(facts: Sequence[CanonicalFact]) -> None:
             raise WarehouseWriteError(
                 f"CanonicalFact for raw fact {fact.raw_fact_id} is missing mapping lineage"
             )
+
+
+def iter_xbrl_tables(
+    bundle: XbrlExtractionBundle,
+    entity: str,
+    batch_rows: int,
+    batch_bytes: int,
+) -> Iterator[pa.Table]:
+    """Convert bounded entity groups, retaining only one Arrow table at a time."""
+    if batch_rows < 1 or batch_bytes < 1:
+        raise ValueError("Arrow batch budgets must be positive")
+    build = {
+        "contexts": contexts_table,
+        "concepts": concepts_table,
+        "facts": facts_table,
+        "relationships": relationships_table,
+        "footnotes": footnotes_table,
+    }[entity]
+
+    def bounded(table: pa.Table) -> Iterator[pa.Table]:
+        if table.nbytes <= batch_bytes:
+            yield table
+        elif table.num_rows == 1:
+            raise WarehouseWriteError(f"Single {entity} row exceeds Arrow byte budget")
+        else:
+            middle = table.num_rows // 2
+            yield from bounded(table.slice(0, middle))
+            yield from bounded(table.slice(middle))
+
+    records: list[Any] = []
+    size = 0
+    for record in getattr(bundle, entity):
+        record_size = len(record.model_dump_json().encode("utf-8")) + 512
+        if record_size > batch_bytes:
+            raise WarehouseWriteError(f"Single {entity} record exceeds Arrow byte budget")
+        if records and (len(records) >= batch_rows or size + record_size > batch_bytes):
+            yield from bounded(build(bundle.model_copy(update={entity: tuple(records)})))
+            records, size = [], 0
+        records.append(record)
+        size += record_size
+    if records:
+        yield from bounded(build(bundle.model_copy(update={entity: tuple(records)})))
 
 
 def contexts_table(bundle: XbrlExtractionBundle) -> pa.Table:

@@ -41,6 +41,8 @@ def test_local_object_store_contract_and_key_safety(tmp_path: Path) -> None:
     store.get_file(stored.key, stored.local_path)  # type: ignore[arg-type]
     with pytest.raises(ArtifactIntegrityError):
         store.put_bytes(b"different", stored.key)
+    store.delete(stored.key)
+    assert not store.exists(stored.key)
     with pytest.raises(FileNotFoundError):
         store.get_file("missing", tmp_path / "missing.bin")
     with pytest.raises(ValueError, match="escapes"):
@@ -95,6 +97,9 @@ class _FakeS3:
     def download_file(self, bucket: str, key: str, destination: str) -> None:
         Path(destination).write_bytes(self.objects[key][0])
 
+    def delete_object(self, *, Key: str, **kwargs: object) -> None:
+        self.objects.pop(Key, None)
+
 
 def test_s3_object_store_immutable_round_trip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -122,6 +127,8 @@ def test_s3_object_store_immutable_round_trip(
     downloaded = store.get_file(second.key, destination)
     assert downloaded.checksum_sha256 == second.checksum_sha256
     assert destination.read_bytes() == b"two"
+    store.delete(first.key)
+    assert not store.exists(first.key)
     with pytest.raises(ArtifactIntegrityError, match="expected"):
         store.put_file(source, "wrong.bin", expected_sha256="0" * 64)
 

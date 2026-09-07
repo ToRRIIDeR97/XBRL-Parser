@@ -108,6 +108,7 @@ class _FakePackageStore:
         self.local_directory = None
         self.downloads = 0
         self.archives = 0
+        self.deletes = 0
 
     async def download_package(self, filing: FilingRef) -> FilingPackageManifest:
         self.downloads += 1
@@ -127,6 +128,9 @@ class _FakePackageStore:
         self.archives += 1
         return manifest.model_copy(update={"package_object_key": "bronze/filing.zip"})
 
+    def delete_source_files(self, manifest: FilingPackageManifest) -> None:
+        self.deletes += 1
+
 
 class _FakeWriter:
     def __init__(self) -> None:
@@ -141,6 +145,7 @@ class _FakeWarehouse:
     def __init__(self) -> None:
         self.bundles = []
         self.fail_once = False
+        self.queries = []
 
     def insert_xbrl_bundle(self, bundle) -> dict[str, int]:
         if self.fail_once:
@@ -153,6 +158,7 @@ class _FakeWarehouse:
         self.published = (bundle, counts)
 
     def query(self, sql, parameters=None) -> list[dict]:
+        self.queries.append(sql)
         if "sec_numeric_facts" in sql:
             return []  # no bulk representation yet
         return []
@@ -173,7 +179,14 @@ def test_ingest_runs_pipeline(tmp_path: Path) -> None:
     store = _FakePackageStore()
     writer = _FakeWriter()
     warehouse = _FakeWarehouse()
-    ingestor = IncrementalFilingIngestor(control, store, _FakeExtractor(), writer, warehouse)
+    ingestor = IncrementalFilingIngestor(
+        control,
+        store,
+        _FakeExtractor(),
+        writer,
+        warehouse,
+        settings=Settings(env="test", retain_filing_source_files=False),
+    )
     result = asyncio.run(ingestor.ingest(_filing(), extraction_revision=2))
     assert result["status"] == "complete"
     assert result["extraction_revision"] == 2
@@ -181,6 +194,7 @@ def test_ingest_runs_pipeline(tmp_path: Path) -> None:
     assert control.upserts[0].accession == "0000000001-26-000001"
     assert writer.calls == 2  # only the non-empty context and fact tables emit batches
     assert warehouse.bundles[0].filing.accession == "0000000001-26-000001"
+    assert store.deletes == 1
 
 
 def test_reconcile_reports_bulk_absence() -> None:
@@ -192,6 +206,7 @@ def test_reconcile_reports_bulk_absence() -> None:
     result = asyncio.run(ingestor.ingest(_filing()))
     reconciliation = result["reconciliation"]
     assert reconciliation["available"] is False
+    assert all("sec_dimensions AS d FINAL" in sql for sql in warehouse.queries[:2])
 
 
 def test_ingest_resumes_from_download_extract_and_silver_checkpoints(tmp_path: Path) -> None:
@@ -227,3 +242,65 @@ def test_ingest_resumes_from_download_extract_and_silver_checkpoints(tmp_path: P
     assert package_store.archives == 1
     assert extractor.calls == 1
     assert writer.calls == 2
+
+
+def test_extraction_checkpoint_streams_and_round_trips(tmp_path, monkeypatch):
+    from sec_xbrl_warehouse.exceptions import XbrlExtractionError
+    from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
+
+    bundle = _bundle()
+
+    def no_whole_bundle(*args, **kwargs):
+        pytest.fail("Whole-bundle serialization should not be used")
+
+    monkeypatch.setattr(XbrlExtractionBundle, "model_dump_json", no_whole_bundle)
+    path = tmp_path / "bundle.json"
+    write_json(bundle, path, 100000)
+    assert read_bundle(path, 100000) == bundle
+    with pytest.raises(XbrlExtractionError, match="byte limit"):
+        write_json(bundle, path, 5)
+    assert not path.exists()
+
+
+def test_entity_tables_are_built_in_bounded_batches():
+    from sec_xbrl_warehouse.exceptions import WarehouseWriteError
+    from sec_xbrl_warehouse.infrastructure.storage.clickhouse import iter_xbrl_tables
+
+    bundle = _bundle()
+    bundle = bundle.model_copy(
+        update={
+            "facts": tuple(bundle.facts[0].model_copy(update={"fact_id": str(i)}) for i in range(5))
+        }
+    )
+    tables = list(iter_xbrl_tables(bundle, "facts", 2, 100000))
+    assert [table.num_rows for table in tables] == [2, 2, 1]
+    assert [row["fact_id"] for table in tables for row in table.to_pylist()] == [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+    ]
+    with pytest.raises(WarehouseWriteError, match="byte budget"):
+        list(iter_xbrl_tables(bundle, "facts", 2, 5))
+
+
+def test_arrow_byte_limit_includes_denormalized_filing_metadata():
+    from sec_xbrl_warehouse.exceptions import WarehouseWriteError
+    from sec_xbrl_warehouse.infrastructure.storage.clickhouse import iter_xbrl_tables
+
+    bundle = _bundle()
+    bundle = bundle.model_copy(
+        update={
+            "filing": bundle.filing.model_copy(update={"company_name": "x" * 6000}),
+            "facts": bundle.facts * 5,
+        }
+    )
+    tables = list(iter_xbrl_tables(bundle, "facts", 50, 10000))
+    assert sum(table.num_rows for table in tables) == 5
+    assert all(table.nbytes <= 10000 for table in tables)
+    bundle = bundle.model_copy(
+        update={"filing": bundle.filing.model_copy(update={"company_name": "x" * 20000})}
+    )
+    with pytest.raises(WarehouseWriteError, match="row exceeds Arrow byte budget"):
+        list(iter_xbrl_tables(bundle, "facts", 50, 10000))

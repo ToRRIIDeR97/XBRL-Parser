@@ -27,7 +27,7 @@ def canonical_series(
     filed_from: date | None = None,
     filed_to: date | None = None,
     limit: int = Query(default=500, ge=1, le=10_000),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=10_000),
     include_dimensions: bool = False,
     service: QueryService = Depends(get_query_service),
 ) -> dict[str, Any]:

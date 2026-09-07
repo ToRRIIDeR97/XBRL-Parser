@@ -61,7 +61,12 @@ async def runtime_services(
             await repository.seed_metrics(tuple(mapper.metrics.values()))
             writer = ParquetBatchWriter(settings, store)
             loader = BulkArtifactLoader(
-                SecTsvBatchReader(settings.arrow_batch_rows), writer, warehouse, control, store
+                SecTsvBatchReader(settings.arrow_batch_rows, settings.arrow_batch_bytes),
+                writer,
+                warehouse,
+                control,
+                store,
+                settings=settings,
             )
             yield {
                 "control": control,
@@ -262,14 +267,17 @@ def build_handlers(
             from sec_xbrl_warehouse.domain.xbrl import XbrlFact
 
             filing = FilingRef.model_validate(job.payload["filing"])
-            facts = tuple(XbrlFact.model_validate(item) for item in job.payload.get("facts", []))
-            canonical = await mapper.map_batch(
+            payload_facts = job.payload.get("facts", [])
+            facts = (XbrlFact.model_validate(item) for item in payload_facts)
+            mapped = 0
+            async for canonical in mapper.map_batches(
                 facts,
                 filing,
                 extraction_revision=int(job.payload.get("extraction_revision", 1)),
-            )
-            await asyncio.to_thread(services["warehouse"].insert_canonical_facts, canonical)
-            return {"mapped": len(canonical), "unmapped": len(facts) - len(canonical)}
+            ):
+                await asyncio.to_thread(services["warehouse"].insert_canonical_facts, canonical)
+                mapped += len(canonical)
+            return {"mapped": mapped, "unmapped": len(payload_facts) - mapped}
 
         handlers[JobType.MAP_CANONICAL] = _map_canonical
     if services.get("discovery") is not None:

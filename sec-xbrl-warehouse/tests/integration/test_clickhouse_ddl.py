@@ -57,3 +57,35 @@ def test_clickhouse_upgrade_preserves_rows_and_old_table(clickhouse_settings: Se
             upgraded.close()
         admin.client.command(f"DROP DATABASE IF EXISTS {database} SYNC")
         admin.close()
+
+
+def test_shared_client_concurrency_and_query_budgets(clickhouse_settings):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    warehouse = ClickHouseWarehouse(clickhouse_settings)
+    try:
+        barrier = Barrier(2)
+
+        def query():
+            barrier.wait(timeout=5)
+            return warehouse.query("SELECT sleep(0.05) AS value")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(query) for _ in range(2)]
+            assert all(future.result() == [{"value": 0}] for future in futures)
+    finally:
+        warehouse.close()
+    reader = ClickHouseWarehouse(
+        clickhouse_settings.model_copy(update={"api_query_max_rows": 10000}), read_only=True
+    )
+    try:
+        assert reader.query("SELECT 1 AS value") == [{"value": 1}]
+        with pytest.raises(DatabaseError):
+            reader.query("CREATE TABLE forbidden (value UInt8) ENGINE = Memory")
+        with pytest.raises(DatabaseError):
+            reader.query("SELECT sum(number) FROM numbers(10001)")
+    finally:
+        reader.close()

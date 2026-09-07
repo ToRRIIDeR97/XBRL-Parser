@@ -148,10 +148,11 @@ class ZipManifest:
 class SecTsvBatchReader:
     """Bounded-memory reader for tab-delimited SEC bulk ZIP members."""
 
-    def __init__(self, batch_rows: int = 50_000) -> None:
-        if batch_rows <= 0:
-            raise ValueError("batch_rows must be positive")
+    def __init__(self, batch_rows: int = 50_000, batch_bytes: int = 32 * 1024**2) -> None:
+        if batch_rows <= 0 or batch_bytes <= 0:
+            raise ValueError("Batch budgets must be positive")
         self.batch_rows = batch_rows
+        self.batch_bytes = batch_bytes
 
     def validate_manifest(self, archive: zipfile.ZipFile) -> ZipManifest:
         by_stem: dict[str, list[str]] = {}
@@ -206,6 +207,7 @@ class SecTsvBatchReader:
                     raise SchemaDriftError(f"Missing header in {member_name}")
                 self.validate_header(table, list(reader.fieldnames))
                 rows: list[dict[str, str | None]] = []
+                batch_size = 0
                 start_line = 0
                 for source_line, row in enumerate(reader, start=2):
                     if None in row:
@@ -213,12 +215,26 @@ class SecTsvBatchReader:
                             f"Extra fields in {member_name} at source line {source_line}"
                         )
                     normalized = {key: _normalize_empty(value) for key, value in row.items()}
+                    size = sum(
+                        len(value.encode("utf-8"))
+                        for value in normalized.values()
+                        if value is not None
+                    )
+                    if size > self.batch_bytes:
+                        raise ArtifactIntegrityError(
+                            f"Row exceeds byte budget in {member_name} at line {source_line}"
+                        )
+                    if rows and batch_size + size > self.batch_bytes:
+                        yield self._raw_batch(table, member_name, rows, start_line)
+                        rows, batch_size = [], 0
                     if not rows:
                         start_line = source_line
                     rows.append(normalized)
+                    batch_size += size
                     if len(rows) >= self.batch_rows:
                         yield self._raw_batch(table, member_name, rows, start_line)
                         rows = []
+                        batch_size = 0
                 if rows:
                     yield self._raw_batch(table, member_name, rows, start_line)
 

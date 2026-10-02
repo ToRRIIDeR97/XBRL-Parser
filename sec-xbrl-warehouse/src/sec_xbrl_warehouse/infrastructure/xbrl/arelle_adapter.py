@@ -135,6 +135,7 @@ class ArelleExtractor:
             model_xbrl = self._load_model(controller, entrypoint)
             if model_xbrl.modelDocument is None:
                 raise XbrlExtractionError(f"Arelle did not load a model document for {entrypoint}")
+            _require_complete_dts(log_records)
             if self.settings.arelle_validate_xbrl or self.settings.arelle_validate_efm:
                 from arelle import Validate
 
@@ -667,6 +668,21 @@ def _extract_child(
         )
 
 
+# Arelle logs these and keeps going, silently omitting facts whose schemas
+# did not load. Treat them as a failed extraction instead of a partial one.
+_INCOMPLETE_DTS_CODES = frozenset(
+    {"FileNotLoadable", "webCache:unsuccessfulRetrieval", "ix11.12.1.2:missingReferences"}
+)
+
+
+def _require_complete_dts(log_records: list[dict[str, Any]]) -> None:
+    for record in log_records:
+        if record.get("code") in _INCOMPLETE_DTS_CODES:
+            raise XbrlExtractionError(
+                f"Taxonomy did not load completely ({record['code']}): {record.get('message')}"
+            )
+
+
 def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
     """Use pinned caches first and enforce policy on initial requests and redirects."""
     original = cache.getfilename
@@ -713,7 +729,10 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
             self.next_request = time.monotonic() + 1 / settings.sec_max_requests_per_second
             request.add_header("User-Agent", settings.sec_user_agent)
             # Arelle inflates gzip without an output bound; require unencoded responses.
+            # Arelle sends its own Accept-Encoding as an unredirected header, which
+            # urllib sends in preference to ordinary headers, so override both.
             request.add_header("Accept-Encoding", "identity")
+            request.add_unredirected_header("Accept-Encoding", "identity")
             return request
 
         https_request = http_request

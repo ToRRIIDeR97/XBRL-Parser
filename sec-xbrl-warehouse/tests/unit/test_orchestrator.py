@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import ArtifactState, DatasetKind, JobType
 from sec_xbrl_warehouse.domain.models import (
     DatasetArtifact,
@@ -74,8 +75,9 @@ class _Downloader:
 
 
 class _ObjectStore:
-    def get_file(self, key: str, destination: Path) -> StoredObject:
+    def get_file(self, key: str, destination: Path, *, max_bytes: int) -> StoredObject:
         assert key == "bronze/source.zip"
+        assert max_bytes == 100
         destination.write_bytes(b"zip")
         return StoredObject(
             bucket="test",
@@ -87,6 +89,8 @@ class _ObjectStore:
 
 
 class _Loader:
+    settings = Settings(_env_file=None, env="test", download_max_bytes=100)
+
     async def load_artifact(
         self, artifact: SourceArtifactRef, source_zip: Path, *, job_id: UUID | None = None
     ) -> LoadStats:

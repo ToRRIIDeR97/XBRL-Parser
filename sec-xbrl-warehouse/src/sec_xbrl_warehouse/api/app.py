@@ -26,7 +26,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         not settings.api_key
         or not settings.api_clickhouse_username
         or settings.api_clickhouse_username == settings.clickhouse_username
-        or settings.api_clickhouse_password is None
+        or not settings.api_clickhouse_password
+        or not settings.api_clickhouse_password.get_secret_value().strip()
     ):
         raise ConfigurationError(
             "Production API requires an API key and separate reader credentials"
@@ -52,21 +53,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     slots = asyncio.Semaphore(settings.api_max_concurrency)
+    readiness_slots = asyncio.Semaphore(1)
 
     @app.middleware("http")
     async def protect_queries(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if request.url.path in {"/health/live", "/health/ready"}:
+        path = request.scope["path"]
+        if path == "/health/live":
             return await call_next(request)
-        if settings.api_key is not None and not secrets.compare_digest(
-            request.headers.get("authorization", "").encode(),
-            f"Bearer {settings.api_key.get_secret_value()}".encode(),
+        if (
+            path != "/health/ready"
+            and settings.api_key is not None
+            and not secrets.compare_digest(
+                request.headers.get("authorization", "").encode(),
+                f"Bearer {settings.api_key.get_secret_value()}".encode(),
+            )
         ):
             return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-        if slots.locked():
+        capacity = readiness_slots if path == "/health/ready" else slots
+        if capacity.locked():
             return JSONResponse({"detail": "Query capacity reached"}, status_code=503)
-        async with slots:
+        async with capacity:
             return await call_next(request)
 
     @app.exception_handler(DatabaseError)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from typing import Any
 
 import httpx
@@ -13,10 +13,15 @@ from sec_xbrl_warehouse.domain.enums import JobType
 from sec_xbrl_warehouse.domain.models import JobRecord
 from sec_xbrl_warehouse.exceptions import (
     ArtifactIntegrityError,
+    DiskReserveError,
     SchemaDriftError,
+    SecRetryDeferred,
     StateTransitionError,
 )
-from sec_xbrl_warehouse.infrastructure.storage.postgres import PostgresControlRepository
+from sec_xbrl_warehouse.infrastructure.storage.postgres import (
+    PostgresControlRepository,
+    checkpoint_lease,
+)
 from sec_xbrl_warehouse.logging import get_logger
 from sec_xbrl_warehouse.observability.metrics import JOB_TRANSITIONS, JOBS, STAGE_LATENCY
 
@@ -105,10 +110,12 @@ class Worker:
         settings: Settings,
         control: PostgresControlRepository,
         handlers: dict[JobType, JobHandler],
+        job_types: Sequence[JobType] | None = None,
     ) -> None:
         self.settings = settings
         self.control = control
         self.handlers = handlers
+        self.job_types = tuple(job_types) if job_types else None
         self._stopping = asyncio.Event()
 
     def stop(self) -> None:
@@ -120,9 +127,19 @@ class Worker:
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(signal_name, self.stop)
         while not self._stopping.is_set():
+            try:
+                await asyncio.to_thread(self.settings.require_disk_reserve)
+            except DiskReserveError:
+                logger.warning("ingestion_paused_low_disk")
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self._stopping.wait(), timeout=self.settings.worker_poll_seconds
+                    )
+                continue
             job = await self.control.claim_job(
                 self.settings.worker_id,
                 self.settings.worker_lock_timeout_seconds,
+                self.job_types,
             )
             if job is None:
                 try:
@@ -147,7 +164,8 @@ class Worker:
             JOB_TRANSITIONS.labels(state="dead", job_type=job.job_type.value).inc()
             return
         heartbeat = asyncio.create_task(self._heartbeat(job))
-        execution = asyncio.create_task(handler(job))
+        with checkpoint_lease(job):
+            execution = asyncio.create_task(handler(job))
         JOBS.labels(job_type=job.job_type.value, state="running").inc()
         try:
             with STAGE_LATENCY.labels(stage="job", pipeline=job.job_type.value).time():
@@ -174,6 +192,7 @@ class Worker:
                     job.id,
                     str(exc),
                     retryable=retryable,
+                    **({"retry_at": exc.retry_at} if isinstance(exc, SecRetryDeferred) else {}),
                     worker_id=self.settings.worker_id,
                     attempt=job.attempts,
                 )
@@ -274,6 +293,7 @@ def build_handlers(
                 facts,
                 filing,
                 extraction_revision=int(job.payload.get("extraction_revision", 1)),
+                batch_bytes=(settings or Settings()).arrow_batch_bytes,
             ):
                 await asyncio.to_thread(services["warehouse"].insert_canonical_facts, canonical)
                 mapped += len(canonical)
@@ -307,6 +327,8 @@ def is_retryable_exception(exc: Exception) -> bool:
     if isinstance(
         exc,
         (
+            DiskReserveError,
+            SecRetryDeferred,
             TimeoutError,
             ConnectionError,
             httpx.TimeoutException,

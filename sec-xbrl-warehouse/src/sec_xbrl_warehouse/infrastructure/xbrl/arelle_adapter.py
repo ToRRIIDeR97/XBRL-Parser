@@ -671,23 +671,90 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
     """Use pinned caches first and enforce policy on initial requests and redirects."""
     original = cache.getfilename
     allowed = frozenset(settings.allowed_taxonomy_hosts)
+    original_cache_path = getattr(cache, "urlToCacheFilepath", None)
+    if original_cache_path is not None:
+
+        def contained_cache_path(
+            url: str, cacheDir: str | None = None, useRedirectFallback: bool = True
+        ) -> str:
+            result = str(original_cache_path(url, cacheDir, useRedirectFallback))
+            if (
+                not Path(result)
+                .resolve()
+                .is_relative_to(Path(cacheDir or cache.cacheDir).resolve())
+            ):
+                raise XbrlExtractionError("Taxonomy cache path escapes cache root")
+            return result
+
+        cache.urlToCacheFilepath = contained_cache_path
 
     class _TaxonomyRequests(BaseHandler):
         next_request = 0.0
+        downloaded = 0
+        requests = 0
 
         def http_request(self, request: Any) -> Any:
             parsed = urlsplit(request.full_url)
-            if parsed.scheme != "https" or parsed.hostname not in allowed:
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname not in allowed
+                or parsed.port not in {None, 443}
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
                 raise XbrlExtractionError(f"Taxonomy network access denied: {request.full_url}")
             if settings.arelle_offline:
                 raise XbrlExtractionError("Network access attempted in Arelle offline mode")
+            self.requests += 1
+            if self.requests > settings.filing_max_members:
+                raise XbrlExtractionError("Taxonomy request count exceeds configured limit")
             settings.assert_sec_identity()
             time.sleep(max(0.0, self.next_request - time.monotonic()))
             self.next_request = time.monotonic() + 1 / settings.sec_max_requests_per_second
             request.add_header("User-Agent", settings.sec_user_agent)
+            # Arelle inflates gzip without an output bound; require unencoded responses.
+            request.add_header("Accept-Encoding", "identity")
             return request
 
         https_request = http_request
+
+        def http_response(self, request: Any, response: Any) -> Any:
+            limit = min(
+                settings.response_max_bytes, settings.extraction_max_bytes - self.downloaded
+            )
+            encoding = response.headers.get("Content-Encoding", "identity").lower()
+            length = response.headers.get("Content-Length")
+            try:
+                declared_size = int(length) if length is not None else None
+            except (TypeError, ValueError) as exc:
+                response.close()
+                raise XbrlExtractionError("Invalid taxonomy Content-Length") from exc
+            if encoding not in {"", "identity"} or (
+                declared_size is not None and (declared_size < 0 or declared_size > limit)
+            ):
+                response.close()
+                raise XbrlExtractionError(
+                    "Taxonomy response exceeds byte limit or uses compression"
+                )
+            original_read = response.read
+            received = 0
+
+            def read(size: int | None = -1) -> bytes:
+                nonlocal received
+                remaining = min(limit - received, settings.extraction_max_bytes - self.downloaded)
+                amount = remaining + 1 if size is None or size < 0 else min(size, remaining + 1)
+                data: bytes = original_read(amount)
+                if len(data) > remaining:
+                    response.close()
+                    raise XbrlExtractionError("Taxonomy response exceeds configured byte limit")
+                received += len(data)
+                self.downloaded += len(data)
+                return data
+
+            response.read = read
+            return response
+
+        https_response = http_response
 
     cache.opener.add_handler(_TaxonomyRequests())
 
@@ -714,7 +781,12 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
                 )
             result = original(normalized, None, *args, **{**kwargs, "normalize": False})
             return str(result) if result is not None else None
-        if parsed.hostname not in allowed:
+        if (
+            parsed.hostname not in allowed
+            or parsed.port not in {None, 80 if parsed.scheme == "http" else 443}
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
             raise XbrlExtractionError(f"Unlisted taxonomy host: {parsed.hostname}")
         # HTTP namespace/schema references may resolve to approved local caches;
         # any actual network request is upgraded to HTTPS and checked again on redirect.
@@ -724,14 +796,22 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
                     cache.urlToCacheFilepath(normalized, cacheDir=cache_root), normalized
                 )
             )
+            cached = cached.resolve()
+            if not cached.is_relative_to(Path(cache_root).resolve()):
+                raise XbrlExtractionError("Taxonomy cache path escapes cache root")
             if cached.is_file():
                 return str(cached)
         if settings.arelle_offline:
             raise XbrlExtractionError(
                 f"Taxonomy is not cached for offline extraction: {normalized}"
             )
-        secure = "https:" + normalized[len(parsed.scheme) + 1 :]
+        secure = parsed._replace(scheme="https", netloc=parsed.hostname).geturl()
         result = original(secure, None, *args, **{**kwargs, "normalize": False})
+        if result is not None and not any(
+            Path(result).resolve().is_relative_to(Path(root).resolve())
+            for root in (cache.cacheDir, cache.builtInCacheDir)
+        ):
+            raise XbrlExtractionError("Returned taxonomy path escapes cache root")
         return str(result) if result is not None else None
 
     cache.getfilename = getfilename

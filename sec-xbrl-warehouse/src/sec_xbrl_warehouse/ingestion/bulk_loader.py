@@ -20,8 +20,9 @@ from sec_xbrl_warehouse.domain.ports import BatchWriter, ControlRepository, Obje
 from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, DataQualityError, SchemaDriftError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import sec_warehouse_schema
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file, stable_json_hash
+from sec_xbrl_warehouse.infrastructure.storage.parquet import verify_checkpoint_objects
 from sec_xbrl_warehouse.ingestion.bulk_downloader import validate_zip_integrity
-from sec_xbrl_warehouse.ingestion.sec_tsv import SecTsvBatchReader
+from sec_xbrl_warehouse.ingestion.sec_tsv import SEC_HEADERS, SecTsvBatchReader, bounded_tsv_lines
 from sec_xbrl_warehouse.observability.metrics import (
     ROWS_PARSED,
     ROWS_WRITTEN,
@@ -50,6 +51,14 @@ class BulkArtifactLoader:
         *,
         settings: Settings | None = None,
     ) -> None:
+        from sec_xbrl_warehouse.ingestion import sec_tsv
+
+        self.parser_identity = stable_json_hash(
+            {
+                "loader": sha256_file(Path(__file__)),
+                "reader": sha256_file(Path(sec_tsv.__file__)),
+            }
+        )
         self.reader = reader
         self.parquet_writer = parquet_writer
         self.warehouse = warehouse
@@ -78,7 +87,7 @@ class BulkArtifactLoader:
         started = datetime.now(UTC)
         try:
             await self.control.mark_artifact_state(artifact.id, ArtifactState.VALIDATING)
-            await asyncio.to_thread(self._validate_source, artifact, local_zip)
+            source_checksum = await asyncio.to_thread(self._validate_source, artifact, local_zip)
             await self.control.mark_artifact_state(artifact.id, ArtifactState.LOADING)
             sub_lookup = await asyncio.to_thread(self._build_sub_lookup, local_zip)
             try:
@@ -86,7 +95,12 @@ class BulkArtifactLoader:
                 parquet_keys: list[str] = []
                 for table in SEC_TABLE_LOAD_ORDER:
                     count, keys = await self._load_table(
-                        artifact, local_zip, table, sub_lookup=sub_lookup, job_id=job_id
+                        artifact,
+                        local_zip,
+                        table,
+                        sub_lookup=sub_lookup,
+                        job_id=job_id,
+                        source_checksum=source_checksum,
                     )
                     rows_by_table[table.value] = count
                     parquet_keys.extend(keys)
@@ -148,13 +162,13 @@ class BulkArtifactLoader:
             )
             raise
 
-    def _validate_source(self, artifact: SourceArtifactRef, local_zip: Path) -> None:
+    def _validate_source(self, artifact: SourceArtifactRef, local_zip: Path) -> str:
         import csv
-        import io
 
         if not local_zip.is_file():
             raise ArtifactIntegrityError(f"Local ZIP missing: {local_zip}")
-        if artifact.checksum_sha256 and sha256_file(local_zip) != artifact.checksum_sha256:
+        checksum = sha256_file(local_zip)
+        if artifact.checksum_sha256 and checksum != artifact.checksum_sha256:
             raise ArtifactIntegrityError(
                 f"Checksum mismatch for {local_zip}: expected {artifact.checksum_sha256}"
             )
@@ -163,9 +177,15 @@ class BulkArtifactLoader:
             manifest = self.reader.validate_manifest(archive)
             for table in SEC_TABLE_LOAD_ORDER:
                 with archive.open(manifest.members[table]) as binary:
-                    text = io.TextIOWrapper(binary, encoding="utf-8-sig", newline="")
-                    header = next(csv.reader(text, delimiter="\t", quoting=csv.QUOTE_NONE), None)
+                    text = bounded_tsv_lines(
+                        binary,
+                        self.reader.batch_bytes,
+                        manifest.members[table],
+                        len(SEC_HEADERS[table]),
+                    )
+                    header = next(csv.reader(text, delimiter="\t", strict=True), None)
                     self.reader.validate_header(table, header or [])
+        return checksum
 
     def _build_sub_lookup(self, local_zip: Path) -> _SubLookup:
         """Read the SUB member once to denormalize CIK/form/filed fields on NUM/TXT."""
@@ -196,6 +216,7 @@ class BulkArtifactLoader:
         *,
         sub_lookup: _SubLookup | dict[str, dict[str, Any]],
         job_id: UUID | None = None,
+        source_checksum: str | None = None,
     ) -> tuple[int, tuple[str, ...]]:
         """Stream, type, enrich, archive, and load one SEC source table.
 
@@ -206,11 +227,39 @@ class BulkArtifactLoader:
         keys: list[str] = []
         batches = self.reader.iter_batches(local_zip, table)
         index = 0
+        source_checksum = source_checksum or await asyncio.to_thread(sha256_file, local_zip)
         while (batch := await asyncio.to_thread(next, batches, None)) is not None:
             key = f"{artifact.id}:{artifact.revision}:{table.value}:{index}"
             checkpoint = (
                 await self.control.get_checkpoint(job_id, "bulk_batch", key) if job_id else None
             )
+            identity = {
+                "version": 1,
+                "parser": self.parser_identity,
+                "source_sha256": source_checksum,
+                "batch_rows": self.reader.batch_rows,
+                "batch_bytes": self.reader.batch_bytes,
+                "source_start_line": (batch.schema.metadata or {})
+                .get(b"source_start_line", b"")
+                .decode(),
+                "schema": str(sec_warehouse_schema(table)),
+                "content": stable_json_hash(batch.to_pylist()),
+            }
+            if checkpoint is not None and (
+                checkpoint.get("identity") != identity or checkpoint.get("rows") != batch.num_rows
+            ):
+                raise ArtifactIntegrityError(
+                    f"Incompatible or legacy bulk checkpoint {key}; retained unchanged. "
+                    "Verify and explicitly migrate legacy checkpoints before resuming."
+                )
+            if checkpoint is not None:
+                if self.object_store is None:
+                    raise ArtifactIntegrityError(
+                        "Bulk checkpoint replay requires object storage verification"
+                    )
+                await asyncio.to_thread(
+                    verify_checkpoint_objects, checkpoint, self.object_store, self.settings
+                )
             if checkpoint is None:
                 with STAGE_LATENCY.labels(pipeline="bulk", stage=table.value).time():
                     batch_lookup = (
@@ -245,10 +294,17 @@ class BulkArtifactLoader:
                     written = await asyncio.to_thread(
                         self.warehouse.insert_sec_batch, table, enriched
                     )
-                    checkpoint = {"rows": written, "objects": [item.key for item in objects]}
+                    if written != batch.num_rows:
+                        raise DataQualityError(f"Incomplete warehouse write for {key}")
+                    checkpoint = {
+                        "rows": written,
+                        "objects": [item.key for item in objects],
+                        "identity": identity,
+                        "object_records": [item.model_dump(mode="json") for item in objects],
+                    }
                     if job_id:
                         await self.control.save_checkpoint(job_id, "bulk_batch", checkpoint, key)
-            count += int(checkpoint["rows"])
+            count += batch.num_rows
             keys.extend(checkpoint["objects"])
             index += 1
         return count, tuple(keys)

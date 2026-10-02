@@ -54,3 +54,6 @@ JOB_TRANSITIONS = Counter(
     "Worker job outcomes",
     labelnames=("state", "job_type"),
 )
+
+DISK_FREE_BYTES = Gauge("xbrl_disk_free_bytes", "Free bytes on application volumes", ["volume"])
+DISK_RESERVE_BYTES = Gauge("xbrl_disk_reserve_bytes", "Required free bytes before ingestion")

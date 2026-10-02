@@ -34,3 +34,104 @@ def test_period_and_relationship_classification() -> None:
         relationship_type_from_arcrole("http://www.xbrl.org/2003/arcrole/summation-item")
         is RelationshipType.CALCULATION
     )
+
+
+def test_taxonomy_transport_enforces_authority_and_stream_budgets(monkeypatch):
+    import io
+    from types import SimpleNamespace
+    from urllib.request import Request
+
+    import pytest
+
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.exceptions import XbrlExtractionError
+    from sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter import _restrict_taxonomy_access
+
+    handlers = []
+    cache = SimpleNamespace(
+        getfilename=lambda url, *args, **kwargs: url,
+        opener=SimpleNamespace(add_handler=handlers.append),
+    )
+    settings = Settings(
+        _env_file=None,
+        env="test",
+        sec_user_agent="Test test@example.com",
+        response_max_bytes=5,
+        extraction_max_bytes=8,
+        filing_max_members=2,
+    )
+    _restrict_taxonomy_access(cache, settings)
+    handler = handlers[0]
+    monkeypatch.setattr(
+        "sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter.time.sleep", lambda _: None
+    )
+    for url in (
+        "http://www.sec.gov/a.xsd",
+        "https://www.sec.gov:444/a.xsd",
+        "https://user@www.sec.gov/a.xsd",
+        "https://localhost/a.xsd",
+    ):
+        with pytest.raises(XbrlExtractionError, match="denied"):
+            handler.https_request(Request(url))
+    request = handler.https_request(Request("https://www.sec.gov/a.xsd"))
+    assert request.get_header("Accept-encoding") == "identity"
+
+    def response(data, headers=None):
+        stream = io.BytesIO(data)
+        stream.headers = headers or {}
+        return stream
+
+    for headers in (
+        {"Content-Length": "6"},
+        {"Content-Encoding": "gzip"},
+        {"Content-Length": "invalid"},
+        {"Content-Length": "-1"},
+    ):
+        stream = response(b"abcdef", headers)
+        with pytest.raises(XbrlExtractionError):
+            handler.https_response(request, stream)
+        assert stream.closed
+    stream = handler.https_response(request, response(b"abcdef"))
+    assert stream.read(5) == b"abcde"
+    with pytest.raises(XbrlExtractionError, match="byte limit"):
+        stream.read(1)
+    assert stream.closed
+    stream = handler.https_response(request, response(b"1234"))
+    assert stream.read(3) == b"123"
+    with pytest.raises(XbrlExtractionError, match="byte limit"):
+        stream.read(1)
+    handler.https_request(Request("https://www.sec.gov/b.xsd"))
+    with pytest.raises(XbrlExtractionError, match="request count"):
+        handler.https_request(Request("https://www.sec.gov/c.xsd"))
+
+
+def test_cache_helper_rejects_escape_and_symlink(tmp_path):
+    from types import SimpleNamespace
+
+    import pytest
+    from arelle.WebCache import WebCache
+
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.exceptions import XbrlExtractionError
+    from sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter import _restrict_taxonomy_access
+
+    cache = WebCache(
+        SimpleNamespace(
+            userAppDir=str(tmp_path),
+            hasFileSystem=True,
+            isGAE=False,
+            disablePersistentConfig=True,
+            plugins=SimpleNamespace(hooks=lambda name: ()),
+        ),
+        None,
+    )
+    cache.workOffline = True
+    root = tmp_path / "cache"
+    (root / "https/www.sec.gov").mkdir(parents=True)
+    (tmp_path / "outside.xsd").write_text("harmless")
+    _restrict_taxonomy_access(cache, Settings(arelle_offline=True))
+    with pytest.raises(XbrlExtractionError, match="escapes"):
+        cache.getfilename("https://www.sec.gov/../../../outside.xsd")
+    (root / "https/www.sec.gov/link.xsd").symlink_to(tmp_path / "outside.xsd")
+    with pytest.raises(XbrlExtractionError, match="escapes"):
+        cache.getfilename("https://www.sec.gov/link.xsd")

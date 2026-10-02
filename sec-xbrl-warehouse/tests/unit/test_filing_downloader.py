@@ -150,6 +150,79 @@ def test_materialize_refuses_path_traversal(tmp_path: Path) -> None:
         filing_object_key(filing, "..\\escape.txt", "0" * 64)
 
 
+def test_materialize_bounds_object_restore_and_preserves_destination(tmp_path: Path) -> None:
+    settings = Settings(
+        env="test",
+        temp_dir=tmp_path / "tmp",
+        filing_max_bytes=5,
+    )
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    downloader = FilingPackageDownloader(settings, None, store)  # type: ignore[arg-type]
+    filing = _filing()
+    data = b"too large"
+    checksum = sha256(data).hexdigest()
+    name = filing.primary_document
+    assert name is not None
+    store.put_bytes(data, filing_object_key(filing, name, checksum))
+    manifest = FilingPackageManifest(
+        filing=filing,
+        members=(
+            PackageMember(
+                name=name,
+                source_url=f"{filing.archive_directory_url}/{name}",
+                checksum_sha256=checksum,
+                is_primary_document=True,
+                is_xbrl_entrypoint=True,
+            ),
+        ),
+        acquired_at=date.today(),  # type: ignore[arg-type]
+    )
+    destination = tmp_path / "out"
+    destination.mkdir()
+    target = destination / name
+    target.write_bytes(b"existing")
+
+    with pytest.raises(ArtifactIntegrityError, match="byte limit"):
+        downloader.materialize_package(manifest, destination)
+
+    assert target.read_bytes() == b"existing"
+
+
+def test_cached_manifest_rejects_filing_and_member_shape_mismatch(tmp_path: Path) -> None:
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp")
+    settings.temp_dir.mkdir(parents=True)
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    downloader = FilingPackageDownloader(settings, None, store)  # type: ignore[arg-type]
+    filing = _filing()
+    name = filing.primary_document
+    assert name is not None
+    member = PackageMember(
+        name=name,
+        source_url=f"{filing.archive_directory_url}/{name}",
+        checksum_sha256="0" * 64,
+    )
+
+    metadata_key = "manifest-metadata.json"
+    metadata_manifest = FilingPackageManifest(
+        filing=filing.model_copy(update={"form": "10-Q"}),
+        members=(member,),
+        acquired_at=datetime.now(UTC),
+    )
+    store.put_bytes(metadata_manifest.model_dump_json().encode(), metadata_key)
+    with pytest.raises(ArtifactIntegrityError, match="metadata mismatch"):
+        downloader._cached_manifest(metadata_key, filing, (name,))
+
+    shape_key = "manifest-shape.json"
+    shape_manifest = FilingPackageManifest(
+        filing=filing,
+        members=(member.model_copy(update={"name": "unexpected.xml"}),),
+        acquired_at=datetime.now(UTC),
+    )
+    store.put_bytes(shape_manifest.model_dump_json().encode(), shape_key)
+    with pytest.raises(ArtifactIntegrityError, match="do not match index"):
+        downloader._cached_manifest(shape_key, filing, (name,))
+
+
 async def test_download_package_reuses_checksum_manifest(tmp_path: Path) -> None:
     class _Http:
         def __init__(self) -> None:
@@ -216,3 +289,16 @@ async def test_storage_upload_keeps_event_loop_responsive(tmp_path):
     ).download_package(_filing())
     await beat
     assert threads and threading.get_ident() not in threads
+
+
+@pytest.mark.parametrize("name", ["/tmp/outside.xml", "../outside.xml", "missing.xml"])
+def test_entrypoint_must_be_contained_manifest_member(name):
+    from sec_xbrl_warehouse.ingestion.filing_downloader import _choose_entrypoint
+
+    manifest = FilingPackageManifest(
+        filing=_filing().model_copy(update={"instance_document": name}),
+        members=(),
+        acquired_at=datetime.now(UTC),
+    )
+    with pytest.raises(ArtifactIntegrityError):
+        _choose_entrypoint(manifest)

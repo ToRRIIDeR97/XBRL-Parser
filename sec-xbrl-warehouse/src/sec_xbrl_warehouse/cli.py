@@ -86,6 +86,11 @@ def doctor(skip_sec_identity: bool = False) -> None:
     except Exception as exc:
         checks.append(("Configuration files", False, str(exc)))
 
+    try:
+        settings.require_disk_reserve()
+        checks.append(("Disk reserve", True, "data and scratch reserves available"))
+    except Exception as exc:
+        checks.append(("Disk reserve", False, str(exc)))
     data_ready = settings.data_dir.is_dir() and os.access(settings.data_dir, os.W_OK)
     free_gib = shutil.disk_usage(settings.data_dir).free / 1024**3 if data_ready else 0
     checks.append(
@@ -304,11 +309,16 @@ def api_serve(
 
 
 @worker_app.command("run")
-def worker_run() -> None:
-    asyncio.run(_run_worker())
+def worker_run(
+    job_type: Annotated[
+        list[JobType] | None,
+        typer.Option(help="Claim only this job type; repeat for several. Default: all."),
+    ] = None,
+) -> None:
+    asyncio.run(_run_worker(job_type))
 
 
-async def _run_worker() -> None:
+async def _run_worker(job_types: list[JobType] | None = None) -> None:
     from prometheus_client import start_http_server
 
     settings = get_settings()
@@ -318,7 +328,7 @@ async def _run_worker() -> None:
     control = PostgresControlRepository(settings)
     try:
         async with runtime_services(settings, control) as services:
-            await Worker(settings, control, build_handlers(services=services)).run()
+            await Worker(settings, control, build_handlers(services=services), job_types).run()
     finally:
         await control.close()
         metrics_server.shutdown()

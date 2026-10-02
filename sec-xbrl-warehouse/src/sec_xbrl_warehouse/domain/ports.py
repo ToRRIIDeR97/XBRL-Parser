@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
-from sec_xbrl_warehouse.domain.enums import ArtifactState, SecTable
+from sec_xbrl_warehouse.domain.enums import ArtifactState, JobType, SecTable
 from sec_xbrl_warehouse.domain.models import (
     DatasetArtifact,
     FilingPackageManifest,
@@ -34,7 +35,9 @@ class ObjectStore(Protocol):
         metadata: dict[str, str] | None = None,
     ) -> StoredObject: ...
 
-    def get_file(self, key: str, destination: Path) -> StoredObject: ...
+    def get_file(
+        self, key: str, destination: Path, *, max_bytes: int | None = None
+    ) -> StoredObject: ...
 
     def put_bytes(
         self,
@@ -85,7 +88,12 @@ class ControlRepository(Protocol):
         max_attempts: int = 5,
     ) -> UUID: ...
 
-    async def claim_job(self, worker_id: str, lock_timeout_seconds: int) -> JobRecord | None: ...
+    async def claim_job(
+        self,
+        worker_id: str,
+        lock_timeout_seconds: int,
+        job_types: Sequence[JobType] | None = None,
+    ) -> JobRecord | None: ...
 
     async def complete_job(
         self,
@@ -104,6 +112,7 @@ class ControlRepository(Protocol):
         *,
         worker_id: str | None = None,
         attempt: int | None = None,
+        retry_at: datetime | None = None,
     ) -> None: ...
 
     async def upsert_filing(self, filing: FilingRef) -> None: ...

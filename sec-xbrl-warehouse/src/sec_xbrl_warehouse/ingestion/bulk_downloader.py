@@ -46,7 +46,12 @@ class BulkArtifactDownloader:
         if artifact.checksum_sha256:
             key = bronze_bulk_key(artifact, artifact.checksum_sha256)
             if await asyncio.to_thread(self.object_store.exists, key):
-                stored = await asyncio.to_thread(self.object_store.get_file, key, destination)
+                stored = await asyncio.to_thread(
+                    self.object_store.get_file,
+                    key,
+                    destination,
+                    max_bytes=self.settings.download_max_bytes,
+                )
                 if stored.checksum_sha256 != artifact.checksum_sha256:
                     raise ArtifactIntegrityError("Cached bulk checksum mismatch")
                 await asyncio.to_thread(validate_zip_integrity, destination, self.settings)

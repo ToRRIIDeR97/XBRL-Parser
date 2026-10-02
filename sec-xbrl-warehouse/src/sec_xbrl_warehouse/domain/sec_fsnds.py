@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SecRecord(BaseModel):
@@ -151,7 +151,7 @@ class CalRecord(SecRecord):
     adsh: str
     grp: int
     arc: int
-    negative: bool
+    negative: int = Field(ge=-1, le=1)
     ptag: str
     pversion: str
     ctag: str

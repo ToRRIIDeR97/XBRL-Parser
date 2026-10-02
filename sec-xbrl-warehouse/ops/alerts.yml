@@ -1,0 +1,17 @@
+groups:
+  - name: ingestion-capacity
+    rules:
+      - alert: XbrlDiskReserveExhausted
+        expr: xbrl_disk_free_bytes < on(job, instance) group_left xbrl_disk_reserve_bytes
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Ingestion paused because application disk reserve is exhausted
+      - alert: XbrlWorkerUnavailable
+        expr: up{job="xbrl-worker"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker metrics unavailable; check whether ingestion is deliberately paused

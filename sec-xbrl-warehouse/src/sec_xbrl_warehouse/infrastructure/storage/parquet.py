@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -39,6 +40,7 @@ class ParquetBatchWriter:
 
         for index, batch in enumerate(batches):
             table = batch if isinstance(batch, pa.Table) else pa.Table.from_batches([batch])
+            self.settings.require_disk_reserve(table.nbytes)
             with tempfile.NamedTemporaryFile(
                 dir=self.settings.temp_dir,
                 prefix="xbrl-parquet-",
@@ -65,3 +67,32 @@ class ParquetBatchWriter:
             finally:
                 tmp_path.unlink(missing_ok=True)
         return tuple(objects)
+
+
+def verify_checkpoint_objects(
+    checkpoint: dict[str, Any], object_store: ObjectStore, settings: Settings
+) -> None:
+    """Read retained Parquet bytes and verify identity and total rows before reuse."""
+    from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError
+
+    records = checkpoint.get("object_records")
+    if records is None or [record["key"] for record in records] != checkpoint.get("objects"):
+        raise ArtifactIntegrityError(
+            "Legacy or inconsistent silver checkpoint requires verification"
+        )
+    rows = 0
+    for record in records:
+        expected = StoredObject.model_validate(record)
+        with tempfile.TemporaryDirectory(dir=settings.temp_dir) as directory:
+            path = Path(directory) / "checkpoint.parquet"
+            object_store.get_file(expected.key, path, max_bytes=expected.size_bytes)
+            if (
+                path.stat().st_size != expected.size_bytes
+                or sha256_file(path) != expected.checksum_sha256
+            ):
+                raise ArtifactIntegrityError(
+                    f"Silver checkpoint integrity mismatch: {expected.key}"
+                )
+            rows += pq.ParquetFile(path).metadata.num_rows
+    if rows != checkpoint["rows"]:
+        raise ArtifactIntegrityError("Silver checkpoint row count mismatch")

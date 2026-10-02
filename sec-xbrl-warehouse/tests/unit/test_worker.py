@@ -11,6 +11,7 @@ from sec_xbrl_warehouse.exceptions import (
     SchemaDriftError,
     StateTransitionError,
 )
+from sec_xbrl_warehouse.infrastructure.storage.postgres import current_checkpoint_lease
 from sec_xbrl_warehouse.worker import build_handlers, is_retryable_exception
 
 
@@ -109,6 +110,27 @@ def test_worker_executes_and_completes_job() -> None:
     assert not control.failed
 
 
+def test_worker_propagates_checkpoint_lease_to_handler_task() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.worker import Worker
+
+    class _Control:
+        async def complete_job(self, *args, **kwargs):
+            return None
+
+    seen = []
+
+    async def handler(job):
+        seen.append(current_checkpoint_lease())
+        return None
+
+    job = _job(JobType.DOWNLOAD_BULK)
+    worker = Worker(Settings(env="test"), _Control(), {JobType.DOWNLOAD_BULK: handler})
+    asyncio.run(worker._execute(job))
+    assert seen == [job]
+    assert current_checkpoint_lease() is None
+
+
 def test_worker_fails_job_on_handler_error() -> None:
     from sec_xbrl_warehouse.config import Settings
     from sec_xbrl_warehouse.worker import Worker
@@ -188,7 +210,7 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
             return {"accession": accession}
 
     class _Mapper:
-        async def map_batches(self, facts, filing, *, extraction_revision):
+        async def map_batches(self, facts, filing, *, extraction_revision, batch_bytes):
             self.received = (tuple(facts), filing, extraction_revision)
             yield ()
 
@@ -263,7 +285,7 @@ def test_worker_handles_missing_handler_and_stops_while_idle() -> None:
         def __init__(self) -> None:
             self.failed = []
 
-        async def claim_job(self, worker_id, lock_timeout_seconds):
+        async def claim_job(self, worker_id, lock_timeout_seconds, job_types=None):
             return None
 
         async def fail_job(self, *args, **kwargs):
@@ -298,3 +320,25 @@ def test_retryable_exception_unwraps_causes_and_database_errors() -> None:
     DatabaseError.__module__ = "sqlalchemy.exc"
     assert is_retryable_exception(DatabaseError("deadlock detected"))
     assert not is_retryable_exception(DatabaseError("invalid statement"))
+
+
+def test_worker_claims_only_requested_job_types() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.worker import Worker
+
+    requested = []
+
+    class _Control:
+        async def claim_job(self, worker_id, lock_timeout_seconds, job_types=None):
+            requested.append(job_types)
+            worker.stop()
+            return None
+
+    worker = Worker(
+        Settings(env="test", worker_poll_seconds=0.01),
+        _Control(),  # type: ignore[arg-type]
+        {},
+        [JobType.INGEST_FILING],
+    )
+    asyncio.run(worker.run())
+    assert requested == [(JobType.INGEST_FILING,)]

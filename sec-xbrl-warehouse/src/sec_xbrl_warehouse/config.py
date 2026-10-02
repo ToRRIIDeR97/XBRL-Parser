@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     env: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
+    disk_reserve_bytes: int = Field(default=5 * 1024**3, ge=0)
     data_dir: Path = Path("data")
     temp_dir: Path = Path("data/tmp")
     config_dir: Path = Path("config")
@@ -48,6 +49,8 @@ class Settings(BaseSettings):
     filing_max_members: int = Field(default=1_000, gt=0)
     filing_max_bytes: int = Field(default=512 * 1024**2, gt=0)
     retain_filing_source_files: bool = True
+    reconciliation_max_rows: int = Field(default=50_000, gt=0)
+    reconciliation_max_bytes: int = Field(default=16 * 1024**2, gt=0)
 
     postgres_dsn: str = "postgresql+asyncpg://xbrl:xbrl_dev_password@localhost:5432/xbrl_control"
 
@@ -101,6 +104,11 @@ class Settings(BaseSettings):
     api_query_max_bytes: int = Field(default=1024**3, gt=0)
     api_result_max_bytes: int = Field(default=16 * 1024**2, gt=0)
 
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def empty_api_key(cls, value: object) -> object:
+        return None if value == "" else value
+
     @field_validator("log_level")
     @classmethod
     def normalize_log_level(cls, value: str) -> str:
@@ -119,6 +127,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_cross_field_settings(self) -> Settings:
+        if not self.retain_filing_source_files:
+            raise ValueError(
+                "Raw source retention is required; cleanup must be a separate operation"
+            )
         placeholder_tokens = ("monitored-email@example.com", "Your Name or Organization")
         if self.env != "test" and any(token in self.sec_user_agent for token in placeholder_tokens):
             # Keep settings instantiable for `--help`; doctor and network clients call
@@ -151,6 +163,20 @@ class Settings(BaseSettings):
             for part in self.arelle_allowed_taxonomy_hosts.split(",")
             if part.strip()
         )
+
+    def require_disk_reserve(self, required_bytes: int = 0) -> None:
+        import shutil
+
+        from sec_xbrl_warehouse.exceptions import DiskReserveError
+        from sec_xbrl_warehouse.observability.metrics import DISK_FREE_BYTES, DISK_RESERVE_BYTES
+
+        DISK_RESERVE_BYTES.set(self.disk_reserve_bytes)
+        for name, path in (("data", self.data_dir), ("scratch", self.temp_dir)):
+            path.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(path).free
+            DISK_FREE_BYTES.labels(volume=name).set(free)
+            if free < self.disk_reserve_bytes + required_bytes:
+                raise DiskReserveError(f"Disk reserve exhausted at {path.resolve()}")
 
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

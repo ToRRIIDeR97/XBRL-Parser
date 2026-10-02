@@ -6,6 +6,8 @@ import json
 import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -14,7 +16,7 @@ import aiofiles
 import httpx
 
 from sec_xbrl_warehouse.config import Settings
-from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, SecAccessError
+from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, SecAccessError, SecRetryDeferred
 from sec_xbrl_warehouse.infrastructure.http.rate_limiter import AsyncRateLimiter
 from sec_xbrl_warehouse.logging import get_logger
 from sec_xbrl_warehouse.observability.metrics import SEC_REQUESTS, SOURCE_BYTES
@@ -122,11 +124,8 @@ class SecHttpClient:
                     response.raise_for_status()
                     return response
 
-                retry_after = response.headers.get("Retry-After")
-                if retry_after and retry_after.isdigit():
-                    delay = float(retry_after)
-                else:
-                    delay = min(60.0, (2**attempt) + random.random())
+                await response.aclose()
+                delay = _retry_delay(response.headers.get("Retry-After"), attempt)
                 logger.warning(
                     "sec_request_retry",
                     url=url,
@@ -208,6 +207,7 @@ class SecHttpClient:
         )
         if byte_limit <= 0:
             raise ArtifactIntegrityError("Download byte budget exhausted")
+        await asyncio.to_thread(self.settings.require_disk_reserve)
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_suffix(destination.suffix + ".part")
         sidecar = partial.with_suffix(partial.suffix + ".json")
@@ -410,7 +410,12 @@ class SecHttpClient:
                     if response is not None:
                         await response.aclose()
                 if attempt < self.settings.sec_max_retries:
-                    await asyncio.sleep(min(60.0, 2**attempt + random.random()))
+                    await asyncio.sleep(
+                        _retry_delay(
+                            response.headers.get("Retry-After") if response is not None else None,
+                            attempt,
+                        )
+                    )
             raise SecAccessError(f"SEC streaming request exhausted retries: {url}: {last_error}")
 
 
@@ -457,3 +462,24 @@ def _positive_int(value: str | None) -> int | None:
 def build_archive_directory_url(cik: int, accession: str) -> str:
     accession_digits = accession.replace("-", "")
     return f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_digits}"
+
+
+def _retry_delay(header: str | None, attempt: int) -> float:
+    delay = min(60.0, 2**attempt + random.random())
+    if header:
+        try:
+            if header.isdigit():
+                if len(header) > 12 or int(header) > 86400 * 365 * 1000:
+                    raise SecAccessError(
+                        "Retry-After exceeds scheduling horizon; operator review required"
+                    )
+                delay = float(header)
+            else:
+                delay = max(
+                    0.0, (parsedate_to_datetime(header) - datetime.now(UTC)).total_seconds()
+                )
+        except (ValueError, OverflowError, TypeError):
+            pass
+    if delay > 60:
+        raise SecRetryDeferred(datetime.now(UTC) + timedelta(seconds=delay))
+    return float(delay)

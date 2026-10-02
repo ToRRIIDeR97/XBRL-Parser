@@ -1,5 +1,7 @@
 # Engineering Handoff
 
+Latest operational state (3 October 2026): the local warehouse was reset. The Colima Docker disk filled up (a 25 GB uncapped ClickHouse console log plus warehouse data), which crashed PostgreSQL. At the operator's request the PostgreSQL, ClickHouse, and MinIO volumes were deleted and recreated empty; migrations, ClickHouse DDL, and `doctor` pass. The earlier bulk progress (April, May, June, and July 2026 Notes jobs, their checkpoints, and quarantines) and the AAPL 2025 10-K no longer exist locally; the September handover files describe history, not live state. Recreated containers use the Compose log limits. Use `worker run --job-type ingest_filing` to process filing jobs without claiming bulk loads. Validation: 183 unit tests and 23 integration tests passed. See [8 September remediation](docs/HARDENING_REMEDIATION_2026-09-08.md) for hardening scope; the API credential split still requires provisioning before deployment.
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.
@@ -9,6 +11,13 @@ No live SEC production corpus or historical backfill was run while completing th
 The nine ranked performance/security audit findings have code fixes and regression coverage. See the [implementation plan and completion record](</Users/japardinathaniel/Documents/GitHub/XBRL Parser for SEC/sec-xbrl-warehouse/docs/AUDIT_IMPLEMENTATION_PLAN_2026-09-07.md>) for query budgets, production reader credentials, ingestion limits, and validation evidence. Configure the production API key and reader profile before deployment; recreate services to apply the new Compose memory limits.
 
 ## Verified locally
+
+The [launch hardening follow-up](docs/LAUNCH_HARDENING_2026-09-07.md) covers
+additional checkpoint fencing, bounded cache/taxonomy reads and reconciliation,
+mandatory raw retention, API readiness protection, and container changes.
+The local storage containers have been recreated with loopback-only ports.
+Existing application volumes need UID/GID `10001:10001` ownership before upgrade;
+`XBRL_RETAIN_FILING_SOURCE_FILES=false` is now rejected.
 
 Run the same gates before release:
 

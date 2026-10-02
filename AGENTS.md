@@ -19,6 +19,8 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 - Check `HANDOFF.md` for live ingestion state before starting a worker, enqueueing
   jobs, or running discovery. Run only one SEC-active process at a time; the SEC rate
   limiter is process-local.
+- `worker run --job-type <type>` (repeatable) claims only those job types and leaves
+  other queued jobs untouched, e.g. `--job-type ingest_filing` while bulk loads are held.
 - Retain Arelle semantics, immutable raw artifacts, reversible canonical mappings,
   idempotent replay, and diagnostics for rejected or drifting inputs.
 - Keep secrets out of source control. Preserve query budgets, download and parser

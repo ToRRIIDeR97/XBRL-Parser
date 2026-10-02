@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import signal
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from typing import Any
 
 import httpx
@@ -110,10 +110,12 @@ class Worker:
         settings: Settings,
         control: PostgresControlRepository,
         handlers: dict[JobType, JobHandler],
+        job_types: Sequence[JobType] | None = None,
     ) -> None:
         self.settings = settings
         self.control = control
         self.handlers = handlers
+        self.job_types = tuple(job_types) if job_types else None
         self._stopping = asyncio.Event()
 
     def stop(self) -> None:
@@ -137,6 +139,7 @@ class Worker:
             job = await self.control.claim_job(
                 self.settings.worker_id,
                 self.settings.worker_lock_timeout_seconds,
+                self.job_types,
             )
             if job is None:
                 try:

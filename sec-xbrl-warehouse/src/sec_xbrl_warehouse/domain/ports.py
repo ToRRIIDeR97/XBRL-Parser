@@ -7,7 +7,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
-from sec_xbrl_warehouse.domain.enums import ArtifactState, SecTable
+from sec_xbrl_warehouse.domain.enums import ArtifactState, JobType, SecTable
 from sec_xbrl_warehouse.domain.models import (
     DatasetArtifact,
     FilingPackageManifest,
@@ -88,7 +88,12 @@ class ControlRepository(Protocol):
         max_attempts: int = 5,
     ) -> UUID: ...
 
-    async def claim_job(self, worker_id: str, lock_timeout_seconds: int) -> JobRecord | None: ...
+    async def claim_job(
+        self,
+        worker_id: str,
+        lock_timeout_seconds: int,
+        job_types: Sequence[JobType] | None = None,
+    ) -> JobRecord | None: ...
 
     async def complete_job(
         self,

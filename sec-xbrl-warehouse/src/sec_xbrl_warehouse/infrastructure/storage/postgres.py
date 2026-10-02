@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -279,8 +279,16 @@ class PostgresControlRepository:
                 raise RuntimeError("PostgreSQL did not return a job ID")
             return job_id
 
-    async def claim_job(self, worker_id: str, lock_timeout_seconds: int) -> JobRecord | None:
+    async def claim_job(
+        self,
+        worker_id: str,
+        lock_timeout_seconds: int,
+        job_types: Sequence[JobType] | None = None,
+    ) -> JobRecord | None:
         """Atomically claim one ready or stale job using `SKIP LOCKED`.
+
+        When `job_types` is given, jobs of other types are neither claimed nor
+        dead-lettered, so a scoped worker leaves held work untouched.
 
         Acceptance tests must run two concurrent transactions and prove that the
         same UUID cannot be returned twice. Stale `running` jobs are reclaimable
@@ -290,10 +298,16 @@ class PostgresControlRepository:
         # PostgreSQL's clock, so a host-computed "now" can disagree after a
         # container restart or in high-latency deployments.
         stale_before = func.now() - timedelta(seconds=lock_timeout_seconds)
+        type_filter = (
+            IngestionJobRow.job_type.in_([job_type.value for job_type in job_types])
+            if job_types
+            else true()
+        )
         async with self.sessions.begin() as session:
             row = await session.scalar(
                 select(IngestionJobRow)
                 .where(
+                    type_filter,
                     or_(
                         and_(
                             IngestionJobRow.state.in_(
@@ -305,7 +319,7 @@ class PostgresControlRepository:
                             IngestionJobRow.state == JobState.RUNNING.value,
                             IngestionJobRow.locked_at < stale_before,
                         ),
-                    )
+                    ),
                 )
                 .order_by(IngestionJobRow.priority.asc(), IngestionJobRow.created_at.asc())
                 .limit(1)

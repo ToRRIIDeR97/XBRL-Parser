@@ -285,7 +285,7 @@ def test_worker_handles_missing_handler_and_stops_while_idle() -> None:
         def __init__(self) -> None:
             self.failed = []
 
-        async def claim_job(self, worker_id, lock_timeout_seconds):
+        async def claim_job(self, worker_id, lock_timeout_seconds, job_types=None):
             return None
 
         async def fail_job(self, *args, **kwargs):
@@ -320,3 +320,25 @@ def test_retryable_exception_unwraps_causes_and_database_errors() -> None:
     DatabaseError.__module__ = "sqlalchemy.exc"
     assert is_retryable_exception(DatabaseError("deadlock detected"))
     assert not is_retryable_exception(DatabaseError("invalid statement"))
+
+
+def test_worker_claims_only_requested_job_types() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.worker import Worker
+
+    requested = []
+
+    class _Control:
+        async def claim_job(self, worker_id, lock_timeout_seconds, job_types=None):
+            requested.append(job_types)
+            worker.stop()
+            return None
+
+    worker = Worker(
+        Settings(env="test", worker_poll_seconds=0.01),
+        _Control(),  # type: ignore[arg-type]
+        {},
+        [JobType.INGEST_FILING],
+    )
+    asyncio.run(worker.run())
+    assert requested == [(JobType.INGEST_FILING,)]

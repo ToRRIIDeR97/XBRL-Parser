@@ -204,3 +204,17 @@ def test_worker_metrics_server_lives_for_worker_process(
 
     asyncio.run(cli._run_worker())
     assert events == ["worker-run", "control-close", "metrics-shutdown", "metrics-close"]
+
+
+def test_worker_run_parses_job_type_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sec_xbrl_warehouse.domain.enums import JobType
+
+    received = []
+
+    async def run_worker(job_types=None) -> None:
+        received.append(job_types)
+
+    monkeypatch.setattr(cli, "_run_worker", run_worker)
+    result = CliRunner().invoke(cli.app, ["worker", "run", "--job-type", "ingest_filing"])
+    assert result.exit_code == 0, result.output
+    assert received == [[JobType.INGEST_FILING]]

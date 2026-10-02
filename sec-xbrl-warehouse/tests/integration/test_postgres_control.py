@@ -11,6 +11,7 @@ from sec_xbrl_warehouse.domain.enums import (
     ArtifactState,
     DatasetKind,
     JobState,
+    JobType,
     Severity,
 )
 from sec_xbrl_warehouse.domain.models import (
@@ -192,6 +193,23 @@ async def test_stale_lock_is_reclaimable(postgres_settings: Settings) -> None:
             await repo.complete_job(first.id, worker_id=worker_id, attempt=first.attempts)
         with pytest.raises(StateTransitionError):
             await repo.heartbeat_job(first.id, worker_id, first.attempts)
+    finally:
+        await repo.close()
+
+
+async def test_claim_job_respects_job_type_filter(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        held_id = await repo.enqueue_job(
+            job_type="load_bulk", idempotency_key=f"held-{uuid4()}", priority=-1, payload={}
+        )
+        scoped_id = await repo.enqueue_job(
+            job_type="ingest_filing", idempotency_key=f"scoped-{uuid4()}", priority=-1, payload={}
+        )
+        record = await repo.claim_job("w1", 900, [JobType.INGEST_FILING])
+        assert record is not None and record.id == scoped_id
+        held = await repo.claim_job("w2", 900)
+        assert held is not None and held.id == held_id
     finally:
         await repo.close()
 

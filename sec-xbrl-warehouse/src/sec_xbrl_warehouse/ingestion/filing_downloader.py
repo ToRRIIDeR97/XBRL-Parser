@@ -54,7 +54,18 @@ class FilingPackageDownloader:
         index_checksum = sha256_bytes(
             json.dumps(index_payload, sort_keys=True, separators=(",", ":")).encode()
         )
-        cache_key = f"manifests/sec/filings/{filing.accession}/index-sha256={index_checksum}.json"
+        # Bind the key to the filing metadata too: a corrected FilingRef (for
+        # example an added instance document) must not collide with an
+        # immutable manifest cached for the earlier metadata.
+        filing_checksum = sha256_bytes(
+            json.dumps(
+                filing.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            ).encode()
+        )
+        cache_key = (
+            f"manifests/sec/filings/{filing.accession}/index-sha256={index_checksum}/"
+            f"filing-sha256={filing_checksum}.json"
+        )
         selected = select_package_files(index_payload, filing)
         if len(selected) > self.settings.filing_max_members:
             raise ArtifactIntegrityError("Filing exceeds configured member count")

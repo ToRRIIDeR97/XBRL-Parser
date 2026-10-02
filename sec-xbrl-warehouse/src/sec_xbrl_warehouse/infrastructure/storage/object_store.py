@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import tempfile
 from pathlib import Path
@@ -11,6 +12,11 @@ from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.models import StoredObject
 from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha256_file
+
+
+def _validate_max_bytes(max_bytes: int | None) -> None:
+    if max_bytes is not None and max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
 
 
 class LocalObjectStore:
@@ -69,24 +75,38 @@ class LocalObjectStore:
             local_path=destination,
         )
 
-    def get_file(self, key: str, destination: Path) -> StoredObject:
+    def get_file(
+        self, key: str, destination: Path, *, max_bytes: int | None = None
+    ) -> StoredObject:
+        _validate_max_bytes(max_bytes)
         source = self._path(key)
         if not source.is_file():
             raise FileNotFoundError(key)
+        source_size = source.stat().st_size
+        if max_bytes is not None and source_size > max_bytes:
+            raise ArtifactIntegrityError(f"Object exceeds configured byte limit: {key}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if source.resolve() != destination.resolve():
-            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
-                temporary = Path(handle.name)
-            try:
-                shutil.copy2(source, temporary)
-                temporary.replace(destination)
-            finally:
-                temporary.unlink(missing_ok=True)
+        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with source.open("rb") as source_stream, temporary.open("wb") as target:
+                while chunk := source_stream.read(1024 * 1024):
+                    if max_bytes is not None and total + len(chunk) > max_bytes:
+                        raise ArtifactIntegrityError(f"Object exceeds configured byte limit: {key}")
+                    target.write(chunk)
+                    digest.update(chunk)
+                    total += len(chunk)
+            shutil.copystat(source, temporary)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
         return StoredObject(
             bucket=self.bucket,
             key=key,
-            size_bytes=source.stat().st_size,
-            checksum_sha256=sha256_file(source),
+            size_bytes=total,
+            checksum_sha256=digest.hexdigest(),
             local_path=destination,
         )
 
@@ -199,26 +219,60 @@ class S3ObjectStore:
             etag=str(head.get("ETag", "")).strip('"') or None,
         )
 
-    def get_file(self, key: str, destination: Path) -> StoredObject:
+    def get_file(
+        self, key: str, destination: Path, *, max_bytes: int | None = None
+    ) -> StoredObject:
+        _validate_max_bytes(max_bytes)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
-            temporary = Path(handle.name)
+        response = self.client.get_object(Bucket=self.bucket, Key=key)
+        body = response["Body"]
+        body_closed = False
+        temporary: Path | None = None
         try:
-            self.client.download_file(self.bucket, key, str(temporary))
-            actual = sha256_file(temporary)
-            head = self.client.head_object(Bucket=self.bucket, Key=key)
-            expected = head.get("Metadata", {}).get("sha256")
+            content_length = response.get("ContentLength")
+            if content_length is not None:
+                try:
+                    content_length = int(content_length)
+                except (TypeError, ValueError) as exc:
+                    raise ArtifactIntegrityError(
+                        f"Stored object has invalid content length: {key}"
+                    ) from exc
+                if content_length < 0:
+                    raise ArtifactIntegrityError(f"Stored object has invalid content length: {key}")
+                if max_bytes is not None and content_length > max_bytes:
+                    raise ArtifactIntegrityError(f"Object exceeds configured byte limit: {key}")
+
+            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
+                temporary = Path(handle.name)
+            digest = hashlib.sha256()
+            total = 0
+            with temporary.open("wb") as target:
+                while chunk := body.read(1024 * 1024):
+                    if max_bytes is not None and total + len(chunk) > max_bytes:
+                        raise ArtifactIntegrityError(f"Object exceeds configured byte limit: {key}")
+                    target.write(chunk)
+                    digest.update(chunk)
+                    total += len(chunk)
+            if content_length is not None and total != content_length:
+                raise ArtifactIntegrityError(f"Stored object size mismatch: {key}")
+            actual = digest.hexdigest()
+            expected = (response.get("Metadata") or {}).get("sha256")
             if expected and expected != actual:
                 raise ArtifactIntegrityError(f"Stored object checksum mismatch: {key}")
+            body.close()
+            body_closed = True
             temporary.replace(destination)
         finally:
-            temporary.unlink(missing_ok=True)
+            if not body_closed:
+                body.close()
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return StoredObject(
             bucket=self.bucket,
             key=key,
-            size_bytes=destination.stat().st_size,
+            size_bytes=total,
             checksum_sha256=actual,
-            etag=str(head.get("ETag", "")).strip('"') or None,
+            etag=str(response.get("ETag", "")).strip('"') or None,
             local_path=destination,
         )
 

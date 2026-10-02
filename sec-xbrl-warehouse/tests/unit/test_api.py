@@ -120,3 +120,94 @@ def test_production_api_requires_credentials_before_connecting():
     app = create_app(Settings(_env_file=None, env="production"))
     with pytest.raises(ConfigurationError, match="API key and separate reader"), TestClient(app):
         pass
+
+    for password in ("", "   "):
+        app = create_app(
+            Settings(
+                _env_file=None,
+                env="production",
+                api_key="a" * 32,
+                api_clickhouse_username="reader",
+                api_clickhouse_password=password,
+            )
+        )
+        with (
+            pytest.raises(ConfigurationError, match="API key and separate reader"),
+            TestClient(app),
+        ):
+            pass
+
+
+async def test_readiness_probes_are_bounded_without_blocking_liveness_or_queries():
+    import asyncio
+    import threading
+
+    import httpx
+
+    from sec_xbrl_warehouse.api.dependencies import get_control, get_warehouse
+    from sec_xbrl_warehouse.config import Settings
+
+    entered, release = threading.Event(), threading.Event()
+
+    class SlowWarehouse:
+        calls = 0
+
+        def ping(self):
+            self.calls += 1
+            entered.set()
+            assert release.wait(3)
+            return True
+
+    class Control:
+        async def ping(self):
+            return True
+
+    warehouse = SlowWarehouse()
+    app = create_app(Settings(_env_file=None, env="test", api_key="a" * 32))
+    app.dependency_overrides[get_warehouse] = lambda: warehouse
+    app.dependency_overrides[get_control] = Control
+    app.dependency_overrides[get_query_service] = lambda: QueryService(Warehouse())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        request = asyncio.create_task(client.get("/health/ready"))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            assert (await client.get("/health/ready")).status_code == 503
+            assert warehouse.calls == 1
+            assert (await client.get("/health/live")).status_code == 200
+            assert (await client.get("/v1/facts?cik=1")).status_code == 401
+            assert (
+                await client.get("/v1/facts?cik=1", headers={"Authorization": "Bearer " + "a" * 32})
+            ).status_code == 200
+        finally:
+            release.set()
+        assert (await request).status_code == 200
+        assert (await client.get("/health/ready")).status_code == 200
+
+
+def test_health_exemption_uses_routing_path_not_host_header():
+    from sec_xbrl_warehouse.config import Settings
+
+    app = create_app(Settings(_env_file=None, env="test", api_key="a" * 32))
+    client = TestClient(app, raise_server_exceptions=False)
+    try:
+        for host in ("test/health/live#", "test/health/ready?", "test"):
+            assert client.get("/metrics/", headers={"host": host}).status_code == 401
+    finally:
+        client.close()
+
+
+def test_filing_summary_validates_accession_and_uses_known_bounds():
+    from datetime import date
+
+    import pytest
+
+    warehouse = Warehouse()
+    service = QueryService(warehouse)
+    with pytest.raises(ValueError):
+        service.filing_summary("bad")
+    service.filing_summary("0000000001-26-000001", cik=1, filed_date=date(2026, 1, 2))
+    sql, parameters = warehouse.queries[-1]
+    assert "AND cik = %(cik)s" in sql
+    assert parameters["filed_date"] == date(2026, 1, 2)

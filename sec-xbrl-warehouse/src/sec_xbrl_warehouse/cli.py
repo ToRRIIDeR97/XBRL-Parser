@@ -86,6 +86,11 @@ def doctor(skip_sec_identity: bool = False) -> None:
     except Exception as exc:
         checks.append(("Configuration files", False, str(exc)))
 
+    try:
+        settings.require_disk_reserve()
+        checks.append(("Disk reserve", True, "data and scratch reserves available"))
+    except Exception as exc:
+        checks.append(("Disk reserve", False, str(exc)))
     data_ready = settings.data_dir.is_dir() and os.access(settings.data_dir, os.W_OK)
     free_gib = shutil.disk_usage(settings.data_dir).free / 1024**3 if data_ready else 0
     checks.append(

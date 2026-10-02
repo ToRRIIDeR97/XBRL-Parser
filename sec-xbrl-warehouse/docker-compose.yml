@@ -1,8 +1,16 @@
 name: sec-xbrl-warehouse
 
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
-    image: postgres:17-alpine
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-2g}
+    cpus: ${POSTGRES_CPUS:-2}
+    image: postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-xbrl_control}
       POSTGRES_USER: ${POSTGRES_USER:-xbrl}
@@ -16,10 +24,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    logging: *bounded-logging
     restart: unless-stopped
 
   clickhouse:
-    image: clickhouse/clickhouse-server:25.8-alpine
+    mem_limit: ${CLICKHOUSE_MEMORY_LIMIT:-4g}
+    cpus: ${CLICKHOUSE_CPUS:-2}
+    image: clickhouse/clickhouse-server@sha256:1719fc741a47bdb3827e7a28c1104561efbef6e5e0fbd8a7b023bc5ccd035542
     environment:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-xbrl}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-xbrl}
@@ -40,10 +51,13 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+    logging: *bounded-logging
     restart: unless-stopped
 
   minio:
-    image: minio/minio:${MINIO_IMAGE_TAG:-latest}
+    mem_limit: ${MINIO_MEMORY_LIMIT:-2g}
+    cpus: ${MINIO_CPUS:-2}
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-xbrl_minio}
@@ -58,35 +72,51 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+    logging: *bounded-logging
     restart: unless-stopped
 
   minio-init:
-    image: minio/mc:${MINIO_MC_IMAGE_TAG:-latest}
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-xbrl_minio} ${MINIO_ROOT_PASSWORD:-xbrl_minio_dev_password};
-      mc mb --ignore-existing local/${XBRL_OBJECT_STORE_BUCKET:-sec-xbrl};
-      mc anonymous set none local/${XBRL_OBJECT_STORE_BUCKET:-sec-xbrl};
-      exit 0;
-      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-xbrl_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-xbrl_minio_dev_password}
+      XBRL_OBJECT_STORE_BUCKET: ${XBRL_OBJECT_STORE_BUCKET:-sec-xbrl}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${XBRL_OBJECT_STORE_BUCKET}"
+        mc anonymous set none "local/$${XBRL_OBJECT_STORE_BUCKET}"
 
   api:
     profiles: ["application", "monitoring"]
     mem_limit: ${API_MEMORY_LIMIT:-2g}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     build:
       context: .
       dockerfile: docker/app.Dockerfile
-    env_file: .env
     environment:
-      XBRL_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-xbrl}:${POSTGRES_PASSWORD:-xbrl_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
+      XBRL_POSTGRES_DSN: ${XBRL_API_POSTGRES_DSN:-postgresql+asyncpg://xbrl_api:xbrl_api_dev_password@postgres:5432/xbrl_control}
       XBRL_CLICKHOUSE_HOST: clickhouse
-      XBRL_OBJECT_STORE_ENDPOINT: http://minio:9000
+      XBRL_CLICKHOUSE_PORT: 8123
+      XBRL_ENV: ${XBRL_ENV:-development}
+      XBRL_API_KEY: ${XBRL_API_KEY:-}
+      XBRL_API_MAX_CONCURRENCY: ${XBRL_API_MAX_CONCURRENCY:-4}
+      XBRL_API_QUERY_TIMEOUT_SECONDS: ${XBRL_API_QUERY_TIMEOUT_SECONDS:-30}
+      XBRL_API_QUERY_MAX_MEMORY_BYTES: ${XBRL_API_QUERY_MAX_MEMORY_BYTES:-536870912}
+      XBRL_API_QUERY_MAX_ROWS: ${XBRL_API_QUERY_MAX_ROWS:-5000000}
+      XBRL_API_QUERY_MAX_BYTES: ${XBRL_API_QUERY_MAX_BYTES:-1073741824}
+      XBRL_API_RESULT_MAX_BYTES: ${XBRL_API_RESULT_MAX_BYTES:-16777216}
+      XBRL_CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-xbrl}
+      XBRL_API_CLICKHOUSE_USERNAME: ${XBRL_API_CLICKHOUSE_USERNAME:-xbrl_api}
+      XBRL_API_CLICKHOUSE_PASSWORD: ${XBRL_API_CLICKHOUSE_PASSWORD:-xbrl_api_dev_password}
       XBRL_API_HOST: 0.0.0.0
-    volumes:
-      - app_data:/app/data
+      XBRL_API_PORT: 8080
     command: ["api", "serve"]
     ports:
       - "127.0.0.1:${XBRL_API_PORT:-8080}:8080"
@@ -97,11 +127,16 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    logging: *bounded-logging
     restart: unless-stopped
 
   worker:
     profiles: ["application", "monitoring"]
     mem_limit: ${WORKER_MEMORY_LIMIT:-4g}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     build:
       context: .
       dockerfile: docker/app.Dockerfile
@@ -109,6 +144,7 @@ services:
     environment:
       XBRL_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-xbrl}:${POSTGRES_PASSWORD:-xbrl_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
       XBRL_CLICKHOUSE_HOST: clickhouse
+      XBRL_CLICKHOUSE_PORT: 8123
       XBRL_OBJECT_STORE_ENDPOINT: http://minio:9000
       XBRL_WORKER_METRICS_HOST: 0.0.0.0
     volumes:
@@ -121,25 +157,30 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    logging: *bounded-logging
     restart: unless-stopped
 
   prometheus:
     profiles: ["monitoring"]
-    image: prom/prometheus:${PROMETHEUS_IMAGE_TAG:-latest}
+    image: prom/prometheus@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
     volumes:
       - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
     ports:
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     depends_on:
       - api
       - worker
+    logging: *bounded-logging
     restart: unless-stopped
 
   grafana:
     profiles: ["monitoring"]
-    image: grafana/grafana:${GRAFANA_IMAGE_TAG:-latest}
+    image: grafana/grafana@sha256:35c41e0fd0295f5d0ee5db7e780cf33506abfaf47686196f825364889dee878b
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
@@ -152,6 +193,7 @@ services:
       - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     depends_on:
       - prometheus
+    logging: *bounded-logging
     restart: unless-stopped
 
 volumes:

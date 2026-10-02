@@ -1,5 +1,7 @@
 # Engineering Handoff
 
+Latest operational state: see [May date recovery](../handover%20files/2026-09-08-sec-may-date-resume-handover.md). The date-storage blocker and preserving-migration race are fixed. May resumed all 81 saved checkpoints and loaded 10,438,626 rows into 215 checkpoints, then was quarantined for five tag definitions missing from its SEC ZIP (14 numeric references), independently verified against the source. June remains quarantined for its separate source omissions; July remains complete. April 2026 is running through one bounded Notes continuation; ten older checkpointed jobs remain held for verification. Inspect live state before starting another worker. Validation: 181 unit tests and 22 integration tests passed. See [8 September remediation](docs/HARDENING_REMEDIATION_2026-09-08.md) for broader hardening scope; the API credential split still requires provisioning before deployment. Earlier completion statements below do not establish acceptance of the full backfill.
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.
@@ -9,6 +11,13 @@ No live SEC production corpus or historical backfill was run while completing th
 The nine ranked performance/security audit findings have code fixes and regression coverage. See the [implementation plan and completion record](</Users/japardinathaniel/Documents/GitHub/XBRL Parser for SEC/sec-xbrl-warehouse/docs/AUDIT_IMPLEMENTATION_PLAN_2026-09-07.md>) for query budgets, production reader credentials, ingestion limits, and validation evidence. Configure the production API key and reader profile before deployment; recreate services to apply the new Compose memory limits.
 
 ## Verified locally
+
+The [launch hardening follow-up](docs/LAUNCH_HARDENING_2026-09-07.md) covers
+additional checkpoint fencing, bounded cache/taxonomy reads and reconciliation,
+mandatory raw retention, API readiness protection, and container changes.
+The local storage containers have been recreated with loopback-only ports.
+Existing application volumes need UID/GID `10001:10001` ownership before upgrade;
+`XBRL_RETAIN_FILING_SOURCE_FILES=false` is now rejected.
 
 Run the same gates before release:
 

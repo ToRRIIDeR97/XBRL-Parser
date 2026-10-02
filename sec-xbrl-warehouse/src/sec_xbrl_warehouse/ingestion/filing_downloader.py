@@ -55,12 +55,12 @@ class FilingPackageDownloader:
             json.dumps(index_payload, sort_keys=True, separators=(",", ":")).encode()
         )
         cache_key = f"manifests/sec/filings/{filing.accession}/index-sha256={index_checksum}.json"
-        cached = await asyncio.to_thread(self._cached_manifest, cache_key, filing)
-        if cached is not None:
-            return cached
         selected = select_package_files(index_payload, filing)
         if len(selected) > self.settings.filing_max_members:
             raise ArtifactIntegrityError("Filing exceeds configured member count")
+        cached = await asyncio.to_thread(self._cached_manifest, cache_key, filing, selected)
+        if cached is not None:
+            return cached
         members: list[PackageMember] = []
         remaining = self.settings.filing_max_bytes
         with tempfile.TemporaryDirectory(
@@ -104,7 +104,7 @@ class FilingPackageDownloader:
         try:
             await asyncio.to_thread(self.object_store.put_bytes, cache_bytes, cache_key)
         except ArtifactIntegrityError:
-            cached = await asyncio.to_thread(self._cached_manifest, cache_key, filing)
+            cached = await asyncio.to_thread(self._cached_manifest, cache_key, filing, selected)
             if cached is None:
                 raise
             return cached
@@ -116,14 +116,57 @@ class FilingPackageDownloader:
             }
         )
 
-    def _cached_manifest(self, key: str, filing: FilingRef) -> FilingPackageManifest | None:
+    def _cached_manifest(
+        self, key: str, filing: FilingRef, expected_names: tuple[str, ...]
+    ) -> FilingPackageManifest | None:
+        """Validate a bounded private-store cache entry before reusing it.
+
+        The cache is a trusted private-object-store optimization. These checks
+        bind its metadata to the current filing and index-derived member set;
+        they do not cryptographically authenticate SEC source bytes.
+        """
         if not self.object_store.exists(key):
             return None
-        with tempfile.NamedTemporaryFile(dir=self.settings.temp_dir, suffix=".json") as handle:
-            stored = self.object_store.get_file(key, Path(handle.name))
-            manifest = FilingPackageManifest.model_validate_json(Path(handle.name).read_bytes())
-        if manifest.filing.accession != filing.accession:
-            raise ArtifactIntegrityError(f"Cached manifest belongs to another filing: {key}")
+        with tempfile.TemporaryDirectory(dir=self.settings.temp_dir) as directory:
+            manifest_path = Path(directory) / "manifest.json"
+            stored = self.object_store.get_file(
+                key,
+                manifest_path,
+                max_bytes=self.settings.response_max_bytes,
+            )
+            manifest = FilingPackageManifest.model_validate_json(manifest_path.read_bytes())
+
+        if manifest.filing != filing:
+            raise ArtifactIntegrityError(f"Cached manifest metadata mismatch: {key}")
+        if len(manifest.members) > self.settings.filing_max_members:
+            raise ArtifactIntegrityError("Cached filing exceeds configured member count")
+        if any(
+            member.size_bytes is not None and member.size_bytes < 0 for member in manifest.members
+        ):
+            raise ArtifactIntegrityError("Cached filing contains a negative member size")
+        known_size = sum(
+            member.size_bytes for member in manifest.members if member.size_bytes is not None
+        )
+        if known_size > self.settings.filing_max_bytes:
+            raise ArtifactIntegrityError("Cached filing exceeds configured byte limit")
+
+        expected = set(expected_names)
+        actual = [member.name for member in manifest.members]
+        actual_set = set(actual)
+        if len(actual) != len(actual_set):
+            raise ArtifactIntegrityError("Cached filing contains duplicate members")
+        if actual_set != expected:
+            missing = sorted(expected - actual_set)
+            unexpected = sorted(actual_set - expected)
+            raise ArtifactIntegrityError(
+                f"Cached filing members do not match index (missing={missing}, unexpected={unexpected})"
+            )
+        for member in manifest.members:
+            expected_url = f"{filing.archive_directory_url}/{member.name}"
+            if member.source_url != expected_url:
+                raise ArtifactIntegrityError(
+                    f"Cached filing member source URL mismatch: {member.name}"
+                )
         if any(
             member.checksum_sha256 is None
             or not self.object_store.exists(
@@ -155,17 +198,26 @@ class FilingPackageDownloader:
             # 1. Collect member sources, resolving from object storage when the
             #    caller's directory does not already hold them.
             member_entries: list[tuple[str, Path]] = []
+            total = 0
             for member in manifest.members:
                 _safe_package_name(member.name)
                 local = package_directory / member.name
                 if not local.is_file() and member.checksum_sha256:
-                    local = self._materialize_member(manifest.filing, member, staging)
+                    local = self._materialize_member(
+                        manifest.filing,
+                        member,
+                        staging,
+                        max_bytes=self.settings.filing_max_bytes - total,
+                    )
                 if not local.is_file():
                     raise ArtifactIntegrityError(
                         f"Cannot locate package member for archiving: {member.name}"
                     )
                 if member.checksum_sha256 and sha256_file(local) != member.checksum_sha256:
                     raise ArtifactIntegrityError(f"Checksum mismatch while archiving {member.name}")
+                total += local.stat().st_size
+                if total > self.settings.filing_max_bytes:
+                    raise ArtifactIntegrityError("Filing exceeds configured byte limit")
                 member_entries.append((member.name, local))
 
             # 2. Write the deterministic archive (fixed timestamps, sorted names).
@@ -212,6 +264,7 @@ class FilingPackageDownloader:
 
     def materialize_package(self, manifest: FilingPackageManifest, destination: Path) -> Path:
         """Materialize all members locally and return the chosen entrypoint."""
+        entrypoint = _choose_entrypoint(manifest)
         destination.mkdir(parents=True, exist_ok=True)
         if len(manifest.members) > self.settings.filing_max_members:
             raise ArtifactIntegrityError("Filing exceeds configured member count")
@@ -229,7 +282,11 @@ class FilingPackageDownloader:
             if member.checksum_sha256 is None:
                 raise ArtifactIntegrityError(f"Member {member.name} has no checksum to locate")
             key = filing_object_key(manifest.filing, member.name, member.checksum_sha256)
-            stored = self.object_store.get_file(key, target)
+            stored = self.object_store.get_file(
+                key,
+                target,
+                max_bytes=self.settings.filing_max_bytes - total,
+            )
             total += stored.size_bytes
             if total > self.settings.filing_max_bytes:
                 raise ArtifactIntegrityError("Filing exceeds configured byte limit")
@@ -237,7 +294,10 @@ class FilingPackageDownloader:
                 raise ArtifactIntegrityError(
                     f"Materialized member checksum mismatch: {member.name}"
                 )
-        return destination / _choose_entrypoint(manifest)
+        target = (destination / entrypoint).resolve()
+        if not target.is_relative_to(destination.resolve()) or not target.is_file():
+            raise ArtifactIntegrityError("Entrypoint escapes materialized package or is missing")
+        return target
 
     def delete_source_files(self, manifest: FilingPackageManifest) -> None:
         """Delete downloaded filing bytes while retaining lightweight manifests."""
@@ -251,13 +311,20 @@ class FilingPackageDownloader:
         for key in keys:
             self.object_store.delete(key)
 
-    def _materialize_member(self, filing: FilingRef, member: PackageMember, staging: Path) -> Path:
+    def _materialize_member(
+        self,
+        filing: FilingRef,
+        member: PackageMember,
+        staging: Path,
+        *,
+        max_bytes: int,
+    ) -> Path:
         if member.checksum_sha256 is None:
             raise ArtifactIntegrityError(f"Member {member.name} has no checksum to locate")
         key = filing_object_key(filing, member.name, member.checksum_sha256)
         destination = staging / member.name
         destination.parent.mkdir(parents=True, exist_ok=True)
-        self.object_store.get_file(key, destination)
+        self.object_store.get_file(key, destination, max_bytes=max_bytes)
         return destination
 
 
@@ -327,14 +394,21 @@ def _package_archive_name(manifest: FilingPackageManifest) -> str:
 def _choose_entrypoint(manifest: FilingPackageManifest) -> str:
     """Deterministic entrypoint: instance doc, then primary, then any XBRL XML."""
     if manifest.filing.instance_document:
-        return manifest.filing.instance_document
+        return _manifest_entrypoint(manifest, manifest.filing.instance_document)
     if manifest.filing.primary_document:
-        return manifest.filing.primary_document
+        return _manifest_entrypoint(manifest, manifest.filing.primary_document)
     preferred = [
         member.name
         for member in manifest.members
         if member.is_xbrl_entrypoint or member.name.endswith(".xml")
     ]
     if preferred:
-        return sorted(preferred)[0]
+        return _manifest_entrypoint(manifest, sorted(preferred)[0])
     raise ArtifactIntegrityError(f"No XBRL entrypoint found in {manifest.filing.accession}")
+
+
+def _manifest_entrypoint(manifest: FilingPackageManifest, name: str) -> str:
+    safe = _safe_package_name(name)
+    if safe not in {member.name for member in manifest.members}:
+        raise ArtifactIntegrityError("Entrypoint is not a package manifest member")
+    return safe

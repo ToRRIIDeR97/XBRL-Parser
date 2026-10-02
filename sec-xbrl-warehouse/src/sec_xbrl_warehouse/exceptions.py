@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -46,3 +47,15 @@ class StateTransitionError(JobStateError):
 
 class WarehouseWriteError(XbrlWarehouseError):
     """A typed batch could not be written to the analytical warehouse."""
+
+
+class SecRetryDeferred(SecAccessError):
+    """Release the worker while retaining the server's earliest retry time."""
+
+    def __init__(self, retry_at: datetime) -> None:
+        self.retry_at = retry_at
+        super().__init__(f"SEC retry deferred until {retry_at.isoformat()}")
+
+
+class DiskReserveError(XbrlWarehouseError):
+    """Retained data needs more free space before ingestion may continue."""

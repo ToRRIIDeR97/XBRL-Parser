@@ -123,7 +123,7 @@ def _uniqueness_checks(
         "sec_tags": "(tag, version)",
         "sec_dimensions": "dimh",
         "sec_numeric_facts": "(adsh, tag, version, ddate, qtrs, uom, dimh, iprx)",
-        "sec_text_facts": "(adsh, tag, version, ddate, qtrs, dimh, iprx)",
+        "sec_text_facts": "(adsh, tag, version, ddate, qtrs, dimh, iprx, _row_hash)",
         "sec_renderings": "(adsh, report)",
         "sec_presentations": "(adsh, report, line)",
         "sec_calculations": "(adsh, grp, arc)",

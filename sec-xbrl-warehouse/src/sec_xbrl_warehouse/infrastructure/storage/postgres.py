@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import ArtifactState, JobState, JobType
@@ -52,6 +59,21 @@ _ALLOWED_ARTIFACT_TRANSITIONS: dict[ArtifactState, set[ArtifactState]] = {
     ArtifactState.COMPLETE: set(),
 }
 
+_CHECKPOINT_LEASE: ContextVar[JobRecord | None] = ContextVar("xbrl_checkpoint_lease", default=None)
+
+
+@contextmanager
+def checkpoint_lease(job: JobRecord) -> Iterator[None]:
+    token = _CHECKPOINT_LEASE.set(job)
+    try:
+        yield
+    finally:
+        _CHECKPOINT_LEASE.reset(token)
+
+
+def current_checkpoint_lease() -> JobRecord | None:
+    return _CHECKPOINT_LEASE.get()
+
 
 class PostgresControlRepository:
     """PostgreSQL implementation of artifact, filing, job, and issue state.
@@ -93,7 +115,9 @@ class PostgresControlRepository:
     async def get_checkpoint(
         self, job_id: UUID, stage: str, key: str = "default"
     ) -> dict[str, Any] | None:
-        async with self.sessions() as session:
+        lease = self._require_checkpoint_lease(job_id)
+        async with self.sessions.begin() as session:
+            await self._lock_checkpoint_job(session, lease)
             return await session.scalar(
                 select(JobCheckpointRow.payload).where(
                     JobCheckpointRow.job_id == job_id,
@@ -105,13 +129,39 @@ class PostgresControlRepository:
     async def save_checkpoint(
         self, job_id: UUID, stage: str, payload: dict[str, Any], key: str = "default"
     ) -> None:
+        lease = self._require_checkpoint_lease(job_id)
         statement = (
             pg_insert(JobCheckpointRow)
             .values(job_id=job_id, stage=stage, checkpoint_key=key, payload=payload)
             .on_conflict_do_update(constraint="uq_job_checkpoint", set_={"payload": payload})
         )
         async with self.sessions.begin() as session:
+            await self._lock_checkpoint_job(session, lease)
             await session.execute(statement)
+
+    @staticmethod
+    def _require_checkpoint_lease(job_id: UUID) -> JobRecord:
+        lease = current_checkpoint_lease()
+        if lease is None or lease.id != job_id or lease.locked_by is None:
+            raise StateTransitionError(
+                f"Checkpoint access requires an active lease for job {job_id}"
+            )
+        return lease
+
+    @staticmethod
+    async def _lock_checkpoint_job(session: AsyncSession, lease: JobRecord) -> None:
+        row = await session.scalar(
+            select(IngestionJobRow)
+            .where(
+                IngestionJobRow.id == lease.id,
+                IngestionJobRow.state == JobState.RUNNING.value,
+                IngestionJobRow.locked_by == lease.locked_by,
+                IngestionJobRow.attempts == lease.attempts,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            raise StateTransitionError(f"Checkpoint lease is no longer valid for job {lease.id}")
 
     async def upsert_source_artifact(
         self,
@@ -342,6 +392,7 @@ class PostgresControlRepository:
         *,
         worker_id: str | None = None,
         attempt: int | None = None,
+        retry_at: datetime | None = None,
     ) -> None:
         async with self.sessions.begin() as session:
             row = await session.scalar(
@@ -360,6 +411,8 @@ class PostgresControlRepository:
             row.available_at = datetime.now(UTC) + timedelta(
                 seconds=min(3600, 2 ** max(row.attempts, 1))
             )
+            if retry_at is not None:
+                row.available_at = max(row.available_at, retry_at)
             row.last_error = error[:16_000]
             row.locked_at = None
             row.locked_by = None

@@ -191,9 +191,21 @@ class QueryService:
             params,
         )
 
-    def filing_summary(self, accession: str) -> dict[str, Any] | None:
+    def filing_summary(
+        self, accession: str, *, cik: int | None = None, filed_date: date | None = None
+    ) -> dict[str, Any] | None:
+        if re.fullmatch(r"\d{10}-\d{2}-\d{6}", accession) is None:
+            raise ValueError("Invalid accession")
+        filters = ""
+        params: dict[str, Any] = {"accession": accession}
+        if cik is not None:
+            filters += " AND cik = %(cik)s"
+            params["cik"] = cik
+        if filed_date is not None:
+            filters += " AND filed_date = %(filed_date)s"
+            params["filed_date"] = filed_date
         rows = self.warehouse.query(
-            """
+            f"""
             SELECT
                 accession,
                 any(cik) AS cik,
@@ -205,10 +217,10 @@ class QueryService:
                 uniqExact(context_hash) AS context_count,
                 max(extraction_revision) AS latest_extraction_revision
             FROM v_xbrl_facts_latest
-            WHERE accession = %(accession)s
+            WHERE accession = %(accession)s {filters}
             GROUP BY accession
             """,
-            {"accession": accession},
+            params,
         )
         return rows[0] if rows else None
 

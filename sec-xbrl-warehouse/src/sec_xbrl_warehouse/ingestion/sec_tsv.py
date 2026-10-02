@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import io
 import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -15,6 +14,9 @@ import pyarrow as pa
 from sec_xbrl_warehouse.domain.enums import SEC_TABLE_LOAD_ORDER, SecTable
 from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, SchemaDriftError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import sec_typed_schema
+
+# CSV counts Unicode characters; the per-row UTF-8 byte budget is enforced separately.
+SEC_CSV_FIELD_LIMIT = 32 * 1024**2
 
 SEC_HEADERS: dict[SecTable, tuple[str, ...]] = {
     SecTable.SUB: (
@@ -138,6 +140,10 @@ SEC_HEADERS: dict[SecTable, tuple[str, ...]] = {
     SecTable.CAL: ("adsh", "grp", "arc", "negative", "ptag", "pversion", "ctag", "cversion"),
 }
 
+SEC_HEADER_ALIASES: dict[SecTable, dict[str, str]] = {
+    SecTable.DIM: {"dimhash": "dimh"},
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ZipManifest:
@@ -179,7 +185,12 @@ class SecTsvBatchReader:
         return ZipManifest(members=members, ignored_members=ignored)
 
     def validate_header(self, table: SecTable, actual: list[str] | tuple[str, ...] | None) -> None:
-        normalized = [column.removeprefix("\ufeff").strip().lower() for column in (actual or [])]
+        aliases = SEC_HEADER_ALIASES.get(table, {})
+        normalized = [
+            aliases.get(name, name)
+            for column in (actual or [])
+            if (name := column.removeprefix("\ufeff").strip().lower())
+        ]
         expected = list(SEC_HEADERS[table])
         if normalized != expected:
             missing = [name for name in expected if name not in normalized]
@@ -195,48 +206,64 @@ class SecTsvBatchReader:
         Each batch carries ``sec_table``/``source_start_line`` metadata. The
         loader passes these to `coerce_sec_batch` for strict typed conversion.
         """
+        # Use one fixed process-wide ceiling so concurrent readers agree on the limit.
+        csv.field_size_limit(SEC_CSV_FIELD_LIMIT)
         with zipfile.ZipFile(zip_path) as archive:
             manifest = self.validate_manifest(archive)
             member_name = manifest.members[table]
-            with (
-                archive.open(member_name, "r") as binary,
-                io.TextIOWrapper(binary, encoding="utf-8-sig", errors="strict", newline="") as text,
-            ):
-                reader = csv.DictReader(text, delimiter="\t", quoting=csv.QUOTE_NONE)
-                if reader.fieldnames is None:
-                    raise SchemaDriftError(f"Missing header in {member_name}")
-                self.validate_header(table, list(reader.fieldnames))
-                rows: list[dict[str, str | None]] = []
-                batch_size = 0
-                start_line = 0
-                for source_line, row in enumerate(reader, start=2):
-                    if None in row:
-                        raise SchemaDriftError(
-                            f"Extra fields in {member_name} at source line {source_line}"
+            with archive.open(member_name, "r") as binary:
+                text = bounded_tsv_lines(
+                    binary, self.batch_bytes, member_name, len(SEC_HEADERS[table])
+                )
+                reader = csv.DictReader(text, delimiter="\t", strict=True)
+                try:
+                    if reader.fieldnames is None:
+                        raise SchemaDriftError(f"Missing header in {member_name}")
+                    self.validate_header(table, list(reader.fieldnames))
+                    rows: list[dict[str, str | None]] = []
+                    batch_size = 0
+                    start_line = 0
+                    previous_line = reader.line_num
+                    for row in reader:
+                        source_line = previous_line + 1
+                        previous_line = reader.line_num
+                        if None in row:
+                            raise SchemaDriftError(
+                                f"Extra fields in {member_name} at source line {source_line}"
+                            )
+                        aliases = SEC_HEADER_ALIASES.get(table, {})
+                        normalized = {
+                            aliases.get(key, key): _normalize_empty(value)
+                            for key, value in row.items()
+                        }
+                        size = sum(
+                            len(value.encode("utf-8"))
+                            for value in normalized.values()
+                            if value is not None
                         )
-                    normalized = {key: _normalize_empty(value) for key, value in row.items()}
-                    size = sum(
-                        len(value.encode("utf-8"))
-                        for value in normalized.values()
-                        if value is not None
-                    )
-                    if size > self.batch_bytes:
-                        raise ArtifactIntegrityError(
-                            f"Row exceeds byte budget in {member_name} at line {source_line}"
-                        )
-                    if rows and batch_size + size > self.batch_bytes:
+                        if size > self.batch_bytes:
+                            raise ArtifactIntegrityError(
+                                f"Row exceeds byte budget in {member_name} at line {source_line}"
+                            )
+                        if rows and batch_size + size > self.batch_bytes:
+                            yield self._raw_batch(table, member_name, rows, start_line)
+                            rows, batch_size = [], 0
+                        if not rows:
+                            start_line = source_line
+                        rows.append(normalized)
+                        batch_size += size
+                        if len(rows) >= self.batch_rows:
+                            yield self._raw_batch(table, member_name, rows, start_line)
+                            rows = []
+                            batch_size = 0
+                    if rows:
                         yield self._raw_batch(table, member_name, rows, start_line)
-                        rows, batch_size = [], 0
-                    if not rows:
-                        start_line = source_line
-                    rows.append(normalized)
-                    batch_size += size
-                    if len(rows) >= self.batch_rows:
-                        yield self._raw_batch(table, member_name, rows, start_line)
-                        rows = []
-                        batch_size = 0
-                if rows:
-                    yield self._raw_batch(table, member_name, rows, start_line)
+                except csv.Error as exc:
+                    raise ArtifactIntegrityError(
+                        f"Invalid TSV in {member_name} near source line "
+                        f"{reader.reader.line_num}: {exc} "
+                        f"(field limit {SEC_CSV_FIELD_LIMIT} characters)"
+                    ) from exc
 
     @staticmethod
     def _raw_batch(
@@ -526,7 +553,8 @@ class _CalCoercion(_TableCoercion):
                 if name in ("grp", "arc"):
                     out[name] = self._int(raw)
                 elif name == "negative":
-                    out[name] = self._flag(raw)
+                    # Preserve signed CAL weights and older 0/1 encodings as published.
+                    out[name] = self._int(raw, low=-1, high=1)
                 else:
                     out[name] = self._string(raw)
             except (ValueError, InvalidOperation) as exc:
@@ -550,3 +578,45 @@ def _normalize_empty(value: str | None) -> str | None:
     if value is None or value == "" or value == "\\N":
         return None
     return value
+
+
+def bounded_tsv_lines(binary: Any, budget: int, member: str, columns: int) -> Iterator[str]:
+    # Bound logical records before csv allocates fields; quoted tabs are content.
+    limit = budget + 3 * columns + 5  # separators, enclosing quotes, BOM and CRLF
+    line_number = 0
+    size, fields = 0, 1
+    quoted, field_start = False, True
+    while raw := binary.readline(limit + 1):
+        line_number += 1
+        size += len(raw)
+        if size > limit:
+            raise ArtifactIntegrityError(
+                f"Row exceeds byte budget in {member} at line {line_number}"
+            )
+        position = 3 if line_number == 1 and raw.startswith(b"\xef\xbb\xbf") else 0
+        while position < len(raw):
+            if field_start:
+                field_start = False
+                if raw[position : position + 1] == b'"':
+                    quoted = True
+                    position += 1
+            if quoted:
+                end = raw.find(b'"', position)
+                if end < 0:
+                    break
+                position = end + 1
+                if raw[position : position + 1] == b'"':
+                    position += 1  # escaped quote; remain inside the field
+                    continue
+                quoted = False
+            else:
+                end = raw.find(b"\t", position)
+                if end < 0:
+                    break
+                fields += 1
+                if fields > columns:
+                    raise SchemaDriftError(f"Extra fields in {member} at source line {line_number}")
+                position, field_start = end + 1, True
+        yield raw.decode("utf-8-sig" if line_number == 1 else "utf-8")
+        if not quoted:
+            size, fields, field_start = 0, 1, True

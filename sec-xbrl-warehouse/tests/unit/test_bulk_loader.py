@@ -137,15 +137,50 @@ def test_load_artifact_rejects_checksum_mismatch() -> None:
         asyncio.run(loader.load_artifact(artifact, FIXTURE))
 
 
-def test_load_artifact_resumes_after_completed_batch() -> None:
+def test_load_artifact_resumes_after_completed_batch(tmp_path) -> None:
     artifact = _artifact()
     control = _FakeControl(artifact)
     warehouse = _FakeWarehouse()
     warehouse.fail_table = SecTable.TAG
-    loader = BulkArtifactLoader(SecTsvBatchReader(batch_rows=1), _FakeWriter(), warehouse, control)
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.infrastructure.storage.object_store import LocalObjectStore
+    from sec_xbrl_warehouse.infrastructure.storage.parquet import ParquetBatchWriter
+
+    settings = Settings(data_dir=tmp_path, temp_dir=tmp_path)
+    store = LocalObjectStore(tmp_path / "objects", "test")
+    loader = BulkArtifactLoader(
+        SecTsvBatchReader(batch_rows=1),
+        ParquetBatchWriter(settings, store),
+        warehouse,
+        control,
+        store,
+        settings=settings,
+    )
     job_id = uuid4()
     with pytest.raises(ConnectionError):
         asyncio.run(loader.load_artifact(artifact, FIXTURE, job_id=job_id))
     stats = asyncio.run(loader.load_artifact(artifact, FIXTURE, job_id=job_id))
     assert stats.rows_by_table["sub"] == 1
     assert [table for table, _ in warehouse.inserted].count("sub") == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_replay_rejects_changed_boundaries_and_unverified_legacy(legacy):
+    artifact = _artifact()
+    control = _FakeControl(artifact)
+    warehouse = _FakeWarehouse()
+    loader = BulkArtifactLoader(SecTsvBatchReader(batch_rows=1), _FakeWriter(), warehouse, control)
+    job_id = uuid4()
+    asyncio.run(loader._load_table(artifact, FIXTURE, SecTable.TAG, sub_lookup={}, job_id=job_id))
+    saved = next(iter(control.checkpoints.values()))
+    if legacy:
+        saved.pop("identity", None)
+    else:
+        loader.reader = SecTsvBatchReader(batch_rows=2)
+    previous = list(warehouse.inserted)
+    with pytest.raises(ArtifactIntegrityError, match="checkpoint"):
+        asyncio.run(
+            loader._load_table(artifact, FIXTURE, SecTable.TAG, sub_lookup={}, job_id=job_id)
+        )
+    assert warehouse.inserted == previous
+    assert len(control.checkpoints) == 1

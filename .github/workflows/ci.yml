@@ -1,8 +1,6 @@
 name: CI
 
-on:
-  push:
-  pull_request:
+on: workflow_dispatch
 
 defaults:
   run:
@@ -19,7 +17,7 @@ jobs:
           cache: pip
           cache-dependency-path: sec-xbrl-warehouse/pyproject.toml
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -c constraints-tested.txt -e ".[dev]"
       - run: python -m ruff check .
       - run: python -m ruff format --check .
       - run: python -m mypy src
@@ -57,7 +55,7 @@ jobs:
           cache: pip
           cache-dependency-path: sec-xbrl-warehouse/pyproject.toml
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
+      - run: python -m pip install -c constraints-tested.txt -e ".[dev]"
       - run: cp .env.example .env
       - run: docker compose up -d --wait minio
       - run: python -m pytest -m integration

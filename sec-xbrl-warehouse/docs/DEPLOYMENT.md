@@ -1,3 +1,9 @@
+> September 8 remediation: before adopting the changed Compose configuration, read
+> [the deployment prerequisites](HARDENING_REMEDIATION_2026-09-08.md#deployment-prerequisites).
+> The API no longer receives writer credentials or the shared data volume. Use an
+> operator/worker image with an explicit CLI command for privileged bootstrap.
+> Current ingestion is paused; do not deploy or resume it from these examples.
+
 # Deployment Guide
 
 ## Local development
@@ -15,6 +21,22 @@ docker compose --profile application --profile monitoring up -d
 ```
 
 The local API, Prometheus, Grafana, database, and object-store host ports bind to loopback where configured. Do not treat local Compose credentials or anonymous local Grafana access as production security.
+
+The application image runs as UID/GID `10001:10001`, with Linux capabilities
+dropped and privilege escalation disabled by Compose. Fresh `app_data` volumes
+inherit that ownership. Before upgrading an existing root-owned application volume,
+stop API/workers and have the operator set ownership of that volume to
+`10001:10001`; do not change ownership of the PostgreSQL, ClickHouse, or MinIO
+volumes. Bind-mounted application data and parser caches must also be writable by
+that UID. Bucket initialization must succeed before API/workers start.
+
+Readiness remains unauthenticated for infrastructure probes but allows only one
+database probe at a time per API process; overlapping probes return HTTP 503.
+Liveness does no database work and stays available during query saturation.
+When `XBRL_API_KEY` is configured, Prometheus needs matching bearer credentials
+for `/metrics/`; supply them through a protected credentials file and Prometheus's
+`authorization.credentials_file` setting. The bundled monitoring config is for
+local unauthenticated development.
 
 ## Single-host production starting point
 

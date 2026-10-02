@@ -19,7 +19,10 @@ from sec_xbrl_warehouse.domain.models import (
     ValidationIssue,
 )
 from sec_xbrl_warehouse.exceptions import StateTransitionError
-from sec_xbrl_warehouse.infrastructure.storage.postgres import PostgresControlRepository
+from sec_xbrl_warehouse.infrastructure.storage.postgres import (
+    PostgresControlRepository,
+    checkpoint_lease,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -156,9 +159,12 @@ async def test_stale_lock_is_reclaimable(postgres_settings: Settings) -> None:
         await repo.enqueue_job(
             job_type="load_bulk", idempotency_key=key, priority=1, payload={"x": 1}
         )
-        first = await repo.claim_job("dead-worker", lock_timeout_seconds=900)
+        worker_id = "reused-worker"
+        first = await repo.claim_job(worker_id, lock_timeout_seconds=900)
         assert first is not None
         assert first.state is JobState.RUNNING
+        with checkpoint_lease(first):
+            await repo.save_checkpoint(first.id, "load", {"rows": 5})
 
         # A second worker cannot grab it while fresh...
         gone = await repo.claim_job("live-worker", lock_timeout_seconds=900)
@@ -170,13 +176,22 @@ async def test_stale_lock_is_reclaimable(postgres_settings: Settings) -> None:
                 text("UPDATE ingestion_jobs SET locked_at = :stale WHERE id = :job_id"),
                 {"stale": datetime.now(UTC) - timedelta(seconds=1800), "job_id": first.id},
             )
-        reclaimed = await repo.claim_job("live-worker", lock_timeout_seconds=900)
+        reclaimed = await repo.claim_job(worker_id, lock_timeout_seconds=900)
         assert reclaimed is not None and reclaimed.id == first.id
         assert reclaimed.attempts == 2
+        with checkpoint_lease(first):
+            with pytest.raises(StateTransitionError):
+                await repo.get_checkpoint(first.id, "load")
+            with pytest.raises(StateTransitionError):
+                await repo.save_checkpoint(first.id, "load", {"rows": 6})
+        with checkpoint_lease(reclaimed):
+            assert await repo.get_checkpoint(reclaimed.id, "load") == {"rows": 5}
+            await repo.save_checkpoint(reclaimed.id, "load", {"rows": 10})
+            assert await repo.get_checkpoint(reclaimed.id, "load") == {"rows": 10}
         with pytest.raises(StateTransitionError):
-            await repo.complete_job(first.id, worker_id="dead-worker", attempt=first.attempts)
+            await repo.complete_job(first.id, worker_id=worker_id, attempt=first.attempts)
         with pytest.raises(StateTransitionError):
-            await repo.heartbeat_job(first.id, "dead-worker", first.attempts)
+            await repo.heartbeat_job(first.id, worker_id, first.attempts)
     finally:
         await repo.close()
 
@@ -226,9 +241,14 @@ async def test_complete_job_only_from_running(postgres_settings: Settings) -> No
         await repo.enqueue_job(job_type="load_bulk", idempotency_key=key, payload={"x": 1})
         record = await repo.claim_job("w1", lock_timeout_seconds=900)
         assert record is not None
-        await repo.save_checkpoint(record.id, "load", {"rows": 5})
-        await repo.save_checkpoint(record.id, "load", {"rows": 10})
-        assert await repo.get_checkpoint(record.id, "load") == {"rows": 10}
+        with pytest.raises(StateTransitionError):
+            await repo.get_checkpoint(record.id, "load")
+        with pytest.raises(StateTransitionError):
+            await repo.save_checkpoint(record.id, "load", {"rows": 5})
+        with checkpoint_lease(record):
+            await repo.save_checkpoint(record.id, "load", {"rows": 5})
+            await repo.save_checkpoint(record.id, "load", {"rows": 10})
+            assert await repo.get_checkpoint(record.id, "load") == {"rows": 10}
         await repo.complete_job(
             record.id,
             {"rows": 10},
@@ -256,5 +276,30 @@ async def test_upsert_filing_and_validation_issues(postgres_settings: Settings) 
             line=12,
         )
         await repo.record_validation_issues([issue])
+    finally:
+        await repo.close()
+
+
+async def test_deferred_retry_preserves_server_deadline_and_fence(postgres_settings):
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.enqueue_job(
+            job_type="load_bulk", idempotency_key=f"deferred-{uuid4()}", payload={}
+        )
+        job = await repo.claim_job("owner", lock_timeout_seconds=900)
+        deadline = datetime.now(UTC) + timedelta(days=10)
+        with pytest.raises(StateTransitionError):
+            await repo.fail_job(
+                job.id, "deferred", True, worker_id="stale", attempt=job.attempts, retry_at=deadline
+            )
+        await repo.fail_job(
+            job.id, "deferred", True, worker_id="owner", attempt=job.attempts, retry_at=deadline
+        )
+        assert await repo.claim_job("next", lock_timeout_seconds=900) is None
+        async with repo.sessions() as session:
+            saved = await session.scalar(
+                text("SELECT available_at FROM ingestion_jobs WHERE id = :id"), {"id": job.id}
+            )
+        assert saved >= deadline
     finally:
         await repo.close()

@@ -254,3 +254,27 @@ async def test_midstream_failure_can_resume_on_next_attempt(tmp_path):
     async with httpx.AsyncClient(transport=httpx.MockTransport(resumed)) as client:
         await SecHttpClient(settings, client).download("https://www.sec.gov/file", destination)
     assert destination.read_bytes().endswith(b"z")
+
+
+async def test_long_retry_after_defers_without_sleep(monkeypatch):
+    from datetime import UTC, datetime
+
+    from sec_xbrl_warehouse.exceptions import SecRetryDeferred
+    from sec_xbrl_warehouse.worker import is_retryable_exception
+
+    async def forbidden_sleep(delay):
+        raise AssertionError(f"unexpected sleep {delay}")
+
+    monkeypatch.setattr(
+        "sec_xbrl_warehouse.infrastructure.http.sec_client.asyncio.sleep", forbidden_sleep
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(429, headers={"Retry-After": "999999999"})
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        http = SecHttpClient(Settings(sec_user_agent="Tests tests@example.com"), client)
+        before = datetime.now(UTC)
+        with pytest.raises(SecRetryDeferred) as error:
+            await http.get_text("https://www.sec.gov/test")
+        assert (error.value.retry_at - before).total_seconds() >= 999999999
+        assert is_retryable_exception(error.value)

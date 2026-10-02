@@ -233,14 +233,24 @@ class CanonicalMapper:
         *,
         extraction_revision: int,
         batch_rows: int = 500,
+        batch_bytes: int = 32 * 1024**2,
     ) -> AsyncIterator[tuple[CanonicalFact, ...]]:
         if batch_rows < 1:
             raise ValueError("Mapping batch size must be positive")
         approved: dict[tuple[str, str, str | None], Sequence[ConceptMapping]] = {}
         mapped: list[CanonicalFact] = []
         reviews: list[ReviewRequest] = []
-        count = 0
+        count = size = 0
         for fact in facts:
+            record_size = len(fact.model_dump_json().encode("utf-8")) + 512
+            if record_size > batch_bytes:
+                raise ValueError("Single mapping record exceeds byte budget")
+            if count and size + record_size > batch_bytes:
+                if reviews:
+                    await self.repository.create_reviews(filing, reviews)
+                yield tuple(mapped)
+                mapped, reviews, count, size = [], [], 0, 0
+            size += record_size
             key = (fact.concept_namespace, fact.concept_name, fact.taxonomy_version)
             if key not in approved:
                 approved[key] = await self.repository.approved_mappings_for_concept(
@@ -260,7 +270,7 @@ class CanonicalMapper:
                 if reviews:
                     await self.repository.create_reviews(filing, reviews)
                 yield tuple(mapped)
-                mapped, reviews, count = [], [], 0
+                mapped, reviews, count, size = [], [], 0, 0
         if count:
             if reviews:
                 await self.repository.create_reviews(filing, reviews)

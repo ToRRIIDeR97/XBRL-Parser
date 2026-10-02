@@ -26,6 +26,7 @@ from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     iter_xbrl_tables,
 )
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha256_file
+from sec_xbrl_warehouse.infrastructure.storage.parquet import verify_checkpoint_objects
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
 from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
 from sec_xbrl_warehouse.observability.metrics import (
@@ -70,7 +71,15 @@ class IncrementalFilingIngestor:
         if job_id and self.object_store is None:
             raise ValueError("Checkpointed extraction requires object storage")
         completed = await self._checkpoint(job_id, "complete")
-        if completed is not None:
+        if completed is not None and self.object_store is not None:
+            self.settings.ensure_directories()
+            for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+                checkpoint = await self._checkpoint(job_id, f"silver:{entity}")
+                if checkpoint is None:
+                    raise XbrlExtractionError("Completed filing has no silver checkpoint")
+                await asyncio.to_thread(
+                    verify_checkpoint_objects, checkpoint, self.object_store, self.settings
+                )
             return completed
         self.settings.ensure_directories()
         await self.control.upsert_filing(filing)
@@ -91,7 +100,10 @@ class IncrementalFilingIngestor:
                 if extracted and self.object_store is not None:
                     path = staging / "extraction.json"
                     stored = await asyncio.to_thread(
-                        self.object_store.get_file, extracted["object_key"], path
+                        self.object_store.get_file,
+                        extracted["object_key"],
+                        path,
+                        max_bytes=self.settings.extraction_max_bytes,
                     )
                     if stored.checksum_sha256 != extracted["sha256"]:
                         raise XbrlExtractionError("Saved extraction checksum mismatch")
@@ -168,7 +180,10 @@ class IncrementalFilingIngestor:
                 if self.mapper is not None and await self._checkpoint(job_id, "canonical") is None:
                     mapped = 0
                     async for canonical in self.mapper.map_batches(
-                        bundle.facts, filing, extraction_revision=extraction_revision
+                        bundle.facts,
+                        filing,
+                        extraction_revision=extraction_revision,
+                        batch_bytes=self.settings.arrow_batch_bytes,
                     ):
                         await asyncio.to_thread(self.warehouse.insert_canonical_facts, canonical)
                         mapped += len(canonical)
@@ -184,8 +199,6 @@ class IncrementalFilingIngestor:
                     "reconciliation": reconciliation,
                     "status": "complete",
                 }
-                if not self.settings.retain_filing_source_files:
-                    await asyncio.to_thread(self.package_store.delete_source_files, manifest)
                 await self._save(job_id, "complete", result)
                 return result
         except Exception as exc:
@@ -226,7 +239,11 @@ class IncrementalFilingIngestor:
         self, bundle: XbrlExtractionBundle, job_id: UUID | None = None
     ) -> dict[str, int]:
         for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
-            if await self._checkpoint(job_id, f"silver:{entity}") is not None:
+            checkpoint = await self._checkpoint(job_id, f"silver:{entity}")
+            if checkpoint is not None and self.object_store is not None:
+                await asyncio.to_thread(
+                    verify_checkpoint_objects, checkpoint, self.object_store, self.settings
+                )
                 continue
             tables = iter_xbrl_tables(
                 bundle, entity, self.settings.arrow_batch_rows, self.settings.arrow_batch_bytes
@@ -243,7 +260,11 @@ class IncrementalFilingIngestor:
             await self._save(
                 job_id,
                 f"silver:{entity}",
-                {"rows": count, "objects": [item.key for item in objects]},
+                {
+                    "rows": count,
+                    "objects": [item.key for item in objects],
+                    "object_records": [item.model_dump(mode="json") for item in objects],
+                },
             )
         saved = await self._checkpoint(job_id, "gold")
         if saved is not None:
@@ -254,30 +275,48 @@ class IncrementalFilingIngestor:
         return counts
 
     async def reconcile(self, accession: str) -> dict[str, Any]:
-        params = {"accession": accession}
+        # ponytail: comparison holds one bounded filing; stream/partition if this ceiling is reached.
+        params = {
+            "accession": accession,
+            "max_rows": self.settings.reconciliation_max_rows,
+            "max_bytes": self.settings.reconciliation_max_bytes,
+        }
+        budget = """ SETTINGS max_result_rows = %(max_rows)s,
+            max_result_bytes = %(max_bytes)s, result_overflow_mode = 'throw',
+            max_execution_time = 60, max_memory_usage = 536870912
+        """
         bulk_numeric = await asyncio.to_thread(
             self.warehouse.query,
             """
-            SELECT n.*, d.segments, d.segt FROM v_sec_numeric_latest AS n
+            SELECT n.tag, n.version, n.ddate, n.qtrs, n.uom, n.value_raw,
+                   d.segments, d.segt FROM v_sec_numeric_latest AS n
             LEFT JOIN sec_dimensions AS d FINAL ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
             WHERE n.adsh = %(accession)s
-            """,
+            """
+            + budget,
             params,
         )
         bulk_text = await asyncio.to_thread(
             self.warehouse.query,
             """
-            SELECT n.*, d.segments, d.segt FROM v_sec_text_latest AS n
+            SELECT n.tag, n.version, n.ddate, n.qtrs, n.lang, n.txtlen, n.value AS value_raw,
+                   d.segments, d.segt FROM v_sec_text_latest AS n
             LEFT JOIN sec_dimensions AS d FINAL ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
             WHERE n.adsh = %(accession)s
-            """,
+            """
+            + budget,
             params,
         )
         if not bulk_numeric and not bulk_text:
             return {"available": False, "reason": "no bulk representation yet"}
         raw = await asyncio.to_thread(
             self.warehouse.query,
-            "SELECT * FROM v_xbrl_facts_latest WHERE accession = %(accession)s",
+            """SELECT concept_namespace, concept_name, taxonomy_version, dimensions_json,
+                      period_kind, period_start, period_end, period_instant, value_kind,
+                      unit_id, unit_numerator_json, unit_denominator_json, language,
+                      value_decimal, value_text, is_nil, raw_value
+               FROM v_xbrl_facts_latest WHERE accession = %(accession)s"""
+            + budget,
             params,
         )
         result = await asyncio.to_thread(

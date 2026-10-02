@@ -178,9 +178,17 @@ class IngestionOrchestrator:
         artifact = SourceArtifactRef.model_validate(artifact_data)
         if self.object_store is None or artifact.object_key is None:
             raise JobStateError("Bulk load requires the immutable bronze object key and store")
-        with tempfile.TemporaryDirectory(prefix=f"xbrl-{artifact.id}-") as staging:
+        await asyncio.to_thread(self.loader.settings.require_disk_reserve)
+        with tempfile.TemporaryDirectory(
+            prefix=f"xbrl-{artifact.id}-", dir=self.loader.settings.temp_dir
+        ) as staging:
             local_zip = Path(staging) / "source.zip"
-            await asyncio.to_thread(self.object_store.get_file, artifact.object_key, local_zip)
+            await asyncio.to_thread(
+                self.object_store.get_file,
+                artifact.object_key,
+                local_zip,
+                max_bytes=self.loader.settings.download_max_bytes,
+            )
             stats = await self.loader.load_artifact(artifact, local_zip, job_id=job_id)
         return {
             "artifact_id": str(artifact.id),

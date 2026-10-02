@@ -8,6 +8,11 @@ The raw layer stores what was filed or what the SEC bulk set published. The cano
 
 The bulk loader expects eight tab-delimited tables.
 
+TSV fields use CSV quoting: quoted tabs, escaped double quotes, and quoted
+newlines are field content. The reader bounds bytes per logical record and
+counts only unquoted separators before allocating CSV fields. Checkpoints
+retain the physical source line where each batch begins.
+
 ### SUB — submissions
 
 Primary key: `adsh`.
@@ -32,9 +37,18 @@ Compound key: `(adsh, tag, version, ddate, qtrs, uom, dimh, iprx)`.
 
 Preserve both the raw decimal text and a parsed decimal value. Never use binary floating point as the only representation.
 
+NUM and TXT `ddate` remain typed dates in Arrow/Parquet. ClickHouse stores their
+ISO date strings so published years outside its native Date/Date32 ranges are
+retained without clamping. The adapter converts dates to strings only on the
+ClickHouse transport boundary. Invalid calendar dates still fail parsing;
+unusual but parseable dates are preserved, not corrected to an assumed year.
+
 ### TXT — text facts
 
-Compound key: `(adsh, tag, version, ddate, qtrs, dimh, iprx)`.
+Compound key: `(adsh, tag, version, ddate, qtrs, dimh, iprx, _row_hash)`.
+
+The source-row hash preserves distinct contexts and other published text values
+that share the SEC business fields. Replaying the same row remains idempotent.
 
 Contains normalized plain text and metadata including language, source length, truncation information, context reference, and footnotes.
 
@@ -55,6 +69,12 @@ Describes statement location, order, indentation/parenthetical status, preferred
 Compound key: `(adsh, grp, arc)`.
 
 Describes parent-child calculation arcs and sign/weight direction.
+
+Preserve the published `negative` integer: current signed weights (-1/1) and
+older 0/1 encodings remain distinct source values, not normalized booleans.
+Arrow and ClickHouse use signed Int16 so upgrades preserve the full former
+UInt8 range. Parsing accepts only -1, 0, or 1. Interpret direction using the
+source encoding; do not treat both nonzero values as a negative arc.
 
 ## Full-fidelity Arelle entities
 

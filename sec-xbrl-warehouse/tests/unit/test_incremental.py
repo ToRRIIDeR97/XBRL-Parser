@@ -185,7 +185,7 @@ def test_ingest_runs_pipeline(tmp_path: Path) -> None:
         _FakeExtractor(),
         writer,
         warehouse,
-        settings=Settings(env="test", retain_filing_source_files=False),
+        settings=Settings(env="test"),
     )
     result = asyncio.run(ingestor.ingest(_filing(), extraction_revision=2))
     assert result["status"] == "complete"
@@ -194,7 +194,12 @@ def test_ingest_runs_pipeline(tmp_path: Path) -> None:
     assert control.upserts[0].accession == "0000000001-26-000001"
     assert writer.calls == 2  # only the non-empty context and fact tables emit batches
     assert warehouse.bundles[0].filing.accession == "0000000001-26-000001"
-    assert store.deletes == 1
+    assert store.deletes == 0
+
+
+def test_ingestion_cannot_disable_raw_retention():
+    with pytest.raises(ValueError, match="Raw source retention is required"):
+        Settings(_env_file=None, env="test", retain_filing_source_files=False)
 
 
 def test_reconcile_reports_bulk_absence() -> None:
@@ -213,7 +218,6 @@ def test_ingest_resumes_from_download_extract_and_silver_checkpoints(tmp_path: P
     control = _FakeControl()
     package_store = _FakePackageStore()
     extractor = _FakeExtractor()
-    writer = _FakeWriter()
     warehouse = _FakeWarehouse()
     warehouse.fail_once = True
     settings = Settings(
@@ -223,6 +227,9 @@ def test_ingest_resumes_from_download_extract_and_silver_checkpoints(tmp_path: P
         config_dir=tmp_path / "config",
     )
     object_store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    from sec_xbrl_warehouse.infrastructure.storage.parquet import ParquetBatchWriter
+
+    writer = ParquetBatchWriter(settings, object_store)
     ingestor = IncrementalFilingIngestor(
         control,
         package_store,
@@ -241,7 +248,7 @@ def test_ingest_resumes_from_download_extract_and_silver_checkpoints(tmp_path: P
     assert package_store.downloads == 1
     assert package_store.archives == 1
     assert extractor.calls == 1
-    assert writer.calls == 2
+    assert control.checkpoints[("silver:facts", "default")]["object_records"]
 
 
 def test_extraction_checkpoint_streams_and_round_trips(tmp_path, monkeypatch):

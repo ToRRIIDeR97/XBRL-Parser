@@ -222,3 +222,40 @@ def test_mapping_batches_cache_lookups_but_check_each_facts_period():
     assert asyncio.run(mapper.map_batch(facts, _filing(), extraction_revision=1)) == ()
     assert repo.lookup_calls == 2
     assert repo.batch_calls == 4  # one incompatible review, then 500 + 500 + 1
+
+
+def test_mapping_and_canonical_insert_obey_byte_budget():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.exceptions import WarehouseWriteError
+    from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWarehouse
+
+    mapper = CanonicalMapper({"Revenue": _metric()}, {}, _FakeRepository(mappings=[_mapping()]))
+    fact = _fact()
+    size = len(fact.model_dump_json().encode()) + 512
+
+    async def collect(budget):
+        return [
+            batch
+            async for batch in mapper.map_batches(
+                [fact, fact], _filing(), extraction_revision=1, batch_bytes=budget
+            )
+        ]
+
+    batches = asyncio.run(collect(size))
+    assert [len(batch) for batch in batches] == [1, 1]
+    with pytest.raises(ValueError, match="byte budget"):
+        asyncio.run(collect(size - 1))
+    canonical = batches[0][0]
+    budget = len(canonical.model_dump_json().encode()) + 512
+    warehouse = ClickHouseWarehouse(Settings(arrow_batch_bytes=budget), client=SimpleNamespace())
+    counts = []
+    warehouse._insert_arrow = lambda name, table: counts.append(table.num_rows) or table.num_rows
+    assert warehouse.insert_canonical_facts([canonical, canonical]) == 2
+    assert counts == [1, 1]
+    warehouse.settings.arrow_batch_bytes = budget - 1
+    with pytest.raises(WarehouseWriteError, match="byte budget"):
+        warehouse.insert_canonical_facts([canonical])

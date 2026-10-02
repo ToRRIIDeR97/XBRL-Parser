@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterator, Sequence
+from contextlib import ExitStack
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -92,6 +94,10 @@ class ClickHouseWarehouse:
                 }
                 for name, budget in query_settings.items():
                     value = effective.get(name)
+                    if name == "max_threads" and value is not None:
+                        auto = re.fullmatch(r"'?auto\((\d+)\)'?", str(value))
+                        if auto:
+                            value = auto.group(1)
                     if (
                         value is None
                         or (isinstance(budget, str) and value != budget)
@@ -143,7 +149,11 @@ class ClickHouseWarehouse:
             sorted(
                 name
                 for name, (_, expected_key) in definitions.items()
-                if name in current and _normalize_sql(current[name]) != _normalize_sql(expected_key)
+                if name in current
+                and (
+                    _normalize_sql(current[name]) != _normalize_sql(expected_key)
+                    or self._column_contract(name) != _ddl_columns(definitions[name][0])
+                )
             )
         )
 
@@ -181,45 +191,83 @@ class ClickHouseWarehouse:
             self.client.command(create)
             exchanged = False
             try:
-                source_columns = self._columns(name)
-                target_columns = self._columns(temporary)
-                common = [column for column in target_columns if column in source_columns]
-                selects = list(common)
-                if name == "xbrl_facts" and "value_kind" not in source_columns:
-                    common.append("value_kind")
-                    selects.append(
-                        "if(is_nil = 1, 'nil', if(value_decimal IS NOT NULL OR unit_id IS NOT NULL, "
-                        "'numeric', if(value_boolean IS NOT NULL, 'boolean', "
-                        "if(value_date IS NOT NULL, 'date', 'text'))))"
+                with ExitStack() as merges:
+                    # Preserve physical rows while copying, including replay duplicates.
+                    self.client.command(f"SYSTEM STOP MERGES {self.database}.{name}")
+                    merges.callback(
+                        self.client.command, f"SYSTEM START MERGES {self.database}.{name}"
                     )
-                columns = ", ".join(common)
-                projection = ", ".join(selects)
-                self.client.command(
-                    f"INSERT INTO {self.database}.{temporary} ({columns}) "
-                    f"SELECT {projection} FROM {self.database}.{name}"
-                )
-                before = int(
-                    self.client.query(f"SELECT count() FROM {self.database}.{name}").result_rows[0][
-                        0
-                    ]
-                )
-                after = int(
-                    self.client.query(
-                        f"SELECT count() FROM {self.database}.{temporary}"
-                    ).result_rows[0][0]
-                )
-                if before != after:
-                    raise WarehouseWriteError(
-                        f"Upgrade row-count mismatch for {name}: {before} != {after}"
+                    self.client.command(f"SYSTEM STOP MERGES {self.database}.{temporary}")
+
+                    def resume_retained(name: str = name, temporary: str = temporary) -> None:
+                        self.client.command(
+                            f"SYSTEM START MERGES {self.database}.{backups.get(name, temporary)}"
+                        )
+
+                    merges.callback(resume_retained)
+                    deadline = time.monotonic() + 30
+                    while self.query(
+                        "SELECT count() AS n FROM system.merges "
+                        "WHERE database=%(database)s AND table=%(table)s",
+                        {"database": self.database, "table": name},
+                    )[0]["n"]:
+                        if time.monotonic() >= deadline:
+                            raise WarehouseWriteError(f"Timed out waiting for merges on {name}")
+                        time.sleep(0.1)
+                    source_columns = self._columns(name)
+                    target_columns = self._columns(temporary)
+                    source_contract = self._column_contract(name)
+                    target_contract = self._column_contract(temporary)
+                    for column, (target_type, _, _) in target_contract.items():
+                        if column not in source_contract:
+                            if (
+                                column not in {"value_kind", "source_attributes_json"}
+                                or name != "xbrl_facts"
+                            ):
+                                raise WarehouseWriteError(
+                                    f"No migration for new column {name}.{column}"
+                                )
+                        elif not _preserving_type(source_contract[column][0], target_type):
+                            raise WarehouseWriteError(f"Unsafe type conversion for {name}.{column}")
+                    if set(source_columns) - set(target_columns):
+                        raise WarehouseWriteError(f"Upgrade would discard columns from {name}")
+                    common = [column for column in target_columns if column in source_columns]
+                    selects = list(common)
+                    if name == "xbrl_facts" and "value_kind" not in source_columns:
+                        common.append("value_kind")
+                        selects.append(
+                            "if(is_nil = 1, 'nil', if(value_decimal IS NOT NULL OR unit_id IS NOT NULL, "
+                            "'numeric', if(value_boolean IS NOT NULL, 'boolean', "
+                            "if(value_date IS NOT NULL, 'date', 'text'))))"
+                        )
+                    columns = ", ".join(common)
+                    projection = ", ".join(selects)
+                    self.client.command(
+                        f"INSERT INTO {self.database}.{temporary} ({columns}) "
+                        f"SELECT {projection} FROM {self.database}.{name} SETTINGS optimize_on_insert=0"
                     )
-                self.client.command(
-                    f"EXCHANGE TABLES {self.database}.{name} AND {self.database}.{temporary}"
-                )
-                exchanged = True
-                self.client.command(
-                    f"RENAME TABLE {self.database}.{temporary} TO {self.database}.{backup}"
-                )
-                backups[name] = backup
+                    before = int(
+                        self.client.query(
+                            f"SELECT count() FROM {self.database}.{name}"
+                        ).result_rows[0][0]
+                    )
+                    after = int(
+                        self.client.query(
+                            f"SELECT count() FROM {self.database}.{temporary}"
+                        ).result_rows[0][0]
+                    )
+                    if before != after:
+                        raise WarehouseWriteError(
+                            f"Upgrade row-count mismatch for {name}: {before} != {after}"
+                        )
+                    self.client.command(
+                        f"EXCHANGE TABLES {self.database}.{name} AND {self.database}.{temporary}"
+                    )
+                    exchanged = True
+                    self.client.command(
+                        f"RENAME TABLE {self.database}.{temporary} TO {self.database}.{backup}"
+                    )
+                    backups[name] = backup
             except Exception:
                 if not exchanged:
                     self.client.command(f"DROP TABLE IF EXISTS {self.database}.{temporary}")
@@ -227,6 +275,17 @@ class ClickHouseWarehouse:
         # Create newly introduced tables and refresh views only after all swaps succeed.
         self.apply_ddl(ddl_directory)
         return backups
+
+    def _column_contract(self, table: str) -> dict[str, tuple[str, str, str]]:
+        result = self.client.query(
+            "SELECT name, type, default_kind, default_expression FROM system.columns "
+            "WHERE database = %(database)s AND table = %(table)s ORDER BY position",
+            parameters={"database": self.database, "table": table},
+        )
+        return {
+            str(name): (_normalize_sql(str(kind)), str(default), str(expression).strip())
+            for name, kind, default, expression in result.result_rows
+        }
 
     def _columns(self, table: str) -> list[str]:
         result = self.client.query(
@@ -304,6 +363,13 @@ class ClickHouseWarehouse:
             sec_warehouse_schema(table),
             name=f"{self.database}.{target}",
         )
+        if table in {SecTable.NUM, SecTable.TXT}:
+            # Keep full-range dates in Parquet; ClickHouse's Arrow Date32 reader
+            # rejects years outside 1900..2299 even when the target is String.
+            index = arrow_table.schema.get_field_index("ddate")
+            arrow_table = arrow_table.set_column(
+                index, "ddate", arrow_table.column(index).cast(pa.string())
+            )
         return self._insert_arrow(target, arrow_table)
 
     def insert_xbrl_bundle(self, bundle: XbrlExtractionBundle) -> dict[str, int]:
@@ -323,9 +389,27 @@ class ClickHouseWarehouse:
         if not facts:
             return 0
         validate_canonical_facts(facts)
-        rows = [_canonical_fact_row(fact) for fact in facts]
-        table = pa.Table.from_pylist(rows, schema=canonical_fact_schema())
-        return self._insert_arrow("canonical_facts", table)
+        rows: list[dict[str, Any]] = []
+        size = written = 0
+        for fact in facts:
+            record_size = len(fact.model_dump_json().encode("utf-8")) + 512
+            if record_size > self.settings.arrow_batch_bytes:
+                raise WarehouseWriteError("Single canonical record exceeds byte budget")
+            if rows and (
+                size + record_size > self.settings.arrow_batch_bytes
+                or len(rows) >= self.settings.arrow_batch_rows
+            ):
+                written += self._insert_arrow(
+                    "canonical_facts", pa.Table.from_pylist(rows, schema=canonical_fact_schema())
+                )
+                rows, size = [], 0
+            rows.append(_canonical_fact_row(fact))
+            size += record_size
+        if rows:
+            written += self._insert_arrow(
+                "canonical_facts", pa.Table.from_pylist(rows, schema=canonical_fact_schema())
+            )
+        return written
 
     def publish_xbrl_bundle(self, bundle: XbrlExtractionBundle, counts: dict[str, int]) -> None:
         """Verify all raw entities before exposing this immutable revision to readers."""
@@ -723,4 +807,43 @@ def _normalize_sql(value: str) -> str:
     value = value.strip()
     if value.startswith("(") and value.endswith(")"):
         value = value[1:-1]
-    return re.sub(r"\s+", "", value).lower()
+    value = re.sub(r"\s+", "", value).lower()
+    for bits, precision in ((32, 9), (64, 18), (128, 38), (256, 76)):
+        value = value.replace(f"decimal{bits}(", f"decimal({precision},")
+    return value
+
+
+def _ddl_columns(statement: str) -> dict[str, tuple[str, str, str]]:
+    # Repository DDL keeps one column per line; reject unsupported declarations.
+    body = statement.split("\n(\n", 1)[1].split("\n)\n", 1)[0]
+    columns = {}
+    for line in body.splitlines():
+        declaration = line.strip().rstrip(",")
+        if not declaration or declaration.startswith("--"):
+            continue
+        name, kind = declaration.split(" ", 1)
+        kind = re.split(r"\s+CODEC\(", kind, maxsplit=1)[0]
+        parts = re.split(r"\s+DEFAULT\s+", kind, maxsplit=1)
+        columns[name] = (
+            _normalize_sql(parts[0]),
+            "DEFAULT" if len(parts) == 2 else "",
+            parts[1].strip() if len(parts) == 2 else "",
+        )
+    return columns
+
+
+def _preserving_type(source: str, target: str) -> bool:
+    source, target = _normalize_sql(source), _normalize_sql(target)
+    if source == target:
+        return True
+    if (source, target) == ("uint8", "int16"):
+        return True
+    if source in {"date", "date32"} and target == "string":
+        return True
+    if target.startswith("lowcardinality(") and source.startswith("lowcardinality("):
+        return _preserving_type(source[15:-1], target[15:-1])
+    if target.startswith("nullable("):
+        return _preserving_type(
+            source[9:-1] if source.startswith("nullable(") else source, target[9:-1]
+        )
+    return bool(re.fullmatch(r"fixedstring\(\d+\)", source) and target == "string")

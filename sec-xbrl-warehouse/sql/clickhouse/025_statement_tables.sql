@@ -18,7 +18,9 @@ ENGINE = ReplacingMergeTree(extraction_revision)
 ORDER BY (accession, extraction_revision, role_uri)
 SETTINGS index_granularity = 8192;
 
--- One row per statement line; the line's values (one per period) are parallel arrays.
+-- One row per statement line; the line's values are parallel arrays (one entry per
+-- period, or per concept and period on `member` lines). Read lines with
+-- ORDER BY role_uri, line_number.
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_statement_lines
 (
     accession String,
@@ -35,7 +37,9 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_statement_lines
     preferred_label_role Nullable(String),
     is_abstract UInt8,
     is_total UInt8,
+    line_role LowCardinality(String),
     value_fact_ids Array(String),
+    value_concept_qnames Array(String),
     value_period_starts Array(Nullable(Date)),
     value_period_ends Array(Nullable(Date)),
     value_period_instants Array(Nullable(Date)),

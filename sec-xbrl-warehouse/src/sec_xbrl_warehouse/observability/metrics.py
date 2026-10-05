@@ -1,4 +1,14 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING
+
 from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client.core import GaugeMetricFamily
+from prometheus_client.registry import Collector
+
+if TYPE_CHECKING:
+    from sec_xbrl_warehouse.domain.models import QueueSnapshot
 
 SEC_REQUESTS = Counter(
     "xbrl_sec_requests_total",
@@ -55,5 +65,46 @@ JOB_TRANSITIONS = Counter(
     labelnames=("state", "job_type"),
 )
 
+JOB_DEAD_LETTERS = Counter(
+    "xbrl_job_dead_letters_total",
+    "Jobs moved to dead, by reason",
+    labelnames=("job_type", "reason"),
+)
+
 DISK_FREE_BYTES = Gauge("xbrl_disk_free_bytes", "Free bytes on application volumes", ["volume"])
 DISK_RESERVE_BYTES = Gauge("xbrl_disk_reserve_bytes", "Required free bytes before ingestion")
+
+
+class QueueCollector(Collector):
+    """Scrape-time queue gauges from `ControlRepository.queue_snapshot()`.
+
+    `snapshot` is called on each scrape (it may raise or time out); the
+    collector then reports `xbrl_queue_snapshot_up 0` instead of stale values.
+    """
+
+    def __init__(self, snapshot: Callable[[], QueueSnapshot]) -> None:
+        self.snapshot = snapshot
+
+    def collect(self) -> Iterator[GaugeMetricFamily]:
+        up = GaugeMetricFamily(
+            "xbrl_queue_snapshot_up", "Whether the last queue snapshot succeeded"
+        )
+        try:
+            snapshot = self.snapshot()
+        except Exception:
+            up.add_metric([], 0)
+            yield up
+            return
+        up.add_metric([], 1)
+        yield up
+        jobs = GaugeMetricFamily(
+            "xbrl_queue_jobs", "Jobs in the queue by type and state", labels=["job_type", "state"]
+        )
+        for (job_type, state), count in sorted(snapshot.counts.items()):
+            jobs.add_metric([job_type, state], count)
+        yield jobs
+        yield GaugeMetricFamily(
+            "xbrl_queue_oldest_ready_age_seconds",
+            "Age of the oldest claimable pending/retry job",
+            value=snapshot.oldest_ready_age_seconds,
+        )

@@ -26,7 +26,7 @@ def _metric() -> CanonicalMetric:
 def _mapping(metric: str = "Revenue", *, version: int = 1, approved: bool = True) -> ConceptMapping:
     return ConceptMapping(
         id=UUID(f"00000000-0000-0000-0000-00000000000{version}"),
-        namespace="http://fasb.org/us-gaap",
+        namespace="http://fasb.org/us-gaap/2025",
         concept_name="Revenues",
         canonical_metric=metric,
         mapping_type="exact",
@@ -40,7 +40,7 @@ def _mapping(metric: str = "Revenue", *, version: int = 1, approved: bool = True
 def _fact() -> XbrlFact:
     return XbrlFact(
         fact_id="f1",
-        concept_namespace="http://fasb.org/us-gaap",
+        concept_namespace="http://fasb.org/us-gaap/2025",
         concept_name="Revenues",
         concept_qname="us-gaap:Revenues",
         taxonomy_version="2025",
@@ -221,7 +221,10 @@ def test_mapping_batches_cache_lookups_but_check_each_facts_period():
     repo.mappings = []
     assert asyncio.run(mapper.map_batch(facts, _filing(), extraction_revision=1)) == ()
     assert repo.lookup_calls == 2
-    assert repo.batch_calls == 4  # one incompatible review, then 500 + 500 + 1
+    # One incompatible review, then one review for the concept's 1001 unmapped facts.
+    assert repo.batch_calls == 2
+    assert repo.reviews[-1][3]["fact_count"] == 1001
+    assert len(repo.reviews[-1][3]["sample_fact_ids"]) == 5
 
 
 def test_mapping_and_canonical_insert_obey_byte_budget():

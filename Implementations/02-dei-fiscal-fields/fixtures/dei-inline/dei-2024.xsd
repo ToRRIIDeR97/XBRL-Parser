@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Minimal local stand-in for the SEC dei taxonomy: same namespace and element names. -->
+<schema xmlns="http://www.w3.org/2001/XMLSchema"
+        xmlns:xbrli="http://www.xbrl.org/2003/instance"
+        targetNamespace="http://xbrl.sec.gov/dei/2024"
+        elementFormDefault="qualified">
+  <import namespace="http://www.xbrl.org/2003/instance"
+          schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <element name="DocumentType" id="dei_DocumentType" type="xbrli:stringItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="DocumentPeriodEndDate" id="dei_DocumentPeriodEndDate" type="xbrli:dateItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="DocumentFiscalYearFocus" id="dei_DocumentFiscalYearFocus" type="xbrli:gYearItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="DocumentFiscalPeriodFocus" id="dei_DocumentFiscalPeriodFocus" type="xbrli:stringItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+</schema>

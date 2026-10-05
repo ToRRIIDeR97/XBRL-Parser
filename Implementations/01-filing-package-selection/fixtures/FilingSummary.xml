@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FilingSummary>
+  <Version>3.25.2</Version>
+  <InputFiles>
+    <File doctype="10-K" original="example-20251231.htm">example-20251231.htm</File>
+    <File>example-20251231_part2.htm</File>
+    <File>example-20251231.xsd</File>
+    <File>example-20251231_cal.xml</File>
+    <File>example-20251231_lab.xml</File>
+    <File>example-20251231_pre.xml</File>
+  </InputFiles>
+  <MyReports>
+    <Report instance="example-20251231.htm"><HtmlFileName>R2.htm</HtmlFileName><MenuCategory>Statements</MenuCategory></Report>
+  </MyReports>
+</FilingSummary>

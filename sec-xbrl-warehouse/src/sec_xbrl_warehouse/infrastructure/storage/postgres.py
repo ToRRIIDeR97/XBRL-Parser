@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -19,21 +20,26 @@ from sqlalchemy.ext.asyncio import (
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import ArtifactState, JobState, JobType
 from sec_xbrl_warehouse.domain.models import (
+    Company,
     DatasetArtifact,
     FilingPackageManifest,
     FilingRef,
+    FormerName,
     JobRecord,
+    QueueSnapshot,
     SourceArtifactRef,
     ValidationIssue,
 )
 from sec_xbrl_warehouse.exceptions import StateTransitionError
 from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
+    CompanyRow,
     FilingRow,
     IngestionJobRow,
     JobCheckpointRow,
     SourceArtifactRow,
     ValidationIssueRow,
 )
+from sec_xbrl_warehouse.observability.metrics import JOB_DEAD_LETTERS, JOB_TRANSITIONS
 
 _ALLOWED_ARTIFACT_TRANSITIONS: dict[ArtifactState, set[ArtifactState]] = {
     ArtifactState.DISCOVERED: {ArtifactState.DOWNLOADING, ArtifactState.FAILED},
@@ -279,6 +285,171 @@ class PostgresControlRepository:
                 raise RuntimeError("PostgreSQL did not return a job ID")
             return job_id
 
+    async def enqueue_job_if_absent(
+        self,
+        *,
+        job_type: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        priority: int = 100,
+        max_attempts: int = 5,
+    ) -> UUID | None:
+        """Insert a pending job; return None if the idempotency key already exists."""
+        statement = (
+            pg_insert(IngestionJobRow)
+            .values(
+                job_type=JobType(job_type).value,
+                state=JobState.PENDING.value,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                priority=priority,
+                max_attempts=max_attempts,
+            )
+            .on_conflict_do_nothing(index_elements=[IngestionJobRow.idempotency_key])
+            .returning(IngestionJobRow.id)
+        )
+        async with self.sessions.begin() as session:
+            job_id: UUID | None = await session.scalar(statement)
+            return job_id
+
+    async def published_filing_revisions(
+        self, accessions: Sequence[str] | None = None
+    ) -> list[tuple[str, int]]:
+        """`(accession, latest_extraction_revision)` for filings with a published extraction."""
+        statement = (
+            select(FilingRow.accession, FilingRow.latest_extraction_revision)
+            .where(FilingRow.latest_extraction_revision > 0)
+            .order_by(FilingRow.accession)
+        )
+        if accessions is not None:
+            statement = statement.where(FilingRow.accession.in_(list(accessions)))
+        async with self.sessions() as session:
+            return [(str(row[0]), int(row[1])) for row in (await session.execute(statement)).all()]
+
+    async def upsert_company(self, company: Company) -> None:
+        """Insert or update a company; tickers it lists are removed from other companies.
+
+        `tickers` and `exchanges` are parallel lists (SEC submissions order). A
+        ticker belongs to at most one company at a time, so the newest upsert that
+        lists it wins, and the previous holder loses the ticker together with the
+        exchange at the same position. Both changes commit in one transaction.
+        """
+        pairs = _ticker_pairs(company.tickers, company.exchanges)
+        tickers = [ticker for ticker, _ in pairs]
+        values = {
+            "cik": company.cik,
+            "name": company.name,
+            "entity_type": company.entity_type,
+            "sic": company.sic,
+            "sic_description": company.sic_description,
+            "tickers": tickers,
+            "exchanges": [exchange for _, exchange in pairs]
+            if _aligned(company)
+            else list(company.exchanges),
+            "fiscal_year_end": company.fiscal_year_end,
+            "state_of_incorporation": company.state_of_incorporation,
+            "filer_category": company.filer_category,
+            "former_names": [item.model_dump(mode="json") for item in company.former_names],
+            "source_checksum": company.source_checksum,
+            "fetched_at": company.fetched_at,
+        }
+        async with self.sessions.begin() as session:
+            # Serialize ticker moves so concurrent upserts can't both keep a ticker.
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended('companies:tickers', 0))")
+            )
+            if tickers:
+                holders = (
+                    await session.scalars(
+                        select(CompanyRow)
+                        .where(CompanyRow.cik != company.cik, CompanyRow.tickers.overlap(tickers))
+                        .with_for_update()
+                    )
+                ).all()
+                moved = set(tickers)
+                for holder in holders:
+                    aligned = len(holder.exchanges or []) == len(holder.tickers or [])
+                    keep = [
+                        index
+                        for index, ticker in enumerate(holder.tickers or [])
+                        if ticker not in moved
+                    ]
+                    holder.exchanges = (
+                        [holder.exchanges[index] for index in keep]
+                        if aligned
+                        else list(holder.exchanges or [])
+                    )
+                    holder.tickers = [holder.tickers[index] for index in keep]
+                    holder.updated_at = func.now()
+                await session.flush()
+            statement = pg_insert(CompanyRow).values(**values)
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[CompanyRow.cik],
+                    set_={
+                        **{key: value for key, value in values.items() if key != "cik"},
+                        "updated_at": func.now(),
+                    },
+                )
+            )
+
+    async def stale_company_ciks(self, ciks: Sequence[int], fetched_before: datetime) -> set[int]:
+        """Stored CIKs whose submissions were fetched before `fetched_before` (or never)."""
+        if not ciks:
+            return set()
+        async with self.sessions() as session:
+            rows = await session.scalars(
+                select(CompanyRow.cik).where(
+                    CompanyRow.cik.in_(list(ciks)),
+                    or_(CompanyRow.fetched_at.is_(None), CompanyRow.fetched_at < fetched_before),
+                )
+            )
+            return {int(cik) for cik in rows}
+
+    async def get_company(self, cik: int) -> Company | None:
+        async with self.sessions() as session:
+            row = await session.get(CompanyRow, cik)
+            return _company_from_row(row) if row is not None else None
+
+    async def find_company_by_ticker(self, ticker: str) -> Company | None:
+        """Case-insensitive ticker lookup; None when no company lists it."""
+        normalized = ticker.strip().upper()
+        if not normalized:
+            return None
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(CompanyRow).where(CompanyRow.tickers.contains([normalized])).limit(1)
+            )
+            return _company_from_row(row) if row is not None else None
+
+    async def known_company_ciks(self, ciks: Sequence[int]) -> set[int]:
+        if not ciks:
+            return set()
+        async with self.sessions() as session:
+            rows = await session.scalars(
+                select(CompanyRow.cik).where(CompanyRow.cik.in_(list(ciks)))
+            )
+            return {int(cik) for cik in rows}
+
+    async def extraction_checkpoint(self, accession: str, revision: int) -> dict[str, Any] | None:
+        """The saved extraction (`object_key`, `sha256`) of a completed filing ingestion."""
+        statement = (
+            select(JobCheckpointRow.payload)
+            .join(IngestionJobRow, IngestionJobRow.id == JobCheckpointRow.job_id)
+            .where(
+                IngestionJobRow.job_type == JobType.INGEST_FILING.value,
+                IngestionJobRow.state == JobState.COMPLETE.value,
+                IngestionJobRow.payload["filing"]["accession"].astext == accession,
+                IngestionJobRow.payload["extraction_revision"].astext == str(revision),
+                JobCheckpointRow.stage == "extract",
+            )
+            .order_by(IngestionJobRow.updated_at.desc())
+            .limit(1)
+        )
+        async with self.sessions() as session:
+            payload = await session.scalar(statement)
+        return dict(payload) if payload else None
+
     async def claim_job(
         self,
         worker_id: str,
@@ -304,31 +475,48 @@ class PostgresControlRepository:
             else true()
         )
         async with self.sessions.begin() as session:
-            row = await session.scalar(
-                select(IngestionJobRow)
-                .where(
-                    type_filter,
-                    or_(
-                        and_(
-                            IngestionJobRow.state.in_(
-                                [JobState.PENDING.value, JobState.RETRY.value]
+            # A selected job whose attempts are exhausted (its lease expired on the
+            # last attempt) is dead-lettered with a reason, and the search goes on,
+            # so one crashed job doesn't idle the worker for a poll interval.
+            for _ in range(_CLAIM_SCAN_LIMIT):
+                row = await session.scalar(
+                    select(IngestionJobRow)
+                    .where(
+                        type_filter,
+                        or_(
+                            and_(
+                                IngestionJobRow.state.in_(
+                                    [JobState.PENDING.value, JobState.RETRY.value]
+                                ),
+                                IngestionJobRow.available_at <= func.now(),
                             ),
-                            IngestionJobRow.available_at <= func.now(),
+                            and_(
+                                IngestionJobRow.state == JobState.RUNNING.value,
+                                IngestionJobRow.locked_at < stale_before,
+                            ),
                         ),
-                        and_(
-                            IngestionJobRow.state == JobState.RUNNING.value,
-                            IngestionJobRow.locked_at < stale_before,
-                        ),
-                    ),
+                    )
+                    .order_by(IngestionJobRow.priority.asc(), IngestionJobRow.created_at.asc())
+                    .limit(1)
+                    .with_for_update(skip_locked=True)
                 )
-                .order_by(IngestionJobRow.priority.asc(), IngestionJobRow.created_at.asc())
-                .limit(1)
-                .with_for_update(skip_locked=True)
-            )
-            if row is None:
-                return None
-            if row.attempts >= row.max_attempts:
+                if row is None:
+                    return None
+                if row.attempts < row.max_attempts:
+                    break
+                previous = f" Last error: {row.last_error}" if row.last_error else ""
                 row.state = JobState.DEAD.value
+                row.last_error = (
+                    f"Dead-lettered at claim: all {row.max_attempts} attempts used "
+                    f"(lease expired after attempt {row.attempts}).{previous}"
+                )[:16_000]
+                row.locked_at = None
+                row.locked_by = None
+                row.heartbeat_at = None
+                await session.flush()
+                JOB_TRANSITIONS.labels(state="dead", job_type=row.job_type).inc()
+                JOB_DEAD_LETTERS.labels(job_type=row.job_type, reason="attempts_exhausted").inc()
+            else:
                 return None
             lock_now = datetime.now(UTC)
             row.state = JobState.RUNNING.value
@@ -352,6 +540,89 @@ class PostgresControlRepository:
                 locked_at=lock_now,
                 locked_by=worker_id,
             )
+
+    async def list_jobs(
+        self,
+        *,
+        state: str | None = None,
+        job_type: str | None = None,
+        limit: int = 100,
+    ) -> list[JobRecord]:
+        """Jobs filtered by state and type, oldest first."""
+        if not 1 <= limit <= 10_000:
+            raise ValueError("Job list limit must be between 1 and 10000")
+        statement = select(IngestionJobRow)
+        if state is not None:
+            statement = statement.where(IngestionJobRow.state == JobState(state).value)
+        if job_type is not None:
+            statement = statement.where(IngestionJobRow.job_type == JobType(job_type).value)
+        statement = statement.order_by(
+            IngestionJobRow.created_at.asc(), IngestionJobRow.id.asc()
+        ).limit(limit)
+        async with self.sessions() as session:
+            rows = (await session.scalars(statement)).all()
+        return [_job_record(row) for row in rows]
+
+    async def retry_job(self, job_id: UUID) -> JobRecord:
+        """Revive a dead job: state `retry`, attempts reset, claimable now.
+
+        The previous error stays in `last_error`. Only dead jobs can be retried.
+        """
+        async with self.sessions.begin() as session:
+            row = await session.scalar(
+                select(IngestionJobRow).where(IngestionJobRow.id == job_id).with_for_update()
+            )
+            if row is None:
+                raise KeyError(job_id)
+            if row.state != JobState.DEAD.value:
+                raise StateTransitionError(
+                    f"Only dead jobs can be retried; {job_id} is {row.state}"
+                )
+            row.state = JobState.RETRY.value
+            row.attempts = 0
+            row.available_at = func.now()
+            row.locked_at = None
+            row.locked_by = None
+            row.heartbeat_at = None
+            if row.last_error:
+                row.last_error = f"Retried manually after: {row.last_error}"[:16_000]
+            await session.flush()
+            await session.refresh(row)
+            return _job_record(row)
+
+    async def queue_snapshot(self) -> QueueSnapshot:
+        """Counts by `(job_type, state)` and the oldest ready job's age, in database time."""
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(IngestionJobRow.job_type, IngestionJobRow.state, func.count()).group_by(
+                        IngestionJobRow.job_type, IngestionJobRow.state
+                    )
+                )
+            ).all()
+            oldest = await session.scalar(
+                select(
+                    func.coalesce(
+                        func.max(
+                            func.extract(
+                                "epoch",
+                                func.now()
+                                - func.greatest(
+                                    IngestionJobRow.available_at, IngestionJobRow.created_at
+                                ),
+                            )
+                        ),
+                        0,
+                    )
+                ).where(
+                    IngestionJobRow.state.in_([JobState.PENDING.value, JobState.RETRY.value]),
+                    IngestionJobRow.available_at <= func.now(),
+                )
+            )
+        return QueueSnapshot(
+            counts={(str(job_type), str(state)): int(count) for job_type, state, count in rows},
+            oldest_ready_age_seconds=max(0.0, float(oldest or 0)),
+        )
 
     async def heartbeat_job(self, job_id: UUID, worker_id: str, attempt: int | None = None) -> None:
         async with self.sessions.begin() as session:
@@ -422,17 +693,21 @@ class PostgresControlRepository:
                 raise StateTransitionError(f"Cannot fail a job no longer owned: {job_id}")
             can_retry = retryable and row.attempts < row.max_attempts
             row.state = JobState.RETRY.value if can_retry else JobState.DEAD.value
-            row.available_at = datetime.now(UTC) + timedelta(
-                seconds=min(3600, 2 ** max(row.attempts, 1))
-            )
+            # Database time plus jittered exponential backoff, capped at one hour,
+            # so a skewed worker clock can't push retries out (or pull them in).
+            available_at: Any = func.now() + timedelta(seconds=retry_delay_seconds(row.attempts))
             if retry_at is not None:
-                row.available_at = max(row.available_at, retry_at)
+                available_at = func.greatest(available_at, retry_at)
+            row.available_at = available_at
+            if not can_retry:
+                reason = "permanent_error" if not retryable else "retries_exhausted"
+                JOB_DEAD_LETTERS.labels(job_type=row.job_type, reason=reason).inc()
             row.last_error = error[:16_000]
             row.locked_at = None
             row.locked_by = None
             row.heartbeat_at = None
 
-    async def upsert_filing(self, filing: FilingRef) -> None:
+    async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
         values = {
             "accession": filing.accession,
             "cik": filing.cik,
@@ -450,13 +725,8 @@ class PostgresControlRepository:
             "is_amendment": filing.is_amendment,
             "is_inline_xbrl": filing.is_inline_xbrl,
         }
-        statement = pg_insert(FilingRow).values(**values)
-        statement = statement.on_conflict_do_update(
-            index_elements=[FilingRow.accession],
-            set_={key: value for key, value in values.items() if key != "accession"},
-        )
         async with self.sessions.begin() as session:
-            await session.execute(statement)
+            await session.execute(filing_upsert_statement(values, keep_derived=keep_derived))
 
     async def record_validation_issues(self, issues: Sequence[ValidationIssue]) -> None:
         if not issues:
@@ -474,6 +744,7 @@ class PostgresControlRepository:
                 "line": issue.line,
                 "column_number": issue.column,
                 "details": issue.details,
+                "extraction_revision": issue.extraction_revision,
             }
             for issue in issues
         ]
@@ -513,3 +784,80 @@ class PostgresControlRepository:
             locked_at=row.locked_at,
             locked_by=row.locked_by,
         )
+
+
+# Filing-level fields derived from the filing's own dei facts. Discovery usually
+# lacks them, so the discovery upsert at the start of a re-ingestion must not
+# erase values an earlier extraction stored. The post-extraction upsert writes
+# them as derived, including NULL for conflicting or invalid dei values.
+_DERIVED_FILING_FIELDS = ("report_date", "fiscal_year", "fiscal_period")
+
+
+def filing_upsert_statement(values: dict[str, Any], *, keep_derived: bool = False) -> Any:
+    """Insert or update a filing row; `keep_derived` keeps stored fiscal fields over NULLs."""
+    statement = pg_insert(FilingRow).values(**values)
+    updates: dict[str, Any] = {key: value for key, value in values.items() if key != "accession"}
+    if keep_derived:
+        for key in _DERIVED_FILING_FIELDS:
+            updates[key] = func.coalesce(statement.excluded[key], getattr(FilingRow, key))
+    return statement.on_conflict_do_update(index_elements=[FilingRow.accession], set_=updates)
+
+
+def _company_from_row(row: CompanyRow) -> Company:
+    return Company(
+        cik=int(row.cik),
+        name=row.name,
+        entity_type=row.entity_type,
+        sic=row.sic,
+        sic_description=row.sic_description,
+        tickers=tuple(row.tickers or ()),
+        exchanges=tuple(row.exchanges or ()),
+        fiscal_year_end=row.fiscal_year_end,
+        state_of_incorporation=row.state_of_incorporation,
+        filer_category=row.filer_category,
+        former_names=tuple(FormerName.model_validate(item) for item in row.former_names or ()),
+        source_checksum=row.source_checksum,
+        fetched_at=row.fetched_at,
+    )
+
+
+_CLAIM_SCAN_LIMIT = 100
+MAX_RETRY_DELAY_SECONDS = 3600.0
+
+
+def retry_delay_seconds(attempts: int) -> float:
+    """Exponential backoff (2, 4, 8, ... seconds) with 50-100% jitter, at most one hour."""
+    base = min(MAX_RETRY_DELAY_SECONDS, 2.0 ** max(attempts, 1))
+    return base * (0.5 + random.random() * 0.5)
+
+
+def _job_record(row: IngestionJobRow) -> JobRecord:
+    return JobRecord(
+        id=row.id,
+        job_type=JobType(row.job_type),
+        state=JobState(row.state),
+        idempotency_key=row.idempotency_key,
+        payload=row.payload,
+        attempts=row.attempts,
+        max_attempts=row.max_attempts,
+        priority=row.priority,
+        available_at=row.available_at,
+        locked_at=row.locked_at,
+        locked_by=row.locked_by,
+        last_error=row.last_error,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _aligned(company: Company) -> bool:
+    return len(company.exchanges) == len(company.tickers)
+
+
+def _ticker_pairs(tickers: Sequence[str], exchanges: Sequence[str]) -> list[tuple[str, str]]:
+    """Upper-cased, de-duplicated tickers with the exchange at the same position."""
+    aligned = len(exchanges) == len(tickers)
+    pairs: dict[str, str] = {}
+    for index, ticker in enumerate(tickers):
+        pairs.setdefault(ticker.upper(), exchanges[index] if aligned else "")
+    return list(pairs.items())

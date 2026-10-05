@@ -201,7 +201,14 @@ def _filing() -> FilingRef:
     )
 
 
-def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
+def test_build_handlers_wires_incremental_mapping_and_discovery(tmp_path) -> None:
+    from hashlib import sha256
+
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.domain.xbrl import XbrlDocumentMetadata, XbrlExtractionBundle
+    from sec_xbrl_warehouse.infrastructure.storage.object_store import LocalObjectStore
+    from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import write_json
+
     class _Ingestor:
         async def ingest(self, filing, *, extraction_revision, job_id):
             return {"accession": filing.accession, "revision": extraction_revision}
@@ -224,6 +231,31 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
             self.received = (filed_from, filed_to, forms)
             return (_filing(),)
 
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data")
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    bundle = XbrlExtractionBundle(
+        filing=_filing(),
+        metadata=XbrlDocumentMetadata(
+            entrypoint="f.htm",
+            document_type="inline",
+            taxonomy_namespaces=(),
+            source_documents=("f.htm",),
+            software_name="arelle",
+            software_version="test",
+        ),
+        contexts=(),
+        concepts=(),
+        facts=(),
+        relationships=(),
+        footnotes=(),
+        validation_issues=(),
+        extraction_revision=3,
+    )
+    extraction = tmp_path / "extraction.json"
+    write_json(bundle, extraction, 1_000_000)
+    checksum = sha256(extraction.read_bytes()).hexdigest()
+    store.put_file(extraction, "silver/extraction.json")
+
     class _Control:
         def __init__(self):
             self.jobs = []
@@ -231,19 +263,26 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
         async def enqueue_job(self, **kwargs):
             self.jobs.append(kwargs)
 
+        async def extraction_checkpoint(self, accession, revision):
+            if (accession, revision) == (_filing().accession, 3):
+                return {"object_key": "silver/extraction.json", "sha256": checksum}
+            return None
+
     mapper = _Mapper()
     warehouse = _Warehouse()
     discovery = _Discovery()
     control = _Control()
     handlers = build_handlers(
+        settings=settings,
         services={
+            "object_store": store,
             "ingestor": _Ingestor(),
             "mapper": mapper,
             "warehouse": warehouse,
             "discovery": discovery,
             "forms": ["10-K"],
             "control": control,
-        }
+        },
     )
     filing_payload = _filing().model_dump(mode="json")
 
@@ -259,12 +298,31 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
         )
     )
     assert reconciled == {"accession": _filing().accession}
+    # map_canonical loads facts from the saved extraction, not from the payload.
     mapped = asyncio.run(
         handlers[JobType.MAP_CANONICAL](
-            _job(JobType.MAP_CANONICAL, {"filing": filing_payload, "facts": []})
+            _job(
+                JobType.MAP_CANONICAL,
+                {"accession": _filing().accession, "extraction_revision": 3},
+            )
         )
     )
-    assert mapped == {"mapped": 0, "unmapped": 0}
+    assert mapped == {
+        "accession": _filing().accession,
+        "extraction_revision": 3,
+        "mapped": 0,
+        "unmapped": 0,
+    }
+    assert mapper.received == ((), _filing(), 3)
+    with pytest.raises(Exception, match="No saved extraction"):
+        asyncio.run(
+            handlers[JobType.MAP_CANONICAL](
+                _job(
+                    JobType.MAP_CANONICAL,
+                    {"accession": _filing().accession, "extraction_revision": 2},
+                )
+            )
+        )
     discovered = asyncio.run(
         handlers[JobType.DISCOVER_FILINGS](
             _job(
@@ -274,7 +332,7 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
         )
     )
     assert discovered == {"filings_enqueued": 1}
-    assert control.jobs[0]["idempotency_key"] == "filing:0000000001-26-000001:1"
+    assert control.jobs[0]["idempotency_key"] == "filing:0000000001-26-000001:3"
 
 
 def test_worker_handles_missing_handler_and_stops_while_idle() -> None:
@@ -342,3 +400,138 @@ def test_worker_claims_only_requested_job_types() -> None:
     )
     asyncio.run(worker.run())
     assert requested == [(JobType.INGEST_FILING,)]
+
+
+def test_discovery_stores_companies_for_cik_and_daily_index_jobs() -> None:
+    from sec_xbrl_warehouse.domain.models import Company
+
+    class _Control:
+        def __init__(self):
+            self.jobs = []
+            self.companies = []
+
+        async def enqueue_job(self, **kwargs):
+            self.jobs.append(kwargs)
+
+        async def upsert_company(self, company):
+            self.companies.append(company)
+
+        async def known_company_ciks(self, ciks):
+            return {1} & set(ciks)
+
+        async def stale_company_ciks(self, ciks, fetched_before):
+            self.stale_cutoff = fetched_before
+            return set()
+
+    class _Submissions:
+        async def discover_with_company(self, cik, *, forms, filed_from, filed_to):
+            self.received = (cik, tuple(forms), filed_from, filed_to)
+            return Company(cik=cik, name="Example Corp", tickers=("EX",)), (_filing(),)
+
+    class _Daily:
+        async def discover_range(self, filed_from, filed_to, forms):
+            other = _filing().model_copy(update={"cik": 2, "accession": "0000000002-26-000001"})
+            return (_filing(), other)
+
+    class _Http:
+        def __init__(self):
+            self.urls = []
+
+        async def get_json(self, url):
+            self.urls.append(url)
+            return {"cik": "2", "name": "Second Corp", "tickers": ["SEC"]}
+
+    control, submissions, http = _Control(), _Submissions(), _Http()
+    handlers = build_handlers(
+        services={
+            "control": control,
+            "forms": ["10-K"],
+            "discovery": _Daily(),
+            "submissions": submissions,
+            "http": http,
+            "data_api_base": "https://data.sec.gov",
+        }
+    )
+    by_cik = asyncio.run(
+        handlers[JobType.DISCOVER_FILINGS](_job(JobType.DISCOVER_FILINGS, {"cik": 1}))
+    )
+    assert by_cik == {"filings_enqueued": 1, "companies_stored": 1}
+    assert submissions.received == (1, ("10-K",), None, None)
+    daily = asyncio.run(
+        handlers[JobType.DISCOVER_FILINGS](
+            _job(
+                JobType.DISCOVER_FILINGS,
+                {"filed_from": "2026-01-01", "filed_to": "2026-01-02"},
+            )
+        )
+    )
+    assert daily == {"filings_enqueued": 2, "companies_stored": 1}
+    assert http.urls == ["https://data.sec.gov/submissions/CIK0000000002.json"]
+    assert [company.cik for company in control.companies] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Code: 202. DB::Exception: Too many simultaneous queries", True),
+        ("Code: 210. DB::Exception: Connection reset by peer (NETWORK_ERROR)", True),
+        ("Code: 81. DB::Exception: Database xbrl does not exist (UNKNOWN_DATABASE)", False),
+        ("Code: 53. DB::Exception: Type mismatch", False),
+    ],
+)
+def test_clickhouse_codes_decide_retry(message: str, expected: bool) -> None:
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    assert is_retryable_exception(DatabaseError(message)) is expected
+
+
+def test_s3_status_and_timeouts_decide_retry() -> None:
+    from botocore.exceptions import ClientError, ReadTimeoutError
+
+    throttled = ClientError(
+        {"Error": {"Code": "Unknown"}, "ResponseMetadata": {"HTTPStatusCode": 503}}, "GetObject"
+    )
+    assert is_retryable_exception(throttled)
+    assert is_retryable_exception(ReadTimeoutError(endpoint_url="http://minio:9000"))
+    missing = ClientError(
+        {"Error": {"Code": "NoSuchKey"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "GetObject"
+    )
+    assert not is_retryable_exception(missing)
+
+
+def test_retry_delay_is_jittered_and_capped() -> None:
+    from sec_xbrl_warehouse.infrastructure.storage.postgres import retry_delay_seconds
+
+    first = {round(retry_delay_seconds(1), 6) for _ in range(50)}
+    assert len(first) > 1 and all(1.0 <= value <= 2.0 for value in first)
+    assert all(1800.0 <= retry_delay_seconds(40) <= 3600.0 for _ in range(50))
+
+
+def test_queue_collector_exports_snapshot_and_failure() -> None:
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from sec_xbrl_warehouse.domain.models import QueueSnapshot
+    from sec_xbrl_warehouse.observability.metrics import QueueCollector
+
+    registry = CollectorRegistry()
+    registry.register(
+        QueueCollector(
+            lambda: QueueSnapshot(
+                counts={("load_bulk", "pending"): 3, ("ingest_filing", "dead"): 1},
+                oldest_ready_age_seconds=42.5,
+            )
+        )
+    )
+    text = generate_latest(registry).decode()
+    assert 'xbrl_queue_jobs{job_type="load_bulk",state="pending"} 3.0' in text
+    assert 'xbrl_queue_jobs{job_type="ingest_filing",state="dead"} 1.0' in text
+    assert "xbrl_queue_oldest_ready_age_seconds 42.5" in text
+    assert "xbrl_queue_snapshot_up 1.0" in text
+
+    def broken() -> QueueSnapshot:
+        raise TimeoutError
+
+    failing = CollectorRegistry()
+    failing.register(QueueCollector(broken))
+    text = generate_latest(failing).decode()
+    assert "xbrl_queue_snapshot_up 0.0" in text and "xbrl_queue_jobs{" not in text

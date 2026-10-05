@@ -9,7 +9,8 @@ transform changes (extraction revision 3, selection policy 2): re-extract the 42
 `SELECT countIf(fiscal_year IS NULL) FROM xbrl.v_xbrl_facts_latest` returns 0. Confirm
 `SELECT count() FROM xbrl.v_xbrl_facts_latest WHERE value_text = '(ixTransformValueError)'`
 returns 0. Before that, run
-`xbrl-warehouse taxonomy sync` (19 enabled us-gaap/srt packages), set
+`xbrl-warehouse taxonomy sync` (50 pinned FASB and SEC sources; `taxonomy status` must
+show no `uncovered` rows), set
 `XBRL_ARELLE_OFFLINE=true` for the re-extraction, and confirm no `webCache:*` issues.
 Until then the live data stays at revisions 1 and 2.
 

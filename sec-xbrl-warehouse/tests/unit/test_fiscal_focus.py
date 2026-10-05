@@ -133,11 +133,37 @@ def test_filing_upsert_keeps_stored_fiscal_fields_when_new_value_is_null() -> No
 
     from sec_xbrl_warehouse.infrastructure.storage.postgres import filing_upsert_statement
 
-    statement = filing_upsert_statement(
-        {"accession": "0000000001-26-000001", "form": "10-K", "fiscal_year": None}
-        | {"fiscal_period": None, "report_date": None}
+    values = {"accession": "0000000001-26-000001", "form": "10-K", "fiscal_year": None} | {
+        "fiscal_period": None,
+        "report_date": None,
+    }
+    sql = str(
+        filing_upsert_statement(values, keep_derived=True).compile(dialect=postgresql.dialect())
     )
-    sql = str(statement.compile(dialect=postgresql.dialect()))
     for column in ("fiscal_year", "fiscal_period", "report_date"):
         assert f"{column} = coalesce(excluded.{column}, filings.{column})" in sql
     assert "coalesce(excluded.form" not in sql
+    # The post-extraction upsert writes derived values as they are, NULL included.
+    plain = str(filing_upsert_statement(values).compile(dialect=postgresql.dialect()))
+    assert "coalesce" not in plain
+
+
+def test_ingest_preserves_derived_fields_only_on_the_discovery_upsert() -> None:
+    import asyncio
+
+    from sec_xbrl_warehouse.ingestion.incremental import _upsert_discovered_filing
+
+    calls: list[dict[str, object]] = []
+
+    class _Control:
+        async def upsert_filing(self, filing, *, keep_derived=False):
+            calls.append({"keep_derived": keep_derived})
+
+    class _PlainControl:
+        async def upsert_filing(self, filing):
+            calls.append({"plain": True})
+
+    filing = _with().filing
+    asyncio.run(_upsert_discovered_filing(_Control(), filing))  # type: ignore[arg-type]
+    asyncio.run(_upsert_discovered_filing(_PlainControl(), filing))  # type: ignore[arg-type]
+    assert calls == [{"keep_derived": True}, {"plain": True}]

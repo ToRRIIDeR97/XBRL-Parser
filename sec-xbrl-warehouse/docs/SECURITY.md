@@ -36,7 +36,8 @@ flowchart LR
   downloads only registry URLs that use HTTPS on port 443, carry no credentials, and
   name a host in `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`. It uses the rate-limited
   client and byte limits, and installs a file only after its SHA-256 matches the
-  registry. Extraction re-verifies every package. `xbrl.sec.gov` is on the default
+  registry. Extraction re-verifies every package. `archive` and `file` entries are
+  the publishers' unmodified files; only verified files are mapped into Arelle. `xbrl.sec.gov` is on the default
   allowlist because it serves the SEC taxonomies (dei and others) and their packages.
   The W3C `xml.xsd` schemas are shipped with the application, so `www.w3.org` is never
   contacted.

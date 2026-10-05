@@ -38,8 +38,11 @@ from sec_xbrl_warehouse.exceptions import XbrlExtractionError
 from sec_xbrl_warehouse.infrastructure.xbrl import sec_transforms
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
 from sec_xbrl_warehouse.infrastructure.xbrl.taxonomy_packages import (
+    TaxonomyPackage,
     check_package,
+    coverage_gaps,
     registered_packages,
+    uri_scheme_variants,
 )
 from sec_xbrl_warehouse.validation.xbrl_validation import ArelleIssueNormalizer
 
@@ -272,7 +275,15 @@ class ArelleExtractor:
             _restrict_taxonomy_access(cache, self.settings)
             PackageManager.init(controller, loadPackagesConfig=False)
             missing_packages: list[str] = []
-            for package in registered_packages(self.settings):
+            strict = self.settings.arelle_offline or self.settings.env == "production"
+            packages = registered_packages(self.settings)
+            gaps = coverage_gaps(self.settings, packages)
+            if gaps and strict:
+                raise XbrlExtractionError(
+                    f"No pinned taxonomy source for {gaps}; see `xbrl-warehouse taxonomy status`"
+                )
+            prefix_sources: list[TaxonomyPackage] = []
+            for package in packages:
                 status = check_package(package)
                 if status.state == "disabled":
                     continue
@@ -280,9 +291,7 @@ class ArelleExtractor:
                     raise XbrlExtractionError(
                         f"Taxonomy package checksum mismatch: {package.filename}"
                     )
-                if status.state == "missing" and not (
-                    self.settings.arelle_offline or self.settings.env == "production"
-                ):
+                if status.state == "missing" and not strict:
                     # Development hosts may run before `taxonomy sync`; the taxonomy
                     # then resolves through the allowlisted web cache.
                     missing_packages.append(package.package_id)
@@ -291,11 +300,14 @@ class ArelleExtractor:
                     raise XbrlExtractionError(
                         f"Missing or unsafe taxonomy package: {package.filename}"
                     )
-                if PackageManager.addPackage(controller, str(package.path)) is None:
+                if package.kind != "package":
+                    prefix_sources.append(package)
+                elif PackageManager.addPackage(controller, str(package.path)) is None:
                     raise XbrlExtractionError(
                         f"Arelle rejected taxonomy package: {package.filename}"
                     )
             PackageManager.rebuildRemappings(controller)
+            _register_prefix_sources(PackageManager.packagesConfig, prefix_sources)
             if missing_packages:
                 records.append(
                     {
@@ -770,6 +782,27 @@ def _declares_inline_xbrl(path: Path) -> bool:
     except (etree.XMLSyntaxError, OSError):
         return False
     return False
+
+
+def _register_prefix_sources(packages_config: Any, sources: list[TaxonomyPackage]) -> None:
+    """Add verified archive/file mappings and http/https twins to Arelle's remappings.
+
+    Taxonomy packages declare one scheme in their catalogs; filings use either,
+    so each package prefix also maps under the other scheme. Two enabled
+    sources may not claim the same prefix.
+    """
+    remappings: dict[str, str] = packages_config["remappings"]
+    for prefix, target in list(remappings.items()):
+        if prefix.startswith(("http://", "https://")):
+            for variant in uri_scheme_variants(prefix):
+                remappings.setdefault(variant, target)
+    for source in sources:
+        for prefix, target in source.remappings().items():
+            if remappings.get(prefix, target) != target:
+                raise XbrlExtractionError(
+                    f"Taxonomy sources overlap on {prefix}: {remappings[prefix]} and {target}"
+                )
+            remappings[prefix] = target
 
 
 _W3C_SCHEMA_DIR = Path(__file__).resolve().parent / "schemas" / "www.w3.org"

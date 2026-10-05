@@ -55,7 +55,8 @@ re-extract the affected filings.
 ## Taxonomy cache and network policy
 
 - Store Arelle's web cache under `XBRL_ARELLE_CACHE_DIR`; do not use a user-global cache in workers or tests.
-- Put reviewed, checksum-pinned taxonomy packages under `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR` and register them in `config/taxonomy_packages.yml`.
+- Put reviewed, checksum-pinned taxonomy packages under `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR` and register them in `config/taxonomy_packages.yml`. `infrastructure/xbrl/taxonomy_packages.py` owns the registry, `package_status`, and `sync_taxonomy_packages`; `_create_controller` uses the same code to verify and register packages (see OPERATIONS.md, "Taxonomy packages").
+- `www.w3.org/2001/xml.xsd` and `www.w3.org/2001/03/xml.xsd` resolve to copies shipped in `infrastructure/xbrl/schemas/`. Arelle's taxonomy package schema imports them, so packages load in offline mode.
 - Filing-package documents must resolve locally from immutable bronze bytes. Controlled cache fills may be allowed only for standard taxonomy hosts listed in configuration.
 - `XBRL_ARELLE_OFFLINE=true` must make any uncached remote dependency a deterministic failure, not an implicit network request.
 - Record Arelle, plugin, disclosure-system, taxonomy-package, and extraction-schema versions with every extraction revision.

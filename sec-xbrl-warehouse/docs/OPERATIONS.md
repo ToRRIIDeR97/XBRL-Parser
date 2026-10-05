@@ -19,6 +19,45 @@
 - ClickHouse disk free space exceeds the configured safety threshold.
 - Quarantine and mapping-review queues are triaged.
 
+## Taxonomy packages
+
+Standard taxonomies (us-gaap, srt, and others) load from pinned packages listed in
+`config/taxonomy_packages.yml`, under `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR`.
+
+```bash
+xbrl-warehouse taxonomy status   # verify files on disk; no network access
+xbrl-warehouse taxonomy sync     # download missing or corrupt enabled packages
+```
+
+- `sync` checks every URL first (HTTPS, port 443, no credentials, a host in
+  `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`). It downloads through the rate-limited client
+  with the configured user agent and byte limits, verifies the SHA-256, and only then
+  renames the file into place. Verified packages aren't downloaded again.
+- Every extraction verifies each enabled package again. A checksum mismatch or an
+  unsafe filename stops extraction. A missing package stops it when
+  `XBRL_ARELLE_OFFLINE=true` or `XBRL_ENV=production`. Elsewhere, extraction records a
+  `warehouse:taxonomyPackageMissing` warning and resolves that taxonomy through the
+  allowlisted web cache, so results can depend on the cache until `sync` runs.
+- `doctor` fails its "Taxonomy packages" check when any enabled package isn't `ok`,
+  or when `XBRL_ENV=production` and `XBRL_ARELLE_OFFLINE` is false.
+- The W3C `xml.xsd` schemas that the taxonomy package schema imports are shipped with
+  the application and never fetched.
+
+### Adding a taxonomy year
+
+1. Find the official package URL on the publisher's site (FASB `xbrl.fasb.org`, SEC
+   `xbrl.sec.gov`). The host must be on the allowlist.
+2. Download it once and record its SHA-256 and size.
+3. Check it contains `META-INF/taxonomyPackage.xml`. Arelle can't load a zip without
+   it; pin such a zip with `enabled: false` and a note.
+4. Check its `META-INF/catalog.xml` rewrite prefix doesn't overlap an enabled package.
+   Arelle uses only one package per identical prefix. Each SEC combined annual package
+   (`https://xbrl.sec.gov/<year>.zip`) rewrites all of `https://xbrl.sec.gov/`, so they
+   stay disabled.
+5. Add the entry, run `taxonomy sync` and `taxonomy status`, then re-extract a filing
+   that uses the year. Package changes alter extraction input, so they ship with an
+   extraction revision bump.
+
 ## Metrics and dashboard
 
 Start the local monitoring profile with:

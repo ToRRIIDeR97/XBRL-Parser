@@ -1,27 +1,373 @@
 # Taxonomy package registry used by the Arelle adapter.
 #
-# Do not point production parsing at an unversioned remote taxonomy. Download
-# approved taxonomy packages, checksum them, place them under
-# XBRL_ARELLE_TAXONOMY_PACKAGES_DIR, and add one entry per immutable file.
-# The takeover agent should implement loading and checksum verification in
-# ArelleExtractor._create_controller.
-packages: []
-
-# Example only; replace with a real, reviewed package before enabling:
-# packages:
-#   - id: us-gaap-2026
-#     filename: us-gaap-2026-taxonomy-package.zip
-#     sha256: <64-lowercase-hex-characters>
-#     enabled: true
-#     disclosure_system: efm-pragmatic
-#     notes: Pinned local taxonomy package for reproducible SEC parsing.
+# Each entry pins one immutable package file: its HTTPS source URL (on an allowed
+# taxonomy host) and SHA-256. `xbrl-warehouse taxonomy sync` downloads enabled
+# packages into XBRL_ARELLE_TAXONOMY_PACKAGES_DIR and verifies them;
+# `xbrl-warehouse taxonomy status` and `doctor` report their state. Packages are
+# verified again before every extraction. Package files are never committed.
+#
+# Only published zips with META-INF/taxonomyPackage.xml (the XBRL Taxonomy
+# Packages format) can be loaded by Arelle; others are pinned but disabled, and
+# their taxonomies resolve through the allowlisted web cache. See
+# docs/OPERATIONS.md, "Taxonomy packages", for adding a new taxonomy year.
+#
+# Checksums were recorded from the published files on 5 October 2026.
+packages:
+  - id: us-gaap-2015-01-31
+    filename: us-gaap-2015-01-31.zip
+    url: https://xbrl.fasb.org/us-gaap/2015/us-gaap-2015-01-31.zip
+    sha256: a04aa2b28b7b5f1041b924188ef40bae4465eec15112c2b3675cf84cdafacca7
+    enabled: false
+    size_bytes: 5803950
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: us-gaap-2016-01-31
+    filename: us-gaap-2016-01-31.zip
+    url: https://xbrl.fasb.org/us-gaap/2016/us-gaap-2016-01-31.zip
+    sha256: 3ac21e733fb5373495ae286334c28930d70702567c35e0174e9ec3b1b126c5d6
+    enabled: false
+    size_bytes: 5400556
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: us-gaap-2017-01-31
+    filename: us-gaap-2017-01-31.zip
+    url: https://xbrl.fasb.org/us-gaap/2017/us-gaap-2017-01-31.zip
+    sha256: 77694ed4226feda79577487151118d0eb7e1df679c08ab13a5c575e11429a758
+    enabled: true
+    size_bytes: 5509516
+  - id: us-gaap-2018-01-31
+    filename: us-gaap-2018-01-31.zip
+    url: https://xbrl.fasb.org/us-gaap/2018/us-gaap-2018-01-31.zip
+    sha256: 1c1dac3d1cf8575c3e0f425a8dd6d800d8989febbddfc3f42c62f802715d3d7f
+    enabled: true
+    size_bytes: 5554418
+  - id: us-gaap-2019-01-31
+    filename: us-gaap-2019-01-31.zip
+    url: https://xbrl.fasb.org/us-gaap/2019/us-gaap-2019-01-31.zip
+    sha256: 16ea8c9f25e61a3d2e824ab917067f787683c9eeff2147cbe3b0463508d1d667
+    enabled: true
+    size_bytes: 5728252
+  - id: us-gaap-2020-01-31
+    filename: us-gaap-2020-01-31.zip
+    url: https://xbrl.fasb.org/us-gaap/2020/us-gaap-2020-01-31.zip
+    sha256: 043d45481d7baacb2f04ebd97dbcfecdc6706b74e38fe002c4b4703ef7a0a4d2
+    enabled: true
+    size_bytes: 6345468
+  - id: us-gaap-2021-01-31
+    filename: us-gaap-2021-01-31.zip
+    url: https://xbrl.fasb.org/us-gaap/2021/us-gaap-2021-01-31.zip
+    sha256: 2e4309134cf62ff7ad61a371333fe52c6002279706bba244b63b4e64b8274843
+    enabled: true
+    size_bytes: 6526936
+  - id: us-gaap-2022
+    filename: us-gaap-2022.zip
+    url: https://xbrl.fasb.org/us-gaap/2022/us-gaap-2022.zip
+    sha256: 8af6fbbcec3818cd372f391cece9e62018e115b7b65ea75a6a38b9709af3ab37
+    enabled: true
+    size_bytes: 6485888
+  - id: us-gaap-2023
+    filename: us-gaap-2023.zip
+    url: https://xbrl.fasb.org/us-gaap/2023/us-gaap-2023.zip
+    sha256: b48fbb7be5cbaef5532ebff51394176ca6e7241ffce5fc88812485b8e6f9d6fd
+    enabled: true
+    size_bytes: 6607657
+  - id: us-gaap-2024
+    filename: us-gaap-2024.zip
+    url: https://xbrl.fasb.org/us-gaap/2024/us-gaap-2024.zip
+    sha256: decdd417d86ff7bfb5ca166c0ca1001017aea873673544a8d7f91c34bf5d82df
+    enabled: true
+    size_bytes: 7115653
+  - id: us-gaap-2025
+    filename: us-gaap-2025.zip
+    url: https://xbrl.fasb.org/us-gaap/2025/us-gaap-2025.zip
+    sha256: a3b835925ad74030eb5be865a26d7dfe44013081c4ab7204b6122316a685fff4
+    enabled: true
+    size_bytes: 7101405
+  - id: us-gaap-2026
+    filename: us-gaap-2026.zip
+    url: https://xbrl.fasb.org/us-gaap/2026/us-gaap-2026.zip
+    sha256: f4c8b8b5697ba7d825a8614b159611cd25a46640e98a9737cda1e4a672bd4c81
+    enabled: true
+    size_bytes: 7387980
+  - id: srt-2018-01-31
+    filename: srt-2018-01-31.zip
+    url: https://xbrl.fasb.org/srt/2018/srt-2018-01-31.zip
+    sha256: 849e0e31a6476cde7969e9ad70bf0995dbcbf683fc75c3d6f824ec760185c40a
+    enabled: true
+    size_bytes: 140413
+  - id: srt-2019-01-31
+    filename: srt-2019-01-31.zip
+    url: https://xbrl.fasb.org/srt/2019/srt-2019-01-31.zip
+    sha256: 947af75fd03cd08915430b7b4200e9c037d0d14e4f86a12632adb16eedbf73f7
+    enabled: true
+    size_bytes: 161358
+  - id: srt-2020-01-31
+    filename: srt-2020-01-31.zip
+    url: https://xbrl.fasb.org/srt/2020/srt-2020-01-31.zip
+    sha256: 57168b52f9e8da5bc9aa593f6a6aacc581c83877b59fe8d43291730da1bc840c
+    enabled: true
+    size_bytes: 158794
+  - id: srt-2021-01-31
+    filename: srt-2021-01-31.zip
+    url: https://xbrl.fasb.org/srt/2021/srt-2021-01-31.zip
+    sha256: 096cc522a9b7424d07459df76ffd4462dd74b910e702901a4f587960009c4327
+    enabled: true
+    size_bytes: 186168
+  - id: srt-2022
+    filename: srt-2022.zip
+    url: https://xbrl.fasb.org/srt/2022/srt-2022.zip
+    sha256: 37d0156ccc5ee77594a84109eb475ca3fe75a56ff25069e261e943d451451c9f
+    enabled: true
+    size_bytes: 182036
+  - id: srt-2023
+    filename: srt-2023.zip
+    url: https://xbrl.fasb.org/srt/2023/srt-2023.zip
+    sha256: e1a667a56cde32af35fcf5a1936691bd4d22e52a29ce2af7218c5ef4c23810de
+    enabled: true
+    size_bytes: 188585
+  - id: srt-2024
+    filename: srt-2024.zip
+    url: https://xbrl.fasb.org/srt/2024/srt-2024.zip
+    sha256: 136d16f1bf62ca1966300231b2b399f90631ba703381aeec467e9bec4f3867eb
+    enabled: true
+    size_bytes: 188150
+  - id: srt-2025
+    filename: srt-2025.zip
+    url: https://xbrl.fasb.org/srt/2025/srt-2025.zip
+    sha256: aad1daeb4bdfe3057f4ed81482c06130f873a59fa7fce5193c5731f93b1fef88
+    enabled: true
+    size_bytes: 191908
+  - id: srt-2026
+    filename: srt-2026.zip
+    url: https://xbrl.fasb.org/srt/2026/srt-2026.zip
+    sha256: 34dab1ee7a10b9991fee1e17437c278908599ff2258ea3270ef718cab265be05
+    enabled: true
+    size_bytes: 195234
+  - id: dei-2014-01-31
+    filename: dei-2014-01-31.zip
+    url: https://xbrl.sec.gov/dei/2014/dei-2014-01-31.zip
+    sha256: 973f2e55d7cc938abc904487726f9b81449e3d0465cebeaac24d48e1d7f08e27
+    enabled: false
+    size_bytes: 31297
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: dei-2018
+    filename: dei-2018.zip
+    url: https://xbrl.sec.gov/dei/2018/dei-2018.zip
+    sha256: 99a83172fc089e7f479975d235604b05ef6b5f4cbb1ba9d1481dbffbcd9652dd
+    enabled: false
+    size_bytes: 32447
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: dei-2019
+    filename: dei-2019.zip
+    url: https://xbrl.sec.gov/dei/2019/dei-2019.zip
+    sha256: 352beca70cd7ed9b6154cd6f4795356b5003e9598299453f86a11ff8d772303a
+    enabled: false
+    size_bytes: 47536
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: dei-2020
+    filename: dei-2020.zip
+    url: https://xbrl.sec.gov/dei/2020/dei-2020.zip
+    sha256: 3c2e31e895ae1e0efb4eaefae4f164f5175e8251b3205d76355f2708802e0618
+    enabled: false
+    size_bytes: 45978
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: dei-2024
+    filename: dei-2024.zip
+    url: https://xbrl.sec.gov/dei/2024/dei-2024.zip
+    sha256: 7892488f5c9d03b92636c35692f3cec2718e9cbc7d6842ec21e2920514a19f75
+    enabled: false
+    size_bytes: 42531
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: sec-2021
+    filename: sec-2021.zip
+    url: https://xbrl.sec.gov/2021.zip
+    sha256: 0b834bdf26f5880a2ccfe7fe973940ee41ad746d8f8a782d3649f0dfdad5b53b
+    enabled: false
+    size_bytes: 598328
+    notes: >-
+      Combined SEC taxonomy package. Every SEC combined package rewrites https://xbrl.sec.gov/, so only one could be active at a time and the others' years would stop resolving; kept disabled.
+  - id: sec-2022
+    filename: sec-2022.zip
+    url: https://xbrl.sec.gov/2022.zip
+    sha256: b9f01a19df2e286f016e89239f616c0dd1012c3477947a7374d02c84ebd06568
+    enabled: false
+    size_bytes: 576613
+    notes: >-
+      Combined SEC taxonomy package. Every SEC combined package rewrites https://xbrl.sec.gov/, so only one could be active at a time and the others' years would stop resolving; kept disabled.
+  - id: sec-2023
+    filename: sec-2023.zip
+    url: https://xbrl.sec.gov/2023.zip
+    sha256: 0b5cd8689d9b2fdda525b15603b459171c624e175079d90a917ca1e518c592e4
+    enabled: false
+    size_bytes: 954681
+    notes: >-
+      Combined SEC taxonomy package. Every SEC combined package rewrites https://xbrl.sec.gov/, so only one could be active at a time and the others' years would stop resolving; kept disabled.
+  - id: sec-2024
+    filename: sec-2024.zip
+    url: https://xbrl.sec.gov/2024.zip
+    sha256: 418477e806d5a2d6b21376a26c01fc373d549dae8d18f223a6ebddf80680bdf0
+    enabled: false
+    size_bytes: 1084829
+    notes: >-
+      Combined SEC taxonomy package. Every SEC combined package rewrites https://xbrl.sec.gov/, so only one could be active at a time and the others' years would stop resolving; kept disabled.
+  - id: sec-2025
+    filename: sec-2025.zip
+    url: https://xbrl.sec.gov/2025.zip
+    sha256: 6a963051af02ff458e02669549bd55f9d547281724f3b4e053cb0157be8121e4
+    enabled: false
+    size_bytes: 1201089
+    notes: >-
+      Combined SEC taxonomy package. Every SEC combined package rewrites https://xbrl.sec.gov/, so only one could be active at a time and the others' years would stop resolving; kept disabled.
+  - id: sec-2026
+    filename: sec-2026.zip
+    url: https://xbrl.sec.gov/2026.zip
+    sha256: 16243a0713f10fb7bebd020cb0da505e2bf4ef180af3e19b8e4cd4ad2a75a6a0
+    enabled: false
+    size_bytes: 1175887
+    notes: >-
+      Combined SEC taxonomy package. Every SEC combined package rewrites https://xbrl.sec.gov/, so only one could be active at a time and the others' years would stop resolving; kept disabled.
+  - id: country-2013-01-31
+    filename: country-2013-01-31.zip
+    url: https://xbrl.sec.gov/country/2013/country-2013-01-31.zip
+    sha256: 3dd9696d140111eba9d3a515eb3a97a5d350a339dfbc3d8fb848db2ed0292834
+    enabled: false
+    size_bytes: 21655
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: country-2016-01-31
+    filename: country-2016-01-31.zip
+    url: https://xbrl.sec.gov/country/2016/country-2016-01-31.zip
+    sha256: b07915b4f306b35b5d89d5f598b4061ec18b7c8b50570db578874eabb58fdc3a
+    enabled: false
+    size_bytes: 22150
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: country-2017-01-31
+    filename: country-2017-01-31.zip
+    url: https://xbrl.sec.gov/country/2017/country-2017-01-31.zip
+    sha256: 3f400cca61596aac87b50f62e3798b1320453f28dd0a5c0fcea68326c3bcdc91
+    enabled: false
+    size_bytes: 21632
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: country-2020
+    filename: country-2020.zip
+    url: https://xbrl.sec.gov/country/2020/country-2020.zip
+    sha256: 5197dba59dd65f72edd241396ba817d807b541a75c01a4923a38620ffcaca91e
+    enabled: false
+    size_bytes: 20715
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: currency-2014-01-31
+    filename: currency-2014-01-31.zip
+    url: https://xbrl.sec.gov/currency/2014/currency-2014-01-31.zip
+    sha256: c12afcbad65735d8c710a46b92fa242a5a86992ecaee24fb66215935636abb73
+    enabled: false
+    size_bytes: 23994
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: currency-2016-01-31
+    filename: currency-2016-01-31.zip
+    url: https://xbrl.sec.gov/currency/2016/currency-2016-01-31.zip
+    sha256: 87d0457f1fab1fc4b852ac083850a789c1c1d0b8a8158721d4241fd016513ca0
+    enabled: false
+    size_bytes: 24709
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: currency-2017-01-31
+    filename: currency-2017-01-31.zip
+    url: https://xbrl.sec.gov/currency/2017/currency-2017-01-31.zip
+    sha256: 90d849603168429d50d04caf371ed3f8b2c9900646353e91faacb7a4742a2a05
+    enabled: false
+    size_bytes: 22652
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: currency-2019
+    filename: currency-2019.zip
+    url: https://xbrl.sec.gov/currency/2019/currency-2019.zip
+    sha256: c9cf8e5d449818add8c3b436670684343298731c4ff771908030b6ed43eeca99
+    enabled: false
+    size_bytes: 22532
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: exch-2015-01-31
+    filename: exch-2015-01-31.zip
+    url: https://xbrl.sec.gov/exch/2015/exch-2015-01-31.zip
+    sha256: 57d73d2a64316ad75d3be997932ce996ca2ea154871c8fe81caf258a8ec90cfe
+    enabled: false
+    size_bytes: 108009
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: exch-2016-01-31
+    filename: exch-2016-01-31.zip
+    url: https://xbrl.sec.gov/exch/2016/exch-2016-01-31.zip
+    sha256: e3f5085c25eb367a312997be6aef66383fe9896f5cb6b25a99b9e37221639fc6
+    enabled: false
+    size_bytes: 116416
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: exch-2017-01-31
+    filename: exch-2017-01-31.zip
+    url: https://xbrl.sec.gov/exch/2017/exch-2017-01-31.zip
+    sha256: de391c2c881fd5d64cb9b73da05d346081afa38a40894335568d908d74128918
+    enabled: false
+    size_bytes: 123437
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: exch-2019
+    filename: exch-2019.zip
+    url: https://xbrl.sec.gov/exch/2019/exch-2019.zip
+    sha256: b035c7f1bba6837f06348486c7023628d304ed1f663a7561cd82ffebaa23492d
+    enabled: false
+    size_bytes: 191794
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: naics-2011-01-31
+    filename: naics-2011-01-31.zip
+    url: https://xbrl.sec.gov/naics/2011/naics-2011-01-31.zip
+    sha256: c4a514ae18e1fc02b3cafa5b6bddb2bb882e4cb994186eafa6277a4a90d4c510
+    enabled: false
+    size_bytes: 117335
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: naics-2017-01-31
+    filename: naics-2017-01-31.zip
+    url: https://xbrl.sec.gov/naics/2017/naics-2017-01-31.zip
+    sha256: e6b4ea683029a837ec1665d9b507fedc1fdd5ac840d090dfb31b5e61b1ffbc5e
+    enabled: false
+    size_bytes: 118350
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: sic-2011-01-31
+    filename: sic-2011-01-31.zip
+    url: https://xbrl.sec.gov/sic/2011/sic-2011-01-31.zip
+    sha256: a8fbc307e284f43e684e6a6b4ddb81607aecc7e7da972d26a3ebb8ec2929aba9
+    enabled: false
+    size_bytes: 50615
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
+  - id: stpr-2011-01-31
+    filename: stpr-2011-01-31.zip
+    url: https://xbrl.sec.gov/stpr/2011/stpr-2011-01-31.zip
+    sha256: 441c22bb2558fc27de1e46984a4f3aa909470968ea39d258b07a5c9cbd73ef19
+    enabled: false
+    size_bytes: 8842
+    notes: >-
+      Published zip has no META-INF/taxonomyPackage.xml, so Arelle can't load it as a taxonomy package; resolves through the allowlisted web cache.
 
 network_policy:
   # Filing documents themselves must come from the checksum-addressed filing
-  # package. These hosts are only candidates for controlled standard-taxonomy
-  # cache fills when XBRL_ARELLE_OFFLINE=false.
+  # package. These hosts are the candidates for taxonomy package downloads and
+  # for controlled standard-taxonomy cache fills when XBRL_ARELLE_OFFLINE=false.
+  # The effective list is XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS.
   allowed_taxonomy_hosts:
     - www.sec.gov
+    - xbrl.sec.gov
     - xbrl.fasb.org
     - xbrl.ifrs.org
     - www.xbrl.org

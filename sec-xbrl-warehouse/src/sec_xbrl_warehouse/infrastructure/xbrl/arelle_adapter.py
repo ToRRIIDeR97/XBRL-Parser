@@ -35,9 +35,12 @@ from sec_xbrl_warehouse.domain.xbrl import (
     XbrlUnit,
 )
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
-from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file
 from sec_xbrl_warehouse.infrastructure.xbrl import sec_transforms
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
+from sec_xbrl_warehouse.infrastructure.xbrl.taxonomy_packages import (
+    check_package,
+    registered_packages,
+)
 from sec_xbrl_warehouse.validation.xbrl_validation import ArelleIssueNormalizer
 
 # ponytail: Arelle's legacy registries are process-global; use worker processes for parallelism.
@@ -268,21 +271,47 @@ class ArelleExtractor:
                 )
             _restrict_taxonomy_access(cache, self.settings)
             PackageManager.init(controller, loadPackagesConfig=False)
-            registry_path = self.settings.config_dir / "taxonomy_packages.yml"
-            registry = load_yaml(registry_path) if registry_path.is_file() else {}
-            for package in registry.get("packages", []):
-                if not package.get("enabled", True):
+            missing_packages: list[str] = []
+            for package in registered_packages(self.settings):
+                status = check_package(package)
+                if status.state == "disabled":
                     continue
-                path = (packages_dir / package["filename"]).resolve()
-                if not path.is_relative_to(packages_dir.resolve()) or not path.is_file():
+                if status.state == "checksum_mismatch":
                     raise XbrlExtractionError(
-                        f"Missing or unsafe taxonomy package: {package['filename']}"
+                        f"Taxonomy package checksum mismatch: {package.filename}"
                     )
-                if sha256_file(path) != package["sha256"]:
-                    raise XbrlExtractionError(f"Taxonomy package checksum mismatch: {path.name}")
-                if PackageManager.addPackage(controller, str(path)) is None:
-                    raise XbrlExtractionError(f"Arelle rejected taxonomy package: {path.name}")
+                if status.state == "missing" and not (
+                    self.settings.arelle_offline or self.settings.env == "production"
+                ):
+                    # Development hosts may run before `taxonomy sync`; the taxonomy
+                    # then resolves through the allowlisted web cache.
+                    missing_packages.append(package.package_id)
+                    continue
+                if status.state != "ok" or package.path is None:
+                    raise XbrlExtractionError(
+                        f"Missing or unsafe taxonomy package: {package.filename}"
+                    )
+                if PackageManager.addPackage(controller, str(package.path)) is None:
+                    raise XbrlExtractionError(
+                        f"Arelle rejected taxonomy package: {package.filename}"
+                    )
             PackageManager.rebuildRemappings(controller)
+            if missing_packages:
+                records.append(
+                    {
+                        "level": "warning",
+                        "name": "sec_xbrl_warehouse",
+                        "code": "warehouse:taxonomyPackageMissing",
+                        "message": (
+                            f"{len(missing_packages)} registered taxonomy packages are not "
+                            "installed; run `xbrl-warehouse taxonomy sync`"
+                        ),
+                        "file": None,
+                        "line": None,
+                        "column": None,
+                        "details": {"package_ids": missing_packages},
+                    }
+                )
             if self.settings.arelle_validate_efm:
                 if not controller.modelManager.disclosureSystem.select("efm-pragmatic"):
                     raise XbrlExtractionError("The EFM disclosure system is not available")
@@ -743,6 +772,13 @@ def _declares_inline_xbrl(path: Path) -> bool:
     return False
 
 
+_W3C_SCHEMA_DIR = Path(__file__).resolve().parent / "schemas" / "www.w3.org"
+_W3C_SCHEMAS = {
+    "/2001/xml.xsd": _W3C_SCHEMA_DIR / "2001" / "xml.xsd",
+    "/2001/03/xml.xsd": _W3C_SCHEMA_DIR / "2001" / "03" / "xml.xsd",
+}
+
+
 def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
     """Use pinned caches first and enforce policy on initial requests and redirects."""
     original = cache.getfilename
@@ -844,6 +880,12 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
             return None
         normalized = cache.normalizeUrl(url, base) if base or kwargs.get("normalize") else url
         parsed = urlsplit(normalized)
+        # W3C's xml.xsd (imported by the taxonomy package schema and others) is
+        # shipped with the application and never fetched.
+        if parsed.scheme in {"http", "https"} and parsed.hostname == "www.w3.org":
+            local_schema = _W3C_SCHEMAS.get(parsed.path)
+            if local_schema is not None:
+                return str(local_schema)
         if parsed.scheme not in {"http", "https"}:
             if parsed.scheme not in {"", "file"}:
                 raise XbrlExtractionError(f"Unsupported taxonomy URI: {normalized}")
@@ -852,6 +894,7 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
                 getattr(cache, "_filing_root", settings.temp_dir),
                 settings.arelle_cache_dir,
                 settings.arelle_taxonomy_packages_dir,
+                _W3C_SCHEMA_DIR,
                 Path(cache.builtInCacheDir).parent.parent,
             )
             if not any(local.is_relative_to(Path(root).resolve()) for root in roots):

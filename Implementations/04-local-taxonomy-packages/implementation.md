@@ -154,3 +154,30 @@ Manual checks: `xbrl-warehouse doctor` output with a missing package and with
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-1: W3C `xml.xsd` (2001 and 2001/03) resolve to copies shipped in
+  `infrastructure/xbrl/schemas/`, so taxonomy packages load offline.
+- AC-3/AC-4: new `infrastructure/xbrl/taxonomy_packages.py` with `package_status` and
+  `sync_taxonomy_packages`. The registry is read with a YAML loader that keeps `off` and
+  digit-only checksums as strings. Sync uses a temp file in the packages directory and
+  an atomic rename. CLI `taxonomy status|sync`; the `doctor` check is "Taxonomy
+  packages". `SecHttpClient(allowed_hosts=...)` lets sync use the taxonomy allowlist.
+- `_create_controller` uses the shared registry code. A checksum mismatch or unsafe
+  filename is always fatal. A missing package is fatal when offline or in production;
+  elsewhere one `warehouse:taxonomyPackageMissing` warning is recorded (so dev and
+  tests keep working before `taxonomy sync`).
+- AC-5: 48 official packages pinned (URL, SHA-256, size) from xbrl.fasb.org and
+  xbrl.sec.gov. 19 are enabled: us-gaap 2017–2026 and srt 2018–2026, the zips in
+  Taxonomy Package format. Pinned but disabled: us-gaap 2015/2016 and every SEC
+  per-family zip (dei 2014/2018–2020/2024, country, currency, exch, naics, sic, stpr),
+  which have no `META-INF/taxonomyPackage.xml`; and SEC combined packages 2021–2023
+  (all rewrite `https://xbrl.sec.gov/`; Arelle keeps one per prefix) and 2024–2026
+  (not Taxonomy Package format). `ifrs-full` is not pinned: its zips are on
+  www.ifrs.org, which isn't an allowed host.
+- `xbrl.sec.gov` added to the default taxonomy host allowlist (SECURITY.md).
+- Gates: compileall, ruff, format, mypy, unit (310 passed), scan_stubs (0),
+  integration (24 passed), plan tests 01/02/03/04 (12/10/8/10 passed). Live
+  `taxonomy sync` of srt-2026 from xbrl.fasb.org into a scratch directory verified.
+- Not done: operator `taxonomy sync` on the live host, offline re-extraction of AAPL.

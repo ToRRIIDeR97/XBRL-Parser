@@ -8,8 +8,10 @@ transform changes (extraction revision 3, selection policy 2): re-extract the 42
 `xmlSchema:syntax` counts, and fact counts against revision 2. Confirm
 `SELECT countIf(fiscal_year IS NULL) FROM xbrl.v_xbrl_facts_latest` returns 0. Confirm
 `SELECT count() FROM xbrl.v_xbrl_facts_latest WHERE value_text = '(ixTransformValueError)'`
-returns 0. Until then the live
-data stays at revisions 1 and 2.
+returns 0. Before that, run
+`xbrl-warehouse taxonomy sync` (19 enabled us-gaap/srt packages), set
+`XBRL_ARELLE_OFFLINE=true` for the re-extraction, and confirm no `webCache:*` issues.
+Until then the live data stays at revisions 1 and 2.
 
 ## Current state
 
@@ -51,8 +53,11 @@ docker compose up -d postgres clickhouse minio minio-init
 python -m pip install -e ".[dev]"
 alembic upgrade head
 xbrl-warehouse db init-clickhouse
+xbrl-warehouse taxonomy sync
 xbrl-warehouse doctor
 ```
+
+`taxonomy sync` installs the pinned taxonomy packages from `config/taxonomy_packages.yml`; `doctor` fails while an enabled package is missing. See OPERATIONS.md, "Taxonomy packages".
 
 Use `make monitoring` to add the API, worker, Prometheus, and Grafana. Host-facing ports bind to localhost by default. The API exposes `/metrics`; the worker exposes its configured metrics port inside the Compose network.
 

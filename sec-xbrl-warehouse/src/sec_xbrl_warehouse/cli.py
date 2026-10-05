@@ -57,6 +57,7 @@ taxonomy_app = typer.Typer(help="Pinned local taxonomy packages for Arelle.")
 company_app = typer.Typer(help="Companies from SEC submissions data.")
 jobs_app = typer.Typer(help="Inspect and recover PostgreSQL queue jobs.")
 series_app = typer.Typer(help="Standardized metric series.")
+storage_app = typer.Typer(help="Object-store inventory (read-only).")
 app.add_typer(db_app, name="db")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(backfill_app, name="backfill")
@@ -68,6 +69,7 @@ app.add_typer(taxonomy_app, name="taxonomy")
 app.add_typer(company_app, name="company")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(series_app, name="series")
+app.add_typer(storage_app, name="storage")
 console = Console()
 
 
@@ -843,3 +845,24 @@ def series_rebuild(cik: list[int] = typer.Option(..., "--cik", min=0, help="Repe
             console.print(f"CIK {company}: {written} series rows")
     finally:
         warehouse.close()
+
+
+@storage_app.command("report")
+def storage_report_command(
+    keys_file: Path | None = typer.Option(
+        None, "--keys-file", help="Write reclaimable object keys here, one per line."
+    ),
+) -> None:
+    """Dry-run inventory of object-store usage and reclaimable legacy objects.
+
+    Lists only; nothing is deleted or written to the object store.
+    """
+    from sec_xbrl_warehouse.infrastructure.storage.inventory import storage_report
+
+    settings = get_settings()
+    settings.ensure_directories()
+    report = storage_report(create_object_store(settings), settings)
+    keys = [key for group in report["reclaimable"].values() for key in group.pop("keys")]
+    if keys_file is not None:
+        keys_file.write_text("".join(f"{key}\n" for key in keys), encoding="utf-8")
+    console.print_json(data=report)

@@ -58,9 +58,22 @@ The SEC bulk data is the fastest and most reliable historical backfill, but it i
 ### Bronze: immutable source artifacts
 
 - SEC bulk ZIPs.
-- EDGAR filing package files or a lossless package ZIP.
+- EDGAR filing packages, stored as **one** deterministic package ZIP per filing
+  (`bronze/sec/filings/<cik>/<accession>/packages/sha256=<hash>/package.zip`).
 - HTTP metadata, checksums, source URLs, and acquisition timestamps.
-- A manifest containing every member and checksum.
+- A manifest containing every member's SHA-256 and size, plus `package_object_key`
+  and `package_checksum_sha256`.
+
+`download_package` stages the selected members locally and stores only the package
+archive: members sorted by name, fixed timestamps, and an embedded `manifest.json`
+holding just the filing and members, so identical bytes give the same key and
+checksum. No member is stored loose. `materialize_package` downloads the archive,
+checks its SHA-256 against the manifest, applies the bulk ZIP safety checks
+(traversal, member count, expanded bytes, compression ratio, CRC), refuses entries
+that aren't manifest members, and verifies each extracted member's SHA-256 and size
+(`ArtifactIntegrityError` on any mismatch). Legacy manifests without
+`package_object_key` still materialize from loose member objects, and the ingestor
+archives them as before.
 
 Bronze object keys include a source revision or checksum. Existing objects are never overwritten with different bytes.
 
@@ -77,11 +90,11 @@ Filing packages contain only the files Arelle needs (selection policy 2,
   the rest concurrently, at most `XBRL_SEC_MAX_CONCURRENCY` at once, through
   the rate-limited SEC client.
 - When the index lists no XBRL input but lists `<accession>-xbrl.zip`, only the
-  archive is fetched. It is stored as raw bronze, checked with the bulk ZIP
-  limits plus `filing_max_members`/`filing_max_bytes`, and only then are its
-  members stored under their own checksum keys. Those manifest members record
-  the archive in `source_archive`, and the flagged instance becomes the
-  entrypoint.
+  archive is fetched and checked with the bulk ZIP limits plus
+  `filing_max_members`/`filing_max_bytes`. The package archive then holds the
+  `-xbrl.zip` itself and its expanded members; those members record the archive in
+  `source_archive`, and the flagged instance becomes the entrypoint. A rejected
+  `-xbrl.zip` is stored loose under its checksum key for diagnosis.
 
 The manifest cache key includes the selection policy version. Manifests cached
 under an earlier policy stay in place and are not reused. The Arelle adapter
@@ -96,6 +109,12 @@ XBRL namespace, so stray exhibits never enter the IXDS.
 - Includes source artifact ID, ingest timestamp, schema version, and row hash.
 
 Silver is the rebuild source for ClickHouse and protects against database corruption or schema experiments.
+
+The saved Arelle extraction (the resume and remap checkpoint) is a zstd-compressed
+JSON stream, `silver/xbrl/extractions/accession=<a>/revision=<r>/sha256=<hash>.json.zst`,
+where the hash is of the stored object. It is written and read as a stream through
+pyarrow's compressed streams, with `XBRL_EXTRACTION_MAX_BYTES` bounding the
+uncompressed JSON. Legacy uncompressed `.json` checkpoints are still read.
 
 ### Gold: ClickHouse
 

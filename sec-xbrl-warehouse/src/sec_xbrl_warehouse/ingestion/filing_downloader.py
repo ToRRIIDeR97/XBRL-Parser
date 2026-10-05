@@ -32,6 +32,7 @@ _FILING_SUMMARY = "filingsummary.xml"
 _RENDERED_REPORT = re.compile(r"^r\d+\.(?:htm|html|xml)$")
 _INDEX_PAGE = re.compile(r"-index(?:-headers)?\.html?$")
 _LINKBASE_SUFFIXES = ("_cal", "_def", "_lab", "_pre", "_ref")
+_ARCHIVE_MANIFEST = "manifest.json"
 
 
 class FilingPackageDownloader:
@@ -68,6 +69,10 @@ class FilingPackageDownloader:
         `sec_max_concurrency`; the shared SEC client still enforces the rate
         limit. A filing whose index lists only the `-xbrl.zip` archive is
         expanded from that archive.
+
+        Members are staged locally and stored as **one** deterministic package
+        archive (`package_object_key`); no member is stored loose. The manifest
+        records each member's SHA-256 and size.
         """
         self.settings.ensure_directories()
         index_payload = await self.fetch_index(filing)
@@ -121,7 +126,7 @@ class FilingPackageDownloader:
                 if reusable is not None:
                     return reusable
             if _is_xbrl_archive(selected, filing):
-                members = await self._download_archive(
+                members, sources = await self._download_archive(
                     filing, selected[0], staging, semaphore, budget
                 )
             else:
@@ -142,11 +147,13 @@ class FilingPackageDownloader:
                 except ExceptionGroup as failures:
                     raise failures.exceptions[0] from None
                 members.extend(task.result() for task in tasks)
-        manifest = FilingPackageManifest(
-            filing=filing,
-            members=tuple(sorted(members, key=lambda member: member.name)),
-            acquired_at=datetime.now(UTC),
-        )
+                sources = {member.name: staging / member.name for member in members}
+            manifest = FilingPackageManifest(
+                filing=filing,
+                members=tuple(sorted(members, key=lambda member: member.name)),
+                acquired_at=datetime.now(UTC),
+            )
+            manifest = await asyncio.to_thread(self._store_archive, manifest, sources)
         cache_bytes = manifest.model_dump_json(indent=2).encode("utf-8")
         try:
             await asyncio.to_thread(self.object_store.put_bytes, cache_bytes, cache_key)
@@ -171,7 +178,7 @@ class FilingPackageDownloader:
         semaphore: asyncio.Semaphore,
         budget: _ByteBudget,
     ) -> PackageMember:
-        """Download one listed file and store it under its checksum key."""
+        """Download one listed file into staging (stored later in the package archive)."""
         url = f"{filing.archive_directory_url}/{name}"
         destination = staging / _safe_package_name(name)
         async with semaphore:
@@ -179,14 +186,6 @@ class FilingPackageDownloader:
                 url, destination, max_bytes=budget.remaining
             )
         budget.consume(size)
-        key = filing_object_key(filing, name, checksum)
-        await asyncio.to_thread(
-            self.object_store.put_file,
-            destination,
-            key,
-            expected_sha256=checksum,
-            metadata={"accession": filing.accession, "source-url": url},
-        )
         return PackageMember(
             name=name,
             source_url=url,
@@ -206,33 +205,40 @@ class FilingPackageDownloader:
         staging: Path,
         semaphore: asyncio.Semaphore,
         budget: _ByteBudget,
-    ) -> list[PackageMember]:
-        """Fetch `<accession>-xbrl.zip` and publish its members after validation.
+    ) -> tuple[list[PackageMember], dict[str, Path]]:
+        """Fetch `<accession>-xbrl.zip` and expand its members after validation.
 
-        The archive itself is retained first, like bulk ZIPs, so a rejected
-        archive stays available for diagnosis. No expanded member is
-        published until every archive and package limit has passed.
+        Returns the members (the archive itself plus the expanded files, which
+        name it in `source_archive`) and their staged paths. A rejected archive is
+        stored loose under its checksum key, like bulk ZIPs, so it stays
+        available for diagnosis.
         """
         archive = await self._fetch_member(filing, archive_name, staging, semaphore, budget)
         archive_path = staging / archive_name
         expanded = staging / "expanded"
-        entries = await asyncio.to_thread(
-            _expand_filing_archive, archive_path, expanded, self.settings, budget
-        )
-        entrypoint = _archive_entrypoint([name for name, _, _ in entries], filing)
-        if entrypoint is None:
-            raise ArtifactIntegrityError(
-                f"{archive_name} contains no XBRL instance document to use as the entrypoint"
+        try:
+            entries = await asyncio.to_thread(
+                _expand_filing_archive, archive_path, expanded, self.settings, budget
             )
-        members = [archive]
-        for name, checksum, size in entries:
+            entrypoint = _archive_entrypoint([name for name, _, _ in entries], filing)
+            if entrypoint is None:
+                raise ArtifactIntegrityError(
+                    f"{archive_name} contains no XBRL instance document to use as the entrypoint"
+                )
+        except ArtifactIntegrityError:
+            assert archive.checksum_sha256 is not None
             await asyncio.to_thread(
                 self.object_store.put_file,
-                expanded / name,
-                filing_object_key(filing, name, checksum),
-                expected_sha256=checksum,
+                archive_path,
+                filing_object_key(filing, archive_name, archive.checksum_sha256),
+                expected_sha256=archive.checksum_sha256,
                 metadata={"accession": filing.accession, "source-url": archive.source_url},
             )
+            raise
+        members = [archive]
+        sources = {archive_name: archive_path}
+        for name, checksum, size in entries:
+            sources[name] = expanded / name
             members.append(
                 PackageMember(
                     name=name,
@@ -245,7 +251,7 @@ class FilingPackageDownloader:
                     source_archive=archive_name,
                 )
             )
-        return members
+        return members, sources
 
     def _cached_manifest(
         self, key: str, filing: FilingRef, expected_names: tuple[str, ...]
@@ -281,6 +287,18 @@ class FilingPackageDownloader:
         member = next((item for item in manifest.members if item.name == name), None)
         if member is None or member.checksum_sha256 is None or member.source_archive:
             return None
+        if manifest.package_object_key:
+            if not self.object_store.exists(manifest.package_object_key):
+                return None
+            with tempfile.TemporaryDirectory(dir=self.settings.temp_dir) as directory:
+                path = Path(directory) / member.name
+                self._extract_from_archive(
+                    manifest,
+                    Path(directory),
+                    only=member,
+                    max_bytes=self.settings.response_max_bytes,
+                )
+                return path.read_bytes()
         key = filing_object_key(manifest.filing, name, member.checksum_sha256)
         if not self.object_store.exists(key):
             return None
@@ -337,7 +355,12 @@ class FilingPackageDownloader:
                 raise ArtifactIntegrityError(
                     f"Cached filing member source URL mismatch: {member.name}"
                 )
-        if any(
+        if manifest.package_object_key:
+            if any(member.checksum_sha256 is None for member in manifest.members):
+                raise ArtifactIntegrityError("Cached archived filing lacks member checksums")
+            if not self.object_store.exists(manifest.package_object_key):
+                return None
+        elif any(
             member.checksum_sha256 is None
             or not self.object_store.exists(
                 filing_object_key(filing, member.name, member.checksum_sha256)
@@ -385,30 +408,10 @@ class FilingPackageDownloader:
                     raise ArtifactIntegrityError("Filing exceeds configured byte limit")
                 member_entries.append((member.name, local))
 
-            # 2. Write the deterministic archive (fixed timestamps, sorted names).
-            archive_path = staging / _package_archive_name(manifest)
-            serialized_manifest = manifest.model_dump_json(indent=2).encode("utf-8")
-            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for name, source in sorted(member_entries, key=lambda item: item[0]):
-                    _write_member(zf, name, source)
-                _write_member(zf, "manifest.json", serialized_manifest)
-
-            # 3. Checksum and store under an immutable key.
-            archive_checksum = sha256_file(archive_path)
-            package_key = filing_package_key(manifest.filing, archive_checksum)
-            self.object_store.put_file(
-                archive_path,
-                package_key,
-                expected_sha256=archive_checksum,
-                metadata={"accession": manifest.filing.accession},
-            )
+            # 2-3. Write, checksum, and store the deterministic archive.
+            archived = self._write_archive(manifest, dict(member_entries), staging)
             # 4. Regenerate and store the manifest that records archive lineage.
-            updated = manifest.model_copy(
-                update={
-                    "package_object_key": package_key,
-                    "package_checksum_sha256": archive_checksum,
-                }
-            )
+            updated = archived
             updated_bytes = updated.model_dump_json(indent=2).encode("utf-8")
             updated_checksum = sha256_bytes(updated_bytes)
             updated_key = (
@@ -427,12 +430,59 @@ class FilingPackageDownloader:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
+    def _store_archive(
+        self, manifest: FilingPackageManifest, sources: dict[str, Path]
+    ) -> FilingPackageManifest:
+        """Store staged members as the one deterministic package archive."""
+        staging = Path(tempfile.mkdtemp(prefix="xbrl-package-", dir=self.settings.temp_dir))
+        try:
+            return self._write_archive(manifest, sources, staging)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def _write_archive(
+        self, manifest: FilingPackageManifest, sources: dict[str, Path], staging: Path
+    ) -> FilingPackageManifest:
+        """Write sorted members with fixed timestamps plus a deterministic manifest.
+
+        Identical member bytes give an identical archive, key, and checksum: the
+        embedded `manifest.json` leaves out acquisition time and object keys.
+        """
+        if _ARCHIVE_MANIFEST in sources:
+            raise ArtifactIntegrityError(f"Package member shadows {_ARCHIVE_MANIFEST}")
+        archive_path = staging / _package_archive_name(manifest)
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name in sorted(sources):
+                _write_member(zf, name, sources[name])
+            _write_member(zf, _ARCHIVE_MANIFEST, _archive_manifest_bytes(manifest))
+        archive_checksum = sha256_file(archive_path)
+        package_key = filing_package_key(manifest.filing, archive_checksum)
+        self.object_store.put_file(
+            archive_path,
+            package_key,
+            expected_sha256=archive_checksum,
+            metadata={"accession": manifest.filing.accession},
+        )
+        return manifest.model_copy(
+            update={
+                "package_object_key": package_key,
+                "package_checksum_sha256": archive_checksum,
+            }
+        )
+
     def materialize_package(self, manifest: FilingPackageManifest, destination: Path) -> Path:
-        """Materialize all members locally and return the chosen entrypoint."""
+        """Materialize all members locally and return the chosen entrypoint.
+
+        Archived manifests extract from the package archive; legacy manifests
+        (no `package_object_key`) read each loose member.
+        """
         entrypoint = _choose_entrypoint(manifest)
         destination.mkdir(parents=True, exist_ok=True)
         if len(manifest.members) > self.settings.filing_max_members:
             raise ArtifactIntegrityError("Filing exceeds configured member count")
+        if manifest.package_object_key:
+            self._extract_from_archive(manifest, destination)
+            return _entrypoint_path(destination, entrypoint)
         total = 0
         for member in manifest.members:
             if (
@@ -459,22 +509,77 @@ class FilingPackageDownloader:
                 raise ArtifactIntegrityError(
                     f"Materialized member checksum mismatch: {member.name}"
                 )
-        target = (destination / entrypoint).resolve()
-        if not target.is_relative_to(destination.resolve()) or not target.is_file():
-            raise ArtifactIntegrityError("Entrypoint escapes materialized package or is missing")
-        return target
+        return _entrypoint_path(destination, entrypoint)
 
-    def delete_source_files(self, manifest: FilingPackageManifest) -> None:
-        """Delete downloaded filing bytes while retaining lightweight manifests."""
-        keys = [
-            filing_object_key(manifest.filing, member.name, member.checksum_sha256)
-            for member in manifest.members
-            if member.checksum_sha256
-        ]
-        if manifest.package_object_key:
-            keys.append(manifest.package_object_key)
-        for key in keys:
-            self.object_store.delete(key)
+    def _extract_from_archive(
+        self,
+        manifest: FilingPackageManifest,
+        destination: Path,
+        *,
+        only: PackageMember | None = None,
+        max_bytes: int | None = None,
+    ) -> None:
+        """Extract manifest members from the package archive, verifying each one.
+
+        The archive must match `package_checksum_sha256` and pass the bulk ZIP
+        safety checks; it may hold only manifest members plus `manifest.json`;
+        each member must match its recorded size and SHA-256.
+        """
+        assert manifest.package_object_key is not None
+        limit = self.settings.filing_max_bytes if max_bytes is None else max_bytes
+        destination.mkdir(parents=True, exist_ok=True)
+        root = destination.resolve()
+        with tempfile.TemporaryDirectory(dir=self.settings.temp_dir) as directory:
+            archive_path = Path(directory) / "package.zip"
+            stored = self.object_store.get_file(
+                manifest.package_object_key,
+                archive_path,
+                max_bytes=self.settings.download_max_bytes,
+            )
+            if (
+                manifest.package_checksum_sha256
+                and stored.checksum_sha256 != manifest.package_checksum_sha256
+            ):
+                raise ArtifactIntegrityError(
+                    f"Package archive checksum mismatch: {manifest.package_object_key}"
+                )
+            validate_zip_integrity(archive_path, self.settings)
+            with zipfile.ZipFile(archive_path) as archive:
+                names = {info.filename for info in archive.infolist() if not info.is_dir()}
+                expected = {member.name for member in manifest.members}
+                unexpected = sorted(names - expected - {_ARCHIVE_MANIFEST})
+                if unexpected:
+                    raise ArtifactIntegrityError(
+                        f"Package archive holds members not in the manifest: {unexpected}"
+                    )
+                total = 0
+                for member in (only,) if only is not None else manifest.members:
+                    if member.checksum_sha256 is None:
+                        raise ArtifactIntegrityError(f"Member {member.name} has no checksum")
+                    if member.name not in names:
+                        raise ArtifactIntegrityError(
+                            f"Package archive is missing member: {member.name}"
+                        )
+                    target = (destination / _safe_package_name(member.name)).resolve()
+                    if root not in target.parents:
+                        raise ArtifactIntegrityError(f"Unsafe package member path: {member.name}")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    digest = hashlib.sha256()
+                    size = 0
+                    with archive.open(member.name) as source, target.open("wb") as sink:
+                        while chunk := source.read(1024 * 1024):
+                            size += len(chunk)
+                            total += len(chunk)
+                            if total > limit:
+                                raise ArtifactIntegrityError("Filing exceeds configured byte limit")
+                            digest.update(chunk)
+                            sink.write(chunk)
+                    if digest.hexdigest() != member.checksum_sha256 or (
+                        member.size_bytes is not None and size != member.size_bytes
+                    ):
+                        raise ArtifactIntegrityError(
+                            f"Materialized member checksum mismatch: {member.name}"
+                        )
 
     def _materialize_member(
         self,
@@ -668,6 +773,19 @@ def _safe_package_name(name: str) -> str:
     if not name or "\\" in name or path.is_absolute() or ".." in path.parts or "." in path.parts:
         raise ArtifactIntegrityError(f"Unsafe package member path: {name}")
     return path.as_posix()
+
+
+def _archive_manifest_bytes(manifest: FilingPackageManifest) -> bytes:
+    """The manifest embedded in a package archive: filing and members only."""
+    payload = manifest.model_dump(mode="json", include={"filing", "members"})
+    return json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
+
+
+def _entrypoint_path(destination: Path, entrypoint: str) -> Path:
+    target = (destination / entrypoint).resolve()
+    if not target.is_relative_to(destination.resolve()) or not target.is_file():
+        raise ArtifactIntegrityError("Entrypoint escapes materialized package or is missing")
+    return target
 
 
 def _package_archive_name(manifest: FilingPackageManifest) -> str:

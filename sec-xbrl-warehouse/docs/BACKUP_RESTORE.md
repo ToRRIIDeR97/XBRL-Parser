@@ -2,7 +2,7 @@
 
 ## Backup scope
 
-- **Object storage:** bronze source files, manifests, quarantine diagnostics, and silver Parquet. This is the durable rebuild source.
+- **Object storage:** bronze package archives (and legacy loose source files), manifests, quarantine diagnostics, zstd extraction checkpoints (`.json.zst`, plus legacy `.json`), and silver Parquet. This is the durable rebuild source. A filing's raw bytes live in its package archive; verify restored archives against `package_checksum_sha256` and member checksums in the manifests.
 - **PostgreSQL:** artifacts, filings, jobs/checkpoints, validation issues, mapping definitions/reviews, and run metadata.
 - **ClickHouse:** optional snapshots for faster recovery; not the sole copy of raw data.
 - **Configuration/code:** Git tag, dependency lock, SQL migration versions, and Arelle/parser version.

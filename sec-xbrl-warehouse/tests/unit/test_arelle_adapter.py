@@ -46,6 +46,9 @@ def test_simple_fixture_extracts_core_entities(bundle) -> None:
 def test_fact_carries_value_and_identity(bundle) -> None:
     fact = next(fact for fact in bundle.facts if fact.concept_name == "Revenue")
     assert fact.concept_qname == "ex:Revenue"
+    # Regression: the version comes from the concept namespace, not from the
+    # XML Schema namespace of its declaration (which gave "2001").
+    assert fact.taxonomy_version == "2026"
     assert fact.concept_name == "Revenue"
     assert fact.value_kind is FactValueKind.NUMERIC
     assert fact.value_decimal == Decimal("123456789")

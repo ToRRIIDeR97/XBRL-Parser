@@ -51,7 +51,8 @@ def test_select_package_files_includes_xbrl_and_primary() -> None:
     assert "example-20251231.xsd" in selected
     assert "filingSummary.xml" in selected
     assert "logo.jpg" not in selected
-    assert "report.html" in selected
+    # Without FilingSummary InputFiles, only the primary `.htm` is an inline input.
+    assert "report.html" not in selected
 
 
 def test_select_entrypoints_prefers_primary() -> None:
@@ -118,14 +119,8 @@ def test_archive_and_materialize_round_trip(tmp_path: Path) -> None:
     materialized = downloader.materialize_package(archived, tmp_path / "out")
     assert materialized.name == "example-20251231.htm"
     assert materialized.is_file()
-
-    downloader.delete_source_files(archived)
-    assert archived.package_object_key and not store.exists(archived.package_object_key)
-    assert all(
-        not store.exists(filing_object_key(filing, member.name, member.checksum_sha256))
-        for member in members
-        if member.checksum_sha256
-    )
+    # Raw artifacts are never deleted by the application (no delete API).
+    assert not hasattr(downloader, "delete_source_files")
 
 
 def test_materialize_refuses_path_traversal(tmp_path: Path) -> None:
@@ -307,3 +302,133 @@ def test_entrypoint_must_be_contained_manifest_member(name):
     )
     with pytest.raises(ArtifactIntegrityError):
         _choose_entrypoint(manifest)
+
+
+class _NamedHttp:
+    """Serves fixed bytes by file name and counts requests."""
+
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self.files = files
+        self.requested: list[str] = []
+
+    async def get_json(self, url: str):
+        return {"directory": {"item": [{"name": name} for name in self.files]}}
+
+    async def download(self, url: str, destination: Path, **kwargs):
+        name = url.rsplit("/", 1)[-1]
+        self.requested.append(name)
+        data = self.files[name]
+        await asyncio.to_thread(destination.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(destination.write_bytes, data)
+        return destination, sha256(data).hexdigest(), len(data), {}
+
+
+async def test_cached_manifest_reuses_stored_filing_summary(tmp_path: Path) -> None:
+    summary = (
+        b"<FilingSummary><InputFiles><File>example-20251231.htm</File>"
+        b"<File>example-20251231_part2.htm</File></InputFiles></FilingSummary>"
+    )
+    http = _NamedHttp(
+        {
+            "example-20251231.htm": b"a",
+            "example-20251231_part2.htm": b"b",
+            "example-20251231.xsd": b"c",
+            "FilingSummary.xml": summary,
+        }
+    )
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data")
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    downloader = FilingPackageDownloader(settings, http, store)  # type: ignore[arg-type]
+    first = await downloader.download_package(_filing())
+    assert len(http.requested) == 4
+    second = await downloader.download_package(_filing())
+    assert len(http.requested) == 4, "a cache hit must not re-fetch FilingSummary.xml"
+    assert second.members == first.members
+
+
+async def test_xbrl_zip_fallback_manifest_is_reused_and_records_archive(tmp_path: Path) -> None:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("example-20251231.xml", b"<xbrl/>")
+        archive.writestr("example-20251231_lab.xml", b"<linkbase/>")
+        archive.writestr("example-20251231.xsd", b"<schema/>")
+    zip_name = "0000000001-26-000001-xbrl.zip"
+    http = _NamedHttp({"0000000001-26-000001.txt": b"x", zip_name: buffer.getvalue()})
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data")
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    downloader = FilingPackageDownloader(settings, http, store)  # type: ignore[arg-type]
+    first = await downloader.download_package(_filing())
+    expanded = [member for member in first.members if member.source_archive]
+    assert {member.source_archive for member in expanded} == {zip_name}
+    assert [member.name for member in expanded if member.is_xbrl_entrypoint] == [
+        "example-20251231.xml"
+    ]
+    assert all(member.source_url.endswith(zip_name) for member in expanded)
+    second = await downloader.download_package(_filing())
+    assert http.requested == [zip_name]
+    assert second.members == first.members
+
+
+async def test_concurrent_downloads_share_filing_byte_budget(tmp_path: Path) -> None:
+    http = _NamedHttp({"example-20251231.htm": b"12345", "example-20251231.xsd": b"12345"})
+    settings = Settings(
+        env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data", filing_max_bytes=8
+    )
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    downloader = FilingPackageDownloader(settings, http, store)  # type: ignore[arg-type]
+    with pytest.raises(ArtifactIntegrityError, match="byte limit"):
+        await downloader.download_package(_filing())
+
+
+def test_malformed_filing_summary_is_rejected() -> None:
+    payload = {"directory": {"item": [{"name": "example-20251231.htm"}]}}
+    with pytest.raises(ArtifactIntegrityError, match="FilingSummary"):
+        select_package_files(payload, _filing(), filing_summary=b"<FilingSummary>")
+
+
+def test_inline_detection_reads_namespace_declarations(tmp_path: Path) -> None:
+    from sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter import _declares_inline_xbrl
+
+    inline = tmp_path / "inline.htm"
+    inline.write_text(
+        '<html xmlns="http://www.w3.org/1999/xhtml" '
+        'xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"><body/></html>',
+        encoding="utf-8",
+    )
+    plain = tmp_path / "plain.htm"
+    plain.write_text('<html xmlns="http://www.w3.org/1999/xhtml"><body/></html>')
+    malformed = tmp_path / "malformed.htm"
+    malformed.write_text("<html><body><p>exhibit</DOCUMENT>")
+    entity = tmp_path / "entity.htm"
+    entity.write_text('<!DOCTYPE html [<!ENTITY x SYSTEM "file:///etc/passwd">]><html>&x;</html>')
+    assert _declares_inline_xbrl(inline)
+    assert not _declares_inline_xbrl(plain)
+    assert not _declares_inline_xbrl(malformed)
+    assert not _declares_inline_xbrl(entity)
+
+
+async def test_xbrl_zip_without_instance_is_rejected_and_archive_retained(
+    tmp_path: Path,
+) -> None:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("example-20251231.xsd", b"<schema/>")
+        archive.writestr("example-20251231_lab.xml", b"<linkbase/>")
+    zip_name = "0000000001-26-000001-xbrl.zip"
+    data = buffer.getvalue()
+    http = _NamedHttp({"0000000001-26-000001.txt": b"x", zip_name: data})
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data")
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    downloader = FilingPackageDownloader(settings, http, store)  # type: ignore[arg-type]
+    with pytest.raises(ArtifactIntegrityError, match="no XBRL instance"):
+        await downloader.download_package(_filing())
+    assert store.exists(filing_object_key(_filing(), zip_name, sha256(data).hexdigest()))
+    assert not store.exists(
+        filing_object_key(_filing(), "example-20251231.xsd", sha256(b"<schema/>").hexdigest())
+    )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -20,6 +20,9 @@ class CanonicalMetric(CanonicalModel):
     unit_family: str
     description: str | None = None
     formula: str | None = None
+    # False for averages, per-share values, and point counts: series never derive
+    # quarters by year-to-date difference, Q4 = FY - 9M, or TTM sums from them.
+    additive: bool = True
 
 
 class ConceptMapping(CanonicalModel):
@@ -60,3 +63,12 @@ class CanonicalFact(CanonicalModel):
     mapping_confidence: float
     mapping_explanation: str
     extraction_revision: int
+    # Filing context for point-in-time series: SEC acceptance time (None when
+    # discovery didn't supply it) and the filing's dei fiscal focus and period end.
+    accepted_at: datetime | None = None
+    # The raw fact's concept, so series can rank competing concepts by seed priority.
+    concept_namespace: str | None = None
+    concept_qname: str | None = None
+    fiscal_year: int | None = None
+    fiscal_period: str | None = None
+    report_date: date | None = None

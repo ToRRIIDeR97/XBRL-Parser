@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -14,16 +16,30 @@ import pyarrow as pa
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
-from sec_xbrl_warehouse.domain.enums import SecTable
+from sec_xbrl_warehouse.domain.enums import FactValueKind, SecTable
+from sec_xbrl_warehouse.domain.models import Company
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle, XbrlFact
 from sec_xbrl_warehouse.exceptions import ConfigurationError, WarehouseWriteError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     canonical_fact_schema,
+    clickhouse_facts_schema,
     require_exact_schema,
     sec_warehouse_schema,
+    taxonomy_concepts_schema,
     xbrl_warehouse_schema,
 )
 from sec_xbrl_warehouse.infrastructure.storage.hashing import stable_json_hash
+from sec_xbrl_warehouse.normalization.disclosures import (
+    CoverPage,
+    SegmentRow,
+    cover_page,
+    segment_rows,
+)
+from sec_xbrl_warehouse.normalization.statements import (
+    StatementLine,
+    build_statement_lines,
+    classify_roles,
+)
 from sec_xbrl_warehouse.observability.metrics import ROWS_WRITTEN
 
 _SEC_TABLE_NAMES: dict[SecTable, str] = {
@@ -176,11 +192,12 @@ class ClickHouseWarehouse:
                     f"Insufficient ClickHouse disk space for preserving upgrade: need about {int(sizes) * 11 // 10} bytes"
                 )
         backups: dict[str, str] = {}
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         for name in drift:
             statement, _ = definitions[name]
             token = uuid4().hex[:8]
             temporary = f"{name}__upgrade_{token}"
-            backup = f"{name}__backup_{token}"
+            backup = f"{name}__backup_{stamp}_{token}"
             create = re.sub(
                 rf"CREATE TABLE IF NOT EXISTS\s+{re.escape(self.database)}\.{re.escape(name)}",
                 f"CREATE TABLE {self.database}.{temporary}",
@@ -220,6 +237,11 @@ class ClickHouseWarehouse:
                     target_contract = self._column_contract(temporary)
                     for column, (target_type, _, _) in target_contract.items():
                         if column not in source_contract:
+                            # New Nullable columns start as NULL for existing rows.
+                            if target_type.startswith("nullable(") or (
+                                target_type.startswith("lowcardinality(nullable(")
+                            ):
+                                continue
                             if (
                                 column not in {"value_kind", "source_attributes_json"}
                                 or name != "xbrl_facts"
@@ -227,12 +249,27 @@ class ClickHouseWarehouse:
                                 raise WarehouseWriteError(
                                     f"No migration for new column {name}.{column}"
                                 )
+                        elif _is_hash_encoding(
+                            name, column, source_contract[column][0], target_type
+                        ):
+                            continue
                         elif not _preserving_type(source_contract[column][0], target_type):
                             raise WarehouseWriteError(f"Unsafe type conversion for {name}.{column}")
                     if set(source_columns) - set(target_columns):
                         raise WarehouseWriteError(f"Upgrade would discard columns from {name}")
                     common = [column for column in target_columns if column in source_columns]
-                    selects = list(common)
+                    selects = [
+                        _hash_projection(column, target_contract[column][0])
+                        if column in source_contract
+                        and _is_hash_encoding(
+                            name,
+                            column,
+                            source_contract[column][0],
+                            target_contract[column][0],
+                        )
+                        else column
+                        for column in common
+                    ]
                     if name == "xbrl_facts" and "value_kind" not in source_columns:
                         common.append("value_kind")
                         selects.append(
@@ -242,13 +279,20 @@ class ClickHouseWarehouse:
                         )
                     columns = ", ".join(common)
                     projection = ", ".join(selects)
+                    # xbrl_concepts keeps extension concepts; standard concepts move to
+                    # the shared taxonomy_concepts table (the backup keeps every row).
+                    split = name == "xbrl_concepts" and "is_extension" in source_columns
+                    where = " WHERE is_extension = 1" if split else ""
                     self.client.command(
                         f"INSERT INTO {self.database}.{temporary} ({columns}) "
-                        f"SELECT {projection} FROM {self.database}.{name} SETTINGS optimize_on_insert=0"
+                        f"SELECT {projection} FROM {self.database}.{name}{where} "
+                        "SETTINGS optimize_on_insert=0"
                     )
+                    if split:
+                        self._move_taxonomy_concepts(definitions, name, source_contract)
                     before = int(
                         self.client.query(
-                            f"SELECT count() FROM {self.database}.{name}"
+                            f"SELECT count() FROM {self.database}.{name}{where}"
                         ).result_rows[0][0]
                     )
                     after = int(
@@ -275,6 +319,23 @@ class ClickHouseWarehouse:
         # Create newly introduced tables and refresh views only after all swaps succeed.
         self.apply_ddl(ddl_directory)
         return backups
+
+    def _move_taxonomy_concepts(
+        self, definitions: dict[str, tuple[str, str]], source: str, contract: dict[str, Any]
+    ) -> None:
+        """Copy a legacy table's standard concepts into `taxonomy_concepts` (deduplicated)."""
+        self.client.command(definitions["taxonomy_concepts"][0])
+        target = self._columns("taxonomy_concepts")
+        row_hash = (
+            _hash_projection("_row_hash", "fixedstring(32)")
+            if _normalize_sql(contract["_row_hash"][0]) != "fixedstring(32)"
+            else "_row_hash"
+        )
+        selects = [row_hash if column == "_row_hash" else column for column in target]
+        self.client.command(
+            f"INSERT INTO {self.database}.taxonomy_concepts ({', '.join(target)}) "
+            f"SELECT {', '.join(selects)} FROM {self.database}.{source} WHERE is_extension = 0"
+        )
 
     def _column_contract(self, table: str) -> dict[str, tuple[str, str, str]]:
         result = self.client.query(
@@ -373,15 +434,34 @@ class ClickHouseWarehouse:
         return self._insert_arrow(target, arrow_table)
 
     def insert_xbrl_bundle(self, bundle: XbrlExtractionBundle) -> dict[str, int]:
-        """Persist all entities from one Arelle extraction at lineage level."""
+        """Persist all entities from one Arelle extraction at lineage level.
+
+        Includes the derived `roles`, `statement_lines` (primary statements as
+        presented), `cover_pages`, and `segment_facts`, so they publish with the same
+        revision marker.
+        """
         counts: dict[str, int] = {}
-        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+        for entity in XBRL_ENTITIES:
             counts[entity] = sum(
                 self._insert_arrow(f"xbrl_{entity}", table)
                 for table in iter_xbrl_tables(
-                    bundle, entity, self.settings.arrow_batch_rows, self.settings.arrow_batch_bytes
+                    bundle,
+                    entity,
+                    self.settings.arrow_batch_rows,
+                    self.settings.arrow_batch_bytes,
+                    target="clickhouse",
                 )
             )
+        # Standard concepts are shared across filings (not part of the revision's
+        # published row counts).
+        for table in iter_xbrl_tables(
+            bundle,
+            "taxonomy_concepts",
+            self.settings.arrow_batch_rows,
+            self.settings.arrow_batch_bytes,
+            target="clickhouse",
+        ):
+            self._insert_arrow("taxonomy_concepts", table)
         return counts
 
     def insert_canonical_facts(self, facts: Sequence[CanonicalFact]) -> int:
@@ -412,8 +492,12 @@ class ClickHouseWarehouse:
         return written
 
     def publish_xbrl_bundle(self, bundle: XbrlExtractionBundle, counts: dict[str, int]) -> None:
-        """Verify all raw entities before exposing this immutable revision to readers."""
-        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+        """Verify all raw entities before exposing this immutable revision to readers.
+
+        Entities missing from `counts` (written before the derived entities existed)
+        are not checked.
+        """
+        for entity in (entity for entity in XBRL_ENTITIES if entity in counts):
             result = self.query(
                 f"SELECT count() AS count FROM xbrl_{entity} FINAL WHERE accession = %(accession)s AND extraction_revision = %(revision)s",
                 {"accession": bundle.filing.accession, "revision": bundle.extraction_revision},
@@ -445,6 +529,41 @@ class ClickHouseWarehouse:
             ),
         )
 
+    def command(self, sql: str, parameters: dict[str, Any] | None = None) -> Any:
+        return self.client.command(sql, parameters=parameters or {})
+
+    def insert_metric_series(self, table: pa.Table) -> int:
+        """Append one company's rebuilt series rows (see `query.series`)."""
+        return self._insert_arrow("metric_series", table)
+
+    def upsert_company_mirror(self, company: Company) -> int:
+        """Mirror a PostgreSQL company row for read-only ticker lookups in ClickHouse."""
+        table = pa.Table.from_pylist(
+            [
+                {
+                    "cik": company.cik,
+                    "name": company.name,
+                    "tickers": [ticker.upper() for ticker in company.tickers],
+                    "exchanges": list(company.exchanges),
+                    "sic": company.sic,
+                    "fiscal_year_end": company.fiscal_year_end,
+                    "updated_at": _now(),
+                }
+            ],
+            schema=pa.schema(
+                [
+                    pa.field("cik", pa.uint64(), False),
+                    pa.field("name", pa.string(), False),
+                    pa.field("tickers", pa.list_(pa.string()), False),
+                    pa.field("exchanges", pa.list_(pa.string()), False),
+                    pa.field("sic", pa.uint32()),
+                    pa.field("fiscal_year_end", pa.string()),
+                    pa.field("updated_at", pa.timestamp("ms", tz="UTC"), False),
+                ]
+            ),
+        )
+        return self._insert_arrow("companies", table)
+
     def query(self, sql: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         result = self.client.query(sql, parameters=parameters or {})
         names = list(result.column_names)
@@ -453,6 +572,7 @@ class ClickHouseWarehouse:
     def _insert_arrow(self, table_name: str, table: pa.Table) -> int:
         if table.num_rows == 0:
             return 0
+        table = encode_hash_columns(table_name, table)
         if len(set(table.column_names)) != len(table.column_names):
             raise WarehouseWriteError(f"Duplicate Arrow column names for {table_name}")
         try:
@@ -478,6 +598,73 @@ class ClickHouseWarehouse:
         return tuple(part.strip() for part in cleaned.split(";") if part.strip())
 
 
+# SHA-256 identity and row hashes stored as FixedString(32) bytes in ClickHouse; the
+# v_* views return lower-case hex. SEC bulk tables keep their hex `_row_hash`.
+HASH_COLUMNS: dict[str, frozenset[str]] = {
+    "xbrl_contexts": frozenset({"context_hash", "_row_hash"}),
+    "xbrl_concepts": frozenset({"_row_hash"}),
+    "taxonomy_concepts": frozenset({"_row_hash"}),
+    "xbrl_facts": frozenset(
+        {"fact_id", "context_hash", "dimension_hash", "duplicate_set_hash", "_row_hash"}
+    ),
+    "xbrl_relationships": frozenset({"relationship_id", "_row_hash"}),
+    "xbrl_footnotes": frozenset({"footnote_id", "_row_hash"}),
+    "xbrl_roles": frozenset({"_row_hash"}),
+    "xbrl_statement_lines": frozenset({"_row_hash"}),
+    "xbrl_cover_pages": frozenset({"_row_hash"}),
+    "xbrl_segment_facts": frozenset({"fact_id", "_row_hash"}),
+    "canonical_facts": frozenset({"canonical_fact_id", "raw_fact_id", "_row_hash"}),
+}
+HASH_ARRAY_COLUMNS: dict[str, frozenset[str]] = {
+    "xbrl_facts": frozenset({"footnote_ids"}),
+    "xbrl_footnotes": frozenset({"linked_fact_ids"}),
+    "xbrl_statement_lines": frozenset({"value_fact_ids"}),
+}
+_HEX_DIGEST = re.compile(r"[0-9a-fA-F]{64}")
+_EMPTY_HASH = bytes(32)
+
+
+def hash_bytes(value: str | None) -> bytes | None:
+    """64-character hex SHA-256 -> its 32 bytes; '' (a tuple fact's context) -> zero bytes.
+
+    Pipeline identifiers are always hex SHA-256. Any other identifier is stored as
+    the SHA-256 of its text, the same mapping the upgrade applies to existing rows,
+    so joins between tables still match.
+    """
+    if value is None:
+        return None
+    if value == "":
+        return _EMPTY_HASH
+    if _HEX_DIGEST.fullmatch(value):
+        return bytes.fromhex(value)
+    return hashlib.sha256(value.encode("utf-8")).digest()
+
+
+def encode_hash_columns(table_name: str, table: pa.Table) -> pa.Table:
+    """Replace hex hash columns with `fixed_size_binary(32)` for a ClickHouse insert."""
+    binary = pa.binary(32)
+    arrays = HASH_ARRAY_COLUMNS.get(table_name, frozenset())
+    for name in HASH_COLUMNS.get(table_name, frozenset()) | arrays:
+        index = table.schema.get_field_index(name)
+        if index < 0:
+            continue
+        field = table.schema.field(index)
+        if name in arrays:
+            values = [
+                None if items is None else [hash_bytes(item) for item in items]
+                for items in table.column(index).to_pylist()
+            ]
+            column = pa.array(values, type=pa.list_(binary))
+            field = pa.field(name, pa.list_(binary), field.nullable)
+        else:
+            column = pa.array(
+                [hash_bytes(item) for item in table.column(index).to_pylist()], binary
+            )
+            field = pa.field(name, binary, field.nullable)
+        table = table.set_column(index, field, column)
+    return table
+
+
 def validate_canonical_facts(facts: Sequence[CanonicalFact]) -> None:
     """Reject canonical facts missing mapping lineage before any database write."""
     for fact in facts:
@@ -492,16 +679,31 @@ def iter_xbrl_tables(
     entity: str,
     batch_rows: int,
     batch_bytes: int,
+    *,
+    target: str = "silver",
 ) -> Iterator[pa.Table]:
-    """Convert bounded entity groups, retaining only one Arrow table at a time."""
+    """Convert bounded entity groups, retaining only one Arrow table at a time.
+
+    `target="silver"` gives the lossless Parquet form (every concept, every raw
+    value); `target="clickhouse"` gives the slim ClickHouse form: extension concepts
+    only (`taxonomy_concepts` is its own entity there) and conditional raw values.
+    """
     if batch_rows < 1 or batch_bytes < 1:
         raise ValueError("Arrow batch budgets must be positive")
+    if target not in {"silver", "clickhouse"}:
+        raise ValueError(f"Unknown table target: {target}")
+    clickhouse = target == "clickhouse"
     build = {
         "contexts": contexts_table,
-        "concepts": concepts_table,
-        "facts": facts_table,
+        "concepts": concepts_table if clickhouse else silver_concepts_table,
+        "taxonomy_concepts": taxonomy_concepts_table,
+        "facts": facts_table if clickhouse else silver_facts_table,
         "relationships": relationships_table,
         "footnotes": footnotes_table,
+        "roles": roles_table,
+        "statement_lines": _statement_lines_builder(bundle),
+        "cover_pages": _with_bundle(bundle, cover_pages_table),
+        "segment_facts": _with_bundle(bundle, segment_facts_table),
     }[entity]
 
     def bounded(table: pa.Table) -> Iterator[pa.Table]:
@@ -516,17 +718,210 @@ def iter_xbrl_tables(
 
     records: list[Any] = []
     size = 0
-    for record in getattr(bundle, entity):
-        record_size = len(record.model_dump_json().encode("utf-8")) + 512
+    for record in xbrl_entity_records(bundle, entity):
+        record_size = _record_size(record)
         if record_size > batch_bytes:
             raise WarehouseWriteError(f"Single {entity} record exceeds Arrow byte budget")
         if records and (len(records) >= batch_rows or size + record_size > batch_bytes):
-            yield from bounded(build(bundle.model_copy(update={entity: tuple(records)})))
+            yield from bounded(_build_chunk(build, bundle, entity, records))
             records, size = [], 0
         records.append(record)
         size += record_size
     if records:
-        yield from bounded(build(bundle.model_copy(update={entity: tuple(records)})))
+        yield from bounded(_build_chunk(build, bundle, entity, records))
+
+
+XBRL_ENTITIES = (
+    "contexts",
+    "concepts",
+    "facts",
+    "relationships",
+    "footnotes",
+    "roles",
+    "statement_lines",
+    "cover_pages",
+    "segment_facts",
+)
+# Entities derived from the bundle rather than stored on it.
+DERIVED_XBRL_ENTITIES = frozenset({"statement_lines", "cover_pages", "segment_facts"})
+
+
+def xbrl_entity_records(bundle: XbrlExtractionBundle, entity: str) -> Sequence[Any]:
+    """The records one entity table holds for a bundle."""
+    if entity == "taxonomy_concepts":
+        return tuple(concept for concept in bundle.concepts if not concept.is_extension)
+    if entity == "statement_lines":
+        return build_statement_lines(bundle)
+    if entity == "cover_pages":
+        return (cover_page(bundle),)
+    if entity == "segment_facts":
+        return segment_rows(bundle)
+    return tuple(getattr(bundle, entity))
+
+
+def _record_size(record: Any) -> int:
+    if isinstance(record, StatementLine | CoverPage | SegmentRow):
+        return len(_json(asdict(record)).encode("utf-8")) + 512
+    return len(record.model_dump_json().encode("utf-8")) + 512
+
+
+def _build_chunk(
+    build: Any, bundle: XbrlExtractionBundle, entity: str, records: list[Any]
+) -> pa.Table:
+    if entity in DERIVED_XBRL_ENTITIES:
+        return build(records)
+    source = "concepts" if entity == "taxonomy_concepts" else entity
+    return build(bundle.model_copy(update={source: tuple(records)}))
+
+
+def roles_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    kinds = classify_roles(bundle) if bundle.roles else {}
+    rows = [
+        {
+            "accession": bundle.filing.accession,
+            "role_uri": role.role_uri,
+            "definition": role.definition,
+            "used_on": list(role.used_on),
+            "sort_code": role.sort_code,
+            "category": role.category,
+            "statement_kind": kinds[role.role_uri].value if role.role_uri in kinds else None,
+            "extraction_revision": bundle.extraction_revision,
+            "_row_hash": stable_json_hash(
+                {"accession": bundle.filing.accession, "role": role.model_dump(mode="json")}
+            ),
+            "_ingested_at": bundle.metadata.extracted_at,
+        }
+        for role in bundle.roles
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("roles"))
+
+
+def _statement_lines_builder(bundle: XbrlExtractionBundle) -> Any:
+    def build(lines: list[StatementLine]) -> pa.Table:
+        return statement_lines_table(bundle, lines)
+
+    return build
+
+
+def _with_bundle(bundle: XbrlExtractionBundle, build: Any) -> Any:
+    def bound(records: list[Any]) -> pa.Table:
+        return build(bundle, records)
+
+    return bound
+
+
+def cover_pages_table(
+    bundle: XbrlExtractionBundle, pages: Sequence[CoverPage] | None = None
+) -> pa.Table:
+    """The filing's cover page (one row; see `normalization.disclosures.cover_page`)."""
+    selected = (cover_page(bundle),) if pages is None else pages
+    rows = [
+        {
+            **_filing_columns(bundle),
+            "document_type": page.document_type,
+            "period_end_date": page.period_end_date,
+            "registrant_name": page.registrant_name,
+            "filer_category": page.filer_category,
+            "amendment": _optional_int(page.amendment),
+            "trading_symbol": page.trading_symbol,
+            "exchange": page.exchange,
+            "auditor_name": page.auditor_name,
+            "shares_outstanding": page.shares_outstanding,
+            "shares_outstanding_date": page.shares_outstanding_date,
+            "public_float": page.public_float,
+            "security_members": [item.member for item in page.securities],
+            "security_titles": [item.title for item in page.securities],
+            "security_symbols": [item.trading_symbol for item in page.securities],
+            "security_exchanges": [item.exchange for item in page.securities],
+            **_revision_columns(bundle, {"cover_page": asdict(page)}),
+        }
+        for page in selected
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("cover_pages"))
+
+
+def segment_facts_table(
+    bundle: XbrlExtractionBundle, segments: Sequence[SegmentRow] | None = None
+) -> pa.Table:
+    """Breakdown facts (see `normalization.disclosures.segment_rows`)."""
+    selected = segment_rows(bundle) if segments is None else segments
+    rows = [
+        {
+            **_filing_columns(bundle),
+            "fact_id": row.fact_id,
+            "concept_qname": row.concept_qname,
+            "axis": row.axis,
+            "member_label": row.member_label,
+            "member_axes": [member.axis for member in row.members],
+            "member_qnames": [member.qname for member in row.members],
+            "member_labels": [member.label for member in row.members],
+            "value": row.value,
+            "unit": row.unit,
+            "period_start": row.period_start,
+            "period_end": row.period_end,
+            "period_instant": row.period_instant,
+            "is_elimination": int(row.is_elimination),
+            **_revision_columns(bundle, {"segment_fact": asdict(row)}),
+        }
+        for row in selected
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("segment_facts"))
+
+
+def _filing_columns(bundle: XbrlExtractionBundle) -> dict[str, Any]:
+    return {
+        "accession": bundle.filing.accession,
+        "cik": bundle.filing.cik,
+        "form": bundle.filing.form,
+        "filed_date": bundle.filing.filed_date,
+    }
+
+
+def _revision_columns(bundle: XbrlExtractionBundle, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "extraction_revision": bundle.extraction_revision,
+        "_row_hash": stable_json_hash({**payload, "revision": bundle.extraction_revision}),
+        "_ingested_at": bundle.metadata.extracted_at,
+    }
+
+
+def statement_lines_table(
+    bundle: XbrlExtractionBundle, lines: Sequence[StatementLine] | None = None
+) -> pa.Table:
+    """One row per line; each line's values are parallel arrays (one entry per period)."""
+    selected = build_statement_lines(bundle) if lines is None else lines
+    rows = [
+        {
+            "accession": line.accession,
+            "cik": bundle.filing.cik,
+            "form": bundle.filing.form,
+            "filed_date": bundle.filing.filed_date,
+            "role_uri": line.role_uri,
+            "statement_kind": line.statement_kind.value,
+            "line_number": line.line_number,
+            "depth": line.depth,
+            "concept_qname": line.concept_qname,
+            "parent_concept_qname": line.parent_concept_qname,
+            "label": line.label,
+            "preferred_label_role": line.preferred_label_role,
+            "is_abstract": int(line.is_abstract),
+            "is_total": int(line.is_total),
+            "line_role": line.line_role.value,
+            "value_fact_ids": [value.fact_id for value in line.values],
+            "value_concept_qnames": [value.concept_qname or "" for value in line.values],
+            "value_period_starts": [value.period_start for value in line.values],
+            "value_period_ends": [value.period_end for value in line.values],
+            "value_period_instants": [value.period_instant for value in line.values],
+            "value_decimals": [value.value_decimal for value in line.values],
+            "extraction_revision": bundle.extraction_revision,
+            "_row_hash": stable_json_hash(
+                {"line": asdict(line), "revision": bundle.extraction_revision}
+            ),
+            "_ingested_at": bundle.metadata.extracted_at,
+        }
+        for line in selected
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("statement_lines"))
 
 
 def contexts_table(bundle: XbrlExtractionBundle) -> pa.Table:
@@ -562,6 +957,45 @@ def contexts_table(bundle: XbrlExtractionBundle) -> pa.Table:
 
 
 def concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    """The filing's extension concepts (ClickHouse `xbrl_concepts`)."""
+    table = silver_concepts_table(bundle)
+    import pyarrow.compute as pc
+
+    return table.filter(pc.equal(table.column("is_extension"), 1))
+
+
+def taxonomy_concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    """Standard taxonomy concepts, keyed by concept and taxonomy version only.
+
+    `_row_hash` covers the concept alone, so identical concepts from different
+    filings are the same row in `taxonomy_concepts`.
+    """
+    rows = [
+        {
+            "concept_namespace": concept.namespace,
+            "concept_name": concept.name,
+            "concept_qname": concept.qname,
+            "taxonomy_version": concept.taxonomy_version,
+            "datatype_qname": concept.datatype_qname,
+            "substitution_group_qname": concept.substitution_group_qname,
+            "period_type": concept.period_type,
+            "balance": concept.balance,
+            "abstract": int(concept.abstract),
+            "nillable": int(concept.nillable),
+            "labels_json": _labels_json(concept.labels),
+            "documentation": concept.documentation,
+            "references_json": (None if not concept.references else _json(concept.references)),
+            "_row_hash": stable_json_hash({"concept": concept.model_dump(mode="json")}),
+            "_ingested_at": bundle.metadata.extracted_at,
+        }
+        for concept in bundle.concepts
+        if not concept.is_extension
+    ]
+    return pa.Table.from_pylist(rows, schema=taxonomy_concepts_schema())
+
+
+def silver_concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    """Every concept of the filing (silver Parquet keeps the full set)."""
     rows = []
     for concept in bundle.concepts:
         rows.append(
@@ -595,6 +1029,50 @@ def concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
 
 
 def facts_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    """Facts for ClickHouse: `raw_value` is dropped when it equals the typed value.
+
+    `raw_value_scale` then records how the view re-renders it: the number of
+    fraction digits of a numeric value, or 0 for text equal to `value_text`.
+    """
+    rows = []
+    for row, fact in zip(_fact_rows(bundle), bundle.facts, strict=True):
+        scale = raw_value_scale(fact)
+        raw = None if scale is not None else row["raw_value"]
+        rows.append({**row, "raw_value": raw, "raw_value_scale": scale})
+    return pa.Table.from_pylist(rows, schema=clickhouse_facts_schema())
+
+
+def silver_facts_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    """Facts with every raw value (silver Parquet stays lossless)."""
+    return pa.Table.from_pylist(_fact_rows(bundle), schema=xbrl_warehouse_schema("facts"))
+
+
+_PLAIN_DECIMAL = re.compile(r"-?\d+(?:\.(\d+))?")
+
+
+def raw_value_scale(fact: XbrlFact) -> int | None:
+    """None to keep `raw_value`; otherwise how to rebuild it exactly from the typed value.
+
+    Numeric: `raw_value == str(value_decimal)` in plain notation with at most 18
+    fraction digits (the stored scale) gives the fraction digit count. Text:
+    `raw_value == value_text` gives 0. Nil, boolean, and date facts, and facts
+    without a typed value, keep their raw value.
+    """
+    if fact.raw_value is None or fact.is_nil:
+        return None
+    if fact.value_kind is FactValueKind.NUMERIC and fact.value_decimal is not None:
+        rendered = str(fact.value_decimal)
+        match = _PLAIN_DECIMAL.fullmatch(rendered)
+        if rendered != fact.raw_value or match is None:
+            return None
+        digits = len(match.group(1) or "")
+        return digits if digits <= 18 else None
+    if fact.value_kind is FactValueKind.TEXT and fact.value_text is not None:
+        return 0 if fact.raw_value == fact.value_text else None
+    return None
+
+
+def _fact_rows(bundle: XbrlExtractionBundle) -> list[dict[str, Any]]:
     rows = []
     for fact in bundle.facts:
         rows.append(
@@ -608,10 +1086,11 @@ def facts_table(bundle: XbrlExtractionBundle) -> pa.Table:
                 bundle.extraction_revision,
                 fiscal_year=bundle.filing.fiscal_year,
                 fiscal_period=bundle.filing.fiscal_period,
+                accepted_at=bundle.filing.accepted_at,
                 ingested_at=bundle.metadata.extracted_at,
             )
         )
-    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("facts"))
+    return rows
 
 
 def relationships_table(bundle: XbrlExtractionBundle) -> pa.Table:
@@ -688,6 +1167,7 @@ def fact_row(
     *,
     fiscal_year: int | None = None,
     fiscal_period: str | None = None,
+    accepted_at: datetime | None = None,
     ingested_at: datetime | None = None,
 ) -> dict[str, Any]:
     return {
@@ -699,6 +1179,7 @@ def fact_row(
         "filed_date": filed_date,
         "fiscal_year": fiscal_year,
         "fiscal_period": fiscal_period,
+        "accepted_at": accepted_at,
         "concept_namespace": fact.concept_namespace,
         "concept_name": fact.concept_name,
         "concept_qname": fact.concept_qname,
@@ -771,6 +1252,12 @@ def _canonical_fact_row(fact: CanonicalFact) -> dict[str, Any]:
         "mapping_confidence": fact.mapping_confidence,
         "mapping_explanation": fact.mapping_explanation,
         "extraction_revision": fact.extraction_revision,
+        "accepted_at": fact.accepted_at,
+        "concept_namespace": fact.concept_namespace,
+        "concept_qname": fact.concept_qname,
+        "fiscal_year": fact.fiscal_year,
+        "fiscal_period": fact.fiscal_period,
+        "report_date": fact.report_date,
         "_row_hash": stable_json_hash(fact.model_dump(mode="json")),
         "_ingested_at": _now(),
     }
@@ -830,6 +1317,31 @@ def _ddl_columns(statement: str) -> dict[str, tuple[str, str, str]]:
             parts[1].strip() if len(parts) == 2 else "",
         )
     return columns
+
+
+def _is_hash_encoding(table: str, column: str, source: str, target: str) -> bool:
+    """A hex hash column (FixedString(64)/String) becoming 32 raw bytes."""
+    source, target = _normalize_sql(source), _normalize_sql(target)
+    if column in HASH_COLUMNS.get(table, frozenset()):
+        return target == "fixedstring(32)" and source in {"fixedstring(64)", "string"}
+    if column in HASH_ARRAY_COLUMNS.get(table, frozenset()):
+        return target == "array(fixedstring(32))" and source in {
+            "array(fixedstring(64))",
+            "array(string)",
+        }
+    return False
+
+
+def _hash_projection(column: str, target: str) -> str:
+    """SQL matching `hash_bytes`: hex digests -> bytes, blanks -> zero bytes, else SHA-256."""
+    one = (
+        "if(match(toString({x}), '^[0-9a-fA-F]{{64}}$'), unhex(toString({x})), "
+        "if(replaceAll(toString({x}), '\\0', '') = '', '', "
+        "toString(SHA256(replaceAll(toString({x}), '\\0', '')))))"
+    )
+    if _normalize_sql(target).startswith("array("):
+        return f"arrayMap(x -> {one.format(x='x')}, {column}) AS {column}"
+    return f"{one.format(x=column)} AS {column}"
 
 
 def _preserving_type(source: str, target: str) -> bool:

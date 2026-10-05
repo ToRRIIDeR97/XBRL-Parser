@@ -33,22 +33,60 @@ def _json_chunks(value: Any) -> Iterator[bytes]:
         yield to_json(value)
 
 
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+_BUFFER_BYTES = 1024 * 1024
+
+
 def write_json(value: Any, path: Path, max_bytes: int) -> None:
-    """Serialize entity-by-entity without a whole-bundle dict/string/bytes copy."""
+    """Serialize entity-by-entity without a whole-bundle dict/string/bytes copy.
+
+    A path ending in `.zst` is written as a zstd stream; `max_bytes` always bounds
+    the uncompressed JSON.
+    """
     size = 0
+    pending = bytearray()
     try:
-        with path.open("wb") as output:
+        with _open_output(path) as output:
             for chunk in _json_chunks(value):
                 size += len(chunk)
                 if size > max_bytes:
                     raise XbrlExtractionError("Extraction exceeds configured serialized byte limit")
-                output.write(chunk)
+                pending += chunk
+                if len(pending) >= _BUFFER_BYTES:
+                    output.write(bytes(pending))
+                    pending.clear()
+            if pending:
+                output.write(bytes(pending))
     except BaseException:
         path.unlink(missing_ok=True)
         raise
 
 
 def read_bundle(path: Path, max_bytes: int) -> XbrlExtractionBundle:
-    if path.stat().st_size > max_bytes:
-        raise XbrlExtractionError("Extraction exceeds configured serialized byte limit")
-    return XbrlExtractionBundle.model_validate_json(path.read_bytes())
+    """Read plain or zstd-compressed extraction JSON (detected by content).
+
+    `max_bytes` bounds the uncompressed JSON, checked while decompressing.
+    """
+    with path.open("rb") as handle:
+        compressed = handle.read(len(_ZSTD_MAGIC)) == _ZSTD_MAGIC
+    if not compressed:
+        if path.stat().st_size > max_bytes:
+            raise XbrlExtractionError("Extraction exceeds configured serialized byte limit")
+        return XbrlExtractionBundle.model_validate_json(path.read_bytes())
+    import pyarrow as pa
+
+    data = bytearray()
+    with pa.CompressedInputStream(pa.OSFile(str(path), "rb"), "zstd") as source:
+        while chunk := source.read(_BUFFER_BYTES):
+            data += chunk
+            if len(data) > max_bytes:
+                raise XbrlExtractionError("Extraction exceeds configured serialized byte limit")
+    return XbrlExtractionBundle.model_validate_json(data)
+
+
+def _open_output(path: Path) -> Any:
+    if path.suffix != ".zst":
+        return path.open("wb")
+    import pyarrow as pa
+
+    return pa.CompressedOutputStream(str(path), "zstd")

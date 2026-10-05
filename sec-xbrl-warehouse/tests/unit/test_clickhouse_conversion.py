@@ -24,6 +24,7 @@ from sec_xbrl_warehouse.domain.xbrl import (
 from sec_xbrl_warehouse.exceptions import WarehouseWriteError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     canonical_fact_schema,
+    clickhouse_facts_schema,
     xbrl_warehouse_schema,
 )
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
@@ -32,6 +33,8 @@ from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     facts_table,
     footnotes_table,
     relationships_table,
+    silver_concepts_table,
+    silver_facts_table,
     validate_canonical_facts,
 )
 
@@ -149,14 +152,19 @@ def test_contexts_table_matches_arrow_contract() -> None:
 
 
 def test_concepts_table_matches_arrow_contract() -> None:
-    table = concepts_table(_bundle())
+    # Silver keeps every concept; ClickHouse `xbrl_concepts` keeps extensions only.
+    table = silver_concepts_table(_bundle())
     assert table.schema == xbrl_warehouse_schema("concepts")
     assert table.num_rows == 1
+    extensions = concepts_table(_bundle())
+    assert extensions.schema == xbrl_warehouse_schema("concepts")
+    assert extensions.num_rows == sum(concept.is_extension for concept in _bundle().concepts)
 
 
 def test_facts_table_matches_arrow_contract() -> None:
-    table = facts_table(_bundle())
+    table = silver_facts_table(_bundle())
     assert table.schema == xbrl_warehouse_schema("facts")
+    assert facts_table(_bundle()).schema == clickhouse_facts_schema()
     assert table.num_rows == 1
     assert table.column("value_decimal")[0].as_py() == Decimal("123456789")
     assert table.column("unit_numerator_json")[0].as_py() == '["iso4217:USD"]'
@@ -232,3 +240,64 @@ def test_canonical_fact_conversion_produces_valid_arrow() -> None:
     table = pa.Table.from_pylist([row], schema=canonical_fact_schema())
     assert table.num_rows == 1
     assert table.column("canonical_metric")[0].as_py() == "Revenue"
+
+
+def test_hash_columns_encode_to_32_bytes() -> None:
+    import hashlib
+
+    import pyarrow as pa
+
+    from sec_xbrl_warehouse.infrastructure.storage.clickhouse import encode_hash_columns
+
+    digest = "ab" * 32
+    table = pa.table(
+        {
+            "fact_id": [digest],
+            "context_hash": [""],
+            "footnote_ids": [[digest]],
+            "concept_name": ["Revenues"],
+        }
+    )
+    encoded = encode_hash_columns("xbrl_facts", table)
+    assert encoded.column("fact_id")[0].as_py() == bytes.fromhex(digest)
+    assert encoded.column("context_hash")[0].as_py() == bytes(32)
+    assert encoded.column("footnote_ids")[0].as_py() == [bytes.fromhex(digest)]
+    assert encoded.column("concept_name")[0].as_py() == "Revenues"
+    assert encode_hash_columns("sec_tags", table).equals(table)
+    # A non-hex identifier is stored as its SHA-256 (matching the upgrade's mapping).
+    other = encode_hash_columns("xbrl_facts", table.set_column(0, "fact_id", pa.array(["f1"])))
+    assert other.column("fact_id")[0].as_py() == hashlib.sha256(b"f1").digest()
+
+
+@pytest.mark.parametrize(
+    ("kind", "raw", "decimal", "text", "nil", "scale"),
+    [
+        ("numeric", "1000", "1000", None, False, 0),
+        ("numeric", "1.50", "1.50", None, False, 2),
+        ("numeric", "-5", "-5", None, False, 0),
+        ("numeric", "1,000", "1000", None, False, None),
+        ("numeric", "1E+3", "1E+3", None, False, None),
+        ("numeric", "1000", None, None, False, None),
+        ("numeric", "", None, None, True, None),
+        ("text", "Plain", None, "Plain", False, 0),
+        ("text", "<p>Plain</p>", None, "Plain", False, None),
+        ("boolean", "true", None, None, False, None),
+    ],
+)
+def test_raw_value_scale_rule(kind, raw, decimal, text, nil, scale) -> None:
+    from sec_xbrl_warehouse.infrastructure.storage.clickhouse import raw_value_scale
+
+    fact = (
+        _bundle()
+        .facts[0]
+        .model_copy(
+            update={
+                "value_kind": FactValueKind(kind),
+                "raw_value": raw,
+                "value_decimal": Decimal(decimal) if decimal is not None else None,
+                "value_text": text,
+                "is_nil": nil,
+            }
+        )
+    )
+    assert raw_value_scale(fact) == scale

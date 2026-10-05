@@ -270,6 +270,7 @@ def xbrl_warehouse_schema(entity: str) -> Any:
             pa.field("filed_date", pa.date32(), False),
             pa.field("fiscal_year", pa.int16()),
             pa.field("fiscal_period", pa.string()),
+            pa.field("accepted_at", pa.timestamp("ms", tz="UTC")),
             pa.field("concept_namespace", pa.string(), False),
             pa.field("concept_name", pa.string(), False),
             pa.field("concept_qname", pa.string(), False),
@@ -337,11 +338,116 @@ def xbrl_warehouse_schema(entity: str) -> Any:
             pa.field("linked_fact_ids", pa.list_(pa.string()), False),
             *common_revision,
         ],
+        "roles": [
+            pa.field("accession", pa.string(), False),
+            pa.field("role_uri", pa.string(), False),
+            pa.field("definition", pa.string()),
+            pa.field("used_on", pa.list_(pa.string()), False),
+            pa.field("sort_code", pa.string()),
+            pa.field("category", pa.string(), False),
+            pa.field("statement_kind", pa.string()),
+            *common_revision,
+        ],
+        "statement_lines": [
+            pa.field("accession", pa.string(), False),
+            pa.field("cik", pa.uint64(), False),
+            pa.field("form", pa.string(), False),
+            pa.field("filed_date", pa.date32(), False),
+            pa.field("role_uri", pa.string(), False),
+            pa.field("statement_kind", pa.string(), False),
+            pa.field("line_number", pa.uint32(), False),
+            pa.field("depth", pa.uint16(), False),
+            pa.field("concept_qname", pa.string(), False),
+            pa.field("parent_concept_qname", pa.string()),
+            pa.field("label", pa.string(), False),
+            pa.field("preferred_label_role", pa.string()),
+            pa.field("is_abstract", pa.uint8(), False),
+            pa.field("is_total", pa.uint8(), False),
+            pa.field("line_role", pa.string(), False),
+            pa.field("value_fact_ids", pa.list_(pa.string()), False),
+            pa.field("value_concept_qnames", pa.list_(pa.string()), False),
+            pa.field("value_period_starts", pa.list_(pa.date32()), False),
+            pa.field("value_period_ends", pa.list_(pa.date32()), False),
+            pa.field("value_period_instants", pa.list_(pa.date32()), False),
+            pa.field("value_decimals", pa.list_(decimal), False),
+            *common_revision,
+        ],
+        "cover_pages": [
+            pa.field("accession", pa.string(), False),
+            pa.field("cik", pa.uint64(), False),
+            pa.field("form", pa.string(), False),
+            pa.field("filed_date", pa.date32(), False),
+            pa.field("document_type", pa.string()),
+            pa.field("period_end_date", pa.date32()),
+            pa.field("registrant_name", pa.string()),
+            pa.field("filer_category", pa.string()),
+            pa.field("amendment", pa.uint8()),
+            pa.field("trading_symbol", pa.string()),
+            pa.field("exchange", pa.string()),
+            pa.field("auditor_name", pa.string()),
+            pa.field("shares_outstanding", decimal),
+            pa.field("shares_outstanding_date", pa.date32()),
+            pa.field("public_float", decimal),
+            pa.field("security_members", pa.list_(pa.string()), False),
+            pa.field("security_titles", pa.list_(pa.string()), False),
+            pa.field("security_symbols", pa.list_(pa.string()), False),
+            pa.field("security_exchanges", pa.list_(pa.string()), False),
+            *common_revision,
+        ],
+        "segment_facts": [
+            pa.field("accession", pa.string(), False),
+            pa.field("cik", pa.uint64(), False),
+            pa.field("form", pa.string(), False),
+            pa.field("filed_date", pa.date32(), False),
+            pa.field("fact_id", pa.string(), False),
+            pa.field("concept_qname", pa.string(), False),
+            pa.field("axis", pa.string(), False),
+            pa.field("member_label", pa.string(), False),
+            pa.field("member_axes", pa.list_(pa.string()), False),
+            pa.field("member_qnames", pa.list_(pa.string()), False),
+            pa.field("member_labels", pa.list_(pa.string()), False),
+            pa.field("value", decimal, False),
+            pa.field("unit", pa.string()),
+            pa.field("period_start", pa.date32()),
+            pa.field("period_end", pa.date32()),
+            pa.field("period_instant", pa.date32()),
+            pa.field("is_elimination", pa.uint8(), False),
+            *common_revision,
+        ],
     }
     try:
         return pa.schema(schemas[entity])
     except KeyError as exc:
         raise ValueError(f"Unknown XBRL entity schema: {entity}") from exc
+
+
+def clickhouse_facts_schema() -> Any:
+    """`xbrl_facts` as inserted into ClickHouse: the silver schema plus `raw_value_scale`."""
+    pa = _pa()
+    return xbrl_warehouse_schema("facts").append(pa.field("raw_value_scale", pa.uint8()))
+
+
+def taxonomy_concepts_schema() -> Any:
+    pa = _pa()
+    return pa.schema(
+        [
+            pa.field("concept_namespace", pa.string(), False),
+            pa.field("concept_name", pa.string(), False),
+            pa.field("concept_qname", pa.string(), False),
+            pa.field("taxonomy_version", pa.string()),
+            pa.field("datatype_qname", pa.string()),
+            pa.field("substitution_group_qname", pa.string()),
+            pa.field("period_type", pa.string()),
+            pa.field("balance", pa.string()),
+            pa.field("abstract", pa.uint8(), False),
+            pa.field("nillable", pa.uint8(), False),
+            pa.field("labels_json", pa.string(), False),
+            pa.field("documentation", pa.string()),
+            pa.field("references_json", pa.string()),
+            pa.field("_row_hash", pa.string(), False),
+            pa.field("_ingested_at", pa.timestamp("ms", tz="UTC"), False),
+        ]
+    )
 
 
 def canonical_fact_schema() -> Any:
@@ -369,6 +475,12 @@ def canonical_fact_schema() -> Any:
             pa.field("mapping_confidence", pa.float32(), False),
             pa.field("mapping_explanation", pa.string(), False),
             pa.field("extraction_revision", pa.uint32(), False),
+            pa.field("accepted_at", pa.timestamp("ms", tz="UTC")),
+            pa.field("concept_namespace", pa.string()),
+            pa.field("concept_qname", pa.string()),
+            pa.field("fiscal_year", pa.uint16()),
+            pa.field("fiscal_period", pa.string()),
+            pa.field("report_date", pa.date32()),
             pa.field("_row_hash", pa.string(), False),
             pa.field("_ingested_at", pa.timestamp("ms", tz="UTC"), False),
         ]

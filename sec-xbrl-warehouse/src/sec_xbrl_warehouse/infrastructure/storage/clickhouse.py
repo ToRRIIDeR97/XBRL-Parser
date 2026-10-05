@@ -690,6 +690,10 @@ def cover_pages_table(
             "shares_outstanding": page.shares_outstanding,
             "shares_outstanding_date": page.shares_outstanding_date,
             "public_float": page.public_float,
+            "security_members": [item.member for item in page.securities],
+            "security_titles": [item.title for item in page.securities],
+            "security_symbols": [item.trading_symbol for item in page.securities],
+            "security_exchanges": [item.exchange for item in page.securities],
             **_revision_columns(bundle, {"cover_page": asdict(page)}),
         }
         for page in selected

@@ -229,7 +229,13 @@ completed before these entities existed have no rows until they are re-extracted
   several values the first in document order wins; a missing fact gives NULL. Shares
   outstanding sums one value per `StatementClassOfStockAxis` member at the latest
   instant when no non-dimensional value exists. Facts on any other axis, including
-  co-registrants on `dei:LegalEntityAxis`, are ignored.
+  co-registrants on `dei:LegalEntityAxis`, are ignored. The exception is
+  per-security data: `TradingSymbol`, `SecurityExchangeName`, and `Security12bTitle`
+  on the class-of-stock axis fill the parallel arrays `security_members`,
+  `security_titles`, `security_symbols`, `security_exchanges` (document order).
+  Without a non-dimensional ticker or exchange, both come from one security: the one
+  matching a non-dimensional ticker, else common stock (`CommonStockMember` or a title
+  containing "Common Stock"), else the first listed.
 - **`xbrl_segment_facts` / `v_segment_facts_latest`.** One row per numeric,
   first-ordinal fact whose dimensions are **all** on these axes: `us-gaap:
   StatementBusinessSegmentsAxis` (`segment`), `srt:ProductOrServiceAxis` (`product`),

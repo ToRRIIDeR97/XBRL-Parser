@@ -245,3 +245,72 @@ def test_disclosure_tables_match_their_arrow_contracts() -> None:
         ["Services"],
         D(5),
     )
+
+
+def _security(name, value, member):
+    return _fact(DEI, name, value, text=True, dims=(_dim(*CLASS, GAAP, member),))
+
+
+def test_multi_security_cover_takes_ticker_and_exchange_from_common_stock() -> None:
+    # AAPL-shaped: listed notes come first in document order, then common stock.
+    page = cover_page(
+        _bundle(
+            [
+                _security("Security12bTitle", "0.000% Notes due 2025", "A0.000NotesDue2025Member"),
+                _security("TradingSymbol", "AAPL", "A0.000NotesDue2025Member"),
+                _security("SecurityExchangeName", "NYSE", "A0.000NotesDue2025Member"),
+                _security(
+                    "Security12bTitle",
+                    "Common Stock, $0.00001 par value per share",
+                    "CommonStockMember",
+                ),
+                _security("TradingSymbol", "AAPL", "CommonStockMember"),
+                _security("SecurityExchangeName", "NASDAQ", "CommonStockMember"),
+            ]
+        )
+    )
+    assert (page.trading_symbol, page.exchange) == ("AAPL", "NASDAQ")
+    assert [(s.member, s.trading_symbol, s.exchange) for s in page.securities] == [
+        ("us-gaap:A0.000NotesDue2025Member", "AAPL", "NYSE"),
+        ("us-gaap:CommonStockMember", "AAPL", "NASDAQ"),
+    ]
+    assert page.securities[1].title == "Common Stock, $0.00001 par value per share"
+
+
+def test_cover_security_fallbacks() -> None:
+    # Common stock found by its 12(b) title; else the first listed security.
+    titled = cover_page(
+        _bundle(
+            [
+                _security("TradingSymbol", "XPRA", "SeriesAPreferredMember"),
+                _security("SecurityExchangeName", "NYSE", "SeriesAPreferredMember"),
+                _security("Security12bTitle", "Class A Common Stock", "CommonClassAMember"),
+                _security("TradingSymbol", "XA", "CommonClassAMember"),
+                _security("SecurityExchangeName", "NASDAQ", "CommonClassAMember"),
+            ]
+        )
+    )
+    assert (titled.trading_symbol, titled.exchange) == ("XA", "NASDAQ")
+    first = cover_page(
+        _bundle(
+            [
+                _security("TradingSymbol", "XPRA", "SeriesAPreferredMember"),
+                _security("SecurityExchangeName", "NYSE", "SeriesAPreferredMember"),
+                _security("TradingSymbol", "XPRB", "SeriesBPreferredMember"),
+            ]
+        )
+    )
+    assert (first.trading_symbol, first.exchange) == ("XPRA", "NYSE")
+    # A non-dimensional ticker wins; the exchange comes from the matching security.
+    plain = cover_page(
+        _bundle(
+            [
+                _fact(DEI, "TradingSymbol", "XPRB", text=True),
+                _security("TradingSymbol", "XPRA", "SeriesAPreferredMember"),
+                _security("SecurityExchangeName", "NYSE", "SeriesAPreferredMember"),
+                _security("TradingSymbol", "XPRB", "SeriesBPreferredMember"),
+                _security("SecurityExchangeName", "NASDAQ", "SeriesBPreferredMember"),
+            ]
+        )
+    )
+    assert (plain.trading_symbol, plain.exchange) == ("XPRB", "NASDAQ")

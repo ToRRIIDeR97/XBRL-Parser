@@ -388,6 +388,10 @@ def xbrl_warehouse_schema(entity: str) -> Any:
             pa.field("shares_outstanding", decimal),
             pa.field("shares_outstanding_date", pa.date32()),
             pa.field("public_float", decimal),
+            pa.field("security_members", pa.list_(pa.string()), False),
+            pa.field("security_titles", pa.list_(pa.string()), False),
+            pa.field("security_symbols", pa.list_(pa.string()), False),
+            pa.field("security_exchanges", pa.list_(pa.string()), False),
             *common_revision,
         ],
         "segment_facts": [

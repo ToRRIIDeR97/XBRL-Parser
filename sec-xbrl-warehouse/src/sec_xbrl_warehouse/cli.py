@@ -610,16 +610,18 @@ async def _mapping_approve_seeds(
         for item in results:
             if item.created:
                 outcome = "approved"
-            elif item.already_approved:
-                outcome = "already approved"
-            else:
+            elif item.would_create:
                 outcome = "would approve"
+            else:
+                outcome = "already approved"
             table.add_row(item.metric, item.namespace, item.concept_name, outcome)
         console.print(table)
-        created = sum(item.created for item in results)
-        console.print(
-            f"{'Dry run: ' if dry_run else ''}{len(results)} candidates, {created} approved now"
-        )
+        if dry_run:
+            pending = sum(item.would_create for item in results)
+            console.print(f"Dry run: {len(results)} candidates, {pending} would be approved")
+        else:
+            created = sum(item.created for item in results)
+            console.print(f"{len(results)} candidates, {created} approved now")
     finally:
         await control.close()
 

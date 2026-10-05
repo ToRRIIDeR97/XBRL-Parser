@@ -40,7 +40,8 @@ xbrl-warehouse mapping approve-seeds --reviewer <name> --rationale <text> [--met
 ```
 
 which approves each selected candidate as a family mapping and records the reviewer
-and rationale. Mappings are append-only and versioned: repeating an identical
+and rationale. `--dry-run` writes nothing and marks each candidate a real run with the
+same reviewer and rationale would approve. Mappings are append-only and versioned: repeating an identical
 approval (same scope, validity, reviewer, and rationale) returns the existing version;
 a new reviewer or rationale records a new version.
 

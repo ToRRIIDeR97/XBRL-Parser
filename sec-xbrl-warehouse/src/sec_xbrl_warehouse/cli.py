@@ -79,6 +79,41 @@ def main() -> None:
     configure_logging(settings.log_level, json_logs=settings.env != "development")
 
 
+def _container_memory_limit() -> int | None:
+    """The cgroup memory limit in bytes, or None when unlimited or not in a container."""
+    for path in (
+        Path("/sys/fs/cgroup/memory.max"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text == "max" or not text.isdigit():
+            return None
+        value = int(text)
+        return None if value >= 1 << 60 else value  # cgroup v1 "unlimited"
+    return None
+
+
+def _worker_memory_check(settings: Settings, limit: int | None = None) -> tuple[str, bool, str]:
+    """`worker_concurrency` Arelle children must fit the container's memory limit."""
+    needed = settings.worker_concurrency * settings.arelle_memory_limit_bytes
+    limit = _container_memory_limit() if limit is None else limit
+    summary = (
+        f"{settings.worker_concurrency} x {settings.arelle_memory_limit_bytes / 1024**3:.1f} GiB"
+        f" = {needed / 1024**3:.1f} GiB"
+    )
+    if limit is None:
+        return ("Worker memory", True, f"{summary}; no container memory limit found")
+    return (
+        "Worker memory",
+        needed <= limit,
+        f"{summary} of {limit / 1024**3:.1f} GiB container limit"
+        + ("" if needed <= limit else "; lower XBRL_WORKER_CONCURRENCY"),
+    )
+
+
 def _taxonomy_package_check(settings: Settings) -> tuple[str, bool, str]:
     """Every enabled package verified; production must parse offline."""
     try:
@@ -156,6 +191,7 @@ def doctor(skip_sec_identity: bool = False) -> None:
     )
 
     checks.append(_taxonomy_package_check(settings))
+    checks.append(_worker_memory_check(settings))
 
     warehouse: ClickHouseWarehouse | None = None
     try:
@@ -383,7 +419,7 @@ async def _run_worker(job_types: list[JobType] | None = None) -> None:
     )
     REGISTRY.register(collector)
     try:
-        async with runtime_services(settings, control) as services:
+        async with runtime_services(settings, control, job_types) as services:
             await Worker(settings, control, build_handlers(services=services), job_types).run()
     finally:
         REGISTRY.unregister(collector)
@@ -426,9 +462,10 @@ async def _enqueue_filing(filing: FilingRef, revision: int) -> None:
     settings = get_settings()
     control = PostgresControlRepository(settings)
     try:
+        # fetch_filing downloads (SEC) and enqueues parse_filing for the revision.
         job_id = await control.enqueue_job(
-            job_type=JobType.INGEST_FILING.value,
-            idempotency_key=f"filing:{filing.accession}:{revision}",
+            job_type=JobType.FETCH_FILING.value,
+            idempotency_key=f"fetch:{filing.accession}:{revision}",
             payload={
                 "filing": filing.model_dump(mode="json"),
                 "extraction_revision": revision,

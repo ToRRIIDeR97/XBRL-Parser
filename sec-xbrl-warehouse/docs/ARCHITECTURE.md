@@ -167,6 +167,17 @@ The first implementation uses PostgreSQL as a queue:
 3. A heartbeat updates the lock timestamp.
 4. A stale lock becomes claimable after the configured timeout.
 5. Each stage writes a checkpoint so the next attempt resumes rather than restarts.
+6. A worker runs up to `XBRL_WORKER_CONCURRENCY` jobs at once, claiming only when a
+   slot is free; each job has its own lease, heartbeat, and checkpoint ownership.
+
+A filing is two jobs. `fetch_filing` downloads the package from the SEC into one
+archive, records the package and manifest pointers on the `filings` row, and enqueues
+`parse_filing`. `parse_filing` loads the stored manifest, runs Arelle, validation,
+silver and ClickHouse writes, canonical mapping, and the series rebuild, and never
+downloads (a missing package is a permanent `ArtifactIntegrityError`). Workers build
+the SEC client only for job types that send SEC traffic (`requires_sec`), so parse
+workers scale out beside the one SEC-active worker. Legacy `ingest_filing` jobs run
+both steps in one job.
 
 This keeps the local deployment small and avoids Redis/Kafka until throughput evidence supports adding them.
 

@@ -169,6 +169,10 @@ class ControlRepository(Protocol):
         self, manifest: FilingPackageManifest, revision: int | None = None
     ) -> None: ...
 
+    async def get_filing_manifest(self, accession: str) -> FilingPackageManifest | None:
+        """The filing's stored package manifest, or None when it was never fetched."""
+        ...
+
     async def record_validation_issues(self, issues: Sequence[ValidationIssue]) -> None: ...
 
 

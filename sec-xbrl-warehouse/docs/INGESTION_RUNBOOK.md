@@ -22,6 +22,13 @@ xbrl-warehouse worker run
 
 ## Incremental filings
 
+Each filing is two jobs: `fetch_filing` (SEC download, then it enqueues the parse) and
+`parse_filing` (Arelle, validation, silver and ClickHouse writes, canonical mapping,
+series rebuild; no SEC download). Discovery and `filing enqueue` queue `fetch_filing`
+keyed `fetch:<accession>:<revision>`; a completed fetch queues `parse_filing` keyed
+`parse:<accession>:<revision>`. Queued legacy `ingest_filing` jobs still run both steps
+in one job.
+
 1. Discover the latest daily XBRL index.
 2. Normalize and upsert filing references.
 3. Enqueue accessions not already complete for the current extraction revision.
@@ -42,8 +49,16 @@ job idempotency key, and older lineage is retained:
 xbrl-warehouse filing enqueue --accession <accession> --cik <cik> \
   --company-name <name> --form <form> --filed-date <YYYY-MM-DD> \
   --primary-document <file>
-xbrl-warehouse worker run --job-type ingest_filing
+xbrl-warehouse worker run --job-type fetch_filing                 # SEC-active
+XBRL_WORKER_CONCURRENCY=4 XBRL_ARELLE_OFFLINE=true \
+  xbrl-warehouse worker run --job-type parse_filing               # no SEC client
 ```
+
+A parse job reads the filing's stored manifest (`filings.manifest_object_key`, set by
+the fetch). Without one it fails permanently with `ArtifactIntegrityError` ("No stored
+package ... run fetch_filing first"); it never downloads. Filings fetched before
+migration 0006 have no pointer: enqueue them again (the fetch reuses the cached
+manifest and archive, so it makes only the index request).
 
 ### Diagnostics per extraction revision
 
@@ -71,8 +86,9 @@ xbrl-warehouse mapping remap --epoch <date>
 xbrl-warehouse worker run --job-type map_canonical
 ```
 
-`map_canonical` needs the saved extraction of a completed `ingest_filing` job for that
-revision; filings without one fail with "No saved extraction" and need re-ingestion.
+`map_canonical` needs the saved extraction of a completed `parse_filing` (or legacy
+`ingest_filing`) job for that revision; filings without one fail with "No saved
+extraction" and need re-ingestion.
 
 ### Companies
 

@@ -21,7 +21,11 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
   SEC rate limiter is process-local, so a PostgreSQL advisory lock (`SecEgressLock`)
   makes a second SEC-active process fail fast with `SecEgressBusyError`.
 - `worker run --job-type <type>` (repeatable) claims only those job types and leaves
-  other queued jobs untouched, e.g. `--job-type ingest_filing` while bulk loads are held.
+  other queued jobs untouched. Filings are two jobs: `fetch_filing` (SEC download,
+  then it queues the parse) and `parse_filing` (no SEC client), e.g.
+  `--job-type fetch_filing` on the one SEC-active worker and
+  `XBRL_WORKER_CONCURRENCY=N XBRL_ARELLE_OFFLINE=true worker run --job-type parse_filing`
+  beside it. Legacy queued `ingest_filing` jobs still run.
 - Retain Arelle semantics, immutable raw artifacts, reversible canonical mappings,
   idempotent replay, and diagnostics for rejected or drifting inputs.
 - Keep secrets out of source control. Preserve query budgets, download and parser

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -30,7 +31,11 @@ from sec_xbrl_warehouse.domain.models import (
     SourceArtifactRef,
     ValidationIssue,
 )
-from sec_xbrl_warehouse.exceptions import StateTransitionError
+from sec_xbrl_warehouse.exceptions import (
+    ArtifactIntegrityError,
+    ConfigurationError,
+    StateTransitionError,
+)
 from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
     CompanyRow,
     FilingRow,
@@ -88,15 +93,24 @@ class PostgresControlRepository:
     completion, failure, checkpoint, and heartbeat is fenced by worker and attempt.
     """
 
-    def __init__(self, settings: Settings, engine: AsyncEngine | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        engine: AsyncEngine | None = None,
+        *,
+        object_store: Any | None = None,
+    ) -> None:
         self.settings = settings
         self.engine = engine or create_async_engine(
             settings.postgres_dsn,
             pool_pre_ping=True,
-            pool_size=5,
+            # Concurrent jobs each heartbeat and checkpoint on their own connection.
+            pool_size=max(5, settings.worker_concurrency + 2),
             max_overflow=10,
         )
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        # Reads stored package manifests for `get_filing_manifest`.
+        self.object_store = object_store
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -433,13 +447,20 @@ class PostgresControlRepository:
 
     async def extraction_checkpoint(self, accession: str, revision: int) -> dict[str, Any] | None:
         """The saved extraction (`object_key`, `sha256`) of a completed filing ingestion."""
+        # Legacy `ingest_filing` payloads carry the filing; `parse_filing` payloads
+        # carry the accession.
         statement = (
             select(JobCheckpointRow.payload)
             .join(IngestionJobRow, IngestionJobRow.id == JobCheckpointRow.job_id)
             .where(
-                IngestionJobRow.job_type == JobType.INGEST_FILING.value,
+                IngestionJobRow.job_type.in_(
+                    (JobType.INGEST_FILING.value, JobType.PARSE_FILING.value)
+                ),
                 IngestionJobRow.state == JobState.COMPLETE.value,
-                IngestionJobRow.payload["filing"]["accession"].astext == accession,
+                or_(
+                    IngestionJobRow.payload["filing"]["accession"].astext == accession,
+                    IngestionJobRow.payload["accession"].astext == accession,
+                ),
                 IngestionJobRow.payload["extraction_revision"].astext == str(revision),
                 JobCheckpointRow.stage == "extract",
             )
@@ -797,6 +818,9 @@ class PostgresControlRepository:
             "package_object_key": manifest.package_object_key,
             "package_checksum_sha256": manifest.package_checksum_sha256,
         }
+        if manifest.manifest_object_key:
+            values["manifest_object_key"] = manifest.manifest_object_key
+            values["manifest_checksum_sha256"] = manifest.manifest_checksum_sha256
         if revision is not None:
             values["latest_extraction_revision"] = func.greatest(
                 FilingRow.latest_extraction_revision, revision
@@ -807,6 +831,32 @@ class PostgresControlRepository:
                 .where(FilingRow.accession == manifest.filing.accession)
                 .values(**values)
             )
+
+    async def get_filing_manifest(self, accession: str) -> FilingPackageManifest | None:
+        """Load the filing's stored manifest (checksum-verified) from object storage.
+
+        None when the filing has no manifest pointer (never fetched, or fetched
+        before migration 0006). Parse jobs treat that as a missing package.
+        """
+        async with self.sessions() as session:
+            row = (
+                await session.execute(
+                    select(FilingRow.manifest_object_key, FilingRow.manifest_checksum_sha256).where(
+                        FilingRow.accession == accession
+                    )
+                )
+            ).first()
+        if row is None or not row.manifest_object_key:
+            return None
+        if self.object_store is None:
+            raise ConfigurationError("Loading a stored manifest needs object storage")
+        return await asyncio.to_thread(
+            _read_manifest,
+            self.object_store,
+            self.settings,
+            row.manifest_object_key,
+            row.manifest_checksum_sha256,
+        )
 
     @staticmethod
     def _to_job_record(row: IngestionJobRow) -> JobRecord:
@@ -900,3 +950,21 @@ def _ticker_pairs(tickers: Sequence[str], exchanges: Sequence[str]) -> list[tupl
     for index, ticker in enumerate(tickers):
         pairs.setdefault(ticker.upper(), exchanges[index] if aligned else "")
     return list(pairs.items())
+
+
+def _read_manifest(
+    store: Any, settings: Settings, key: str, checksum: str | None
+) -> FilingPackageManifest:
+    import tempfile
+    from pathlib import Path
+
+    settings.ensure_directories()
+    with tempfile.TemporaryDirectory(dir=settings.temp_dir) as directory:
+        path = Path(directory) / "manifest.json"
+        stored = store.get_file(key, path, max_bytes=settings.response_max_bytes)
+        if checksum and stored.checksum_sha256 != checksum:
+            raise ArtifactIntegrityError(f"Stored manifest checksum mismatch: {key}")
+        manifest = FilingPackageManifest.model_validate_json(path.read_bytes())
+    return manifest.model_copy(
+        update={"manifest_object_key": key, "manifest_checksum_sha256": stored.checksum_sha256}
+    )

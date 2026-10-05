@@ -397,7 +397,8 @@ Standardized series rebuilt per company from `canonical_facts` by
   row is written whenever a point changes (`known_from` = that time). A query takes the
   newest `built_at` for the company and, per point, the newest version with
   `known_from <= as_of`.
-- **Rebuilds.** The worker rebuilds a company after a completed `ingest_filing` or
+- **Rebuilds.** The worker rebuilds a company after a completed `parse_filing` (or
+  legacy `ingest_filing`) or
   `map_canonical` (a failure is reported in the job result, not retried);
   `xbrl-warehouse series rebuild --cik <cik>` rebuilds on demand. The table is a
   `ReplacingMergeTree(built_at)`, so merges replace older builds' rows without a delete

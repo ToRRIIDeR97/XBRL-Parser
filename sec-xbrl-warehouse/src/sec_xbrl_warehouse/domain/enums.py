@@ -57,7 +57,9 @@ class JobType(StrEnum):
     DOWNLOAD_BULK = "download_bulk"
     LOAD_BULK = "load_bulk"
     DISCOVER_FILINGS = "discover_filings"
-    INGEST_FILING = "ingest_filing"
+    INGEST_FILING = "ingest_filing"  # legacy: fetch and parse in one job
+    FETCH_FILING = "fetch_filing"  # SEC download into the package archive
+    PARSE_FILING = "parse_filing"  # Arelle, validation, and loading (no SEC download)
     RECONCILE_ARTIFACT = "reconcile_artifact"
     RECONCILE_FILING = "reconcile_filing"
     MAP_CANONICAL = "map_canonical"

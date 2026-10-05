@@ -32,13 +32,39 @@ logger = get_logger(__name__)
 JobHandler = Callable[[JobRecord], Coroutine[Any, Any, dict[str, Any] | None]]
 
 
+# Job types that send SEC traffic (and so need the SEC client and egress lock).
+SEC_JOB_TYPES = frozenset(
+    {
+        JobType.FETCH_FILING,
+        JobType.INGEST_FILING,
+        JobType.DISCOVER_FILINGS,
+        JobType.DOWNLOAD_BULK,
+    }
+)
+# Job types that run Arelle (online Arelle may resolve taxonomies from SEC hosts).
+EXTRACTION_JOB_TYPES = frozenset({JobType.INGEST_FILING, JobType.PARSE_FILING})
+
+
+def requires_sec(job_types: Sequence[JobType] | None) -> bool:
+    """Whether a worker claiming `job_types` (None: every type) needs an SEC client."""
+    return job_types is None or bool(SEC_JOB_TYPES.intersection(job_types))
+
+
 @contextlib.asynccontextmanager
 async def runtime_services(
-    settings: Settings, control: PostgresControlRepository
+    settings: Settings,
+    control: PostgresControlRepository,
+    job_types: Sequence[JobType] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Own the network clients used by every worker stage."""
+    """Own the network clients used by the worker's job types.
+
+    The SEC client (and its egress lock) is built only when `requires_sec`.
+    A worker without one that may run Arelle in online mode
+    (`XBRL_ARELLE_OFFLINE=false`) still takes the egress lock lazily, before its
+    first extraction; with offline Arelle it never touches the lock.
+    """
     from sec_xbrl_warehouse.config_files import load_yaml
-    from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressLock
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import LazyEgress, SecEgressLock
     from sec_xbrl_warehouse.infrastructure.http.sec_client import SecHttpClient
     from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWarehouse
     from sec_xbrl_warehouse.infrastructure.storage.object_store import create_object_store
@@ -61,9 +87,23 @@ async def runtime_services(
     sources = load_yaml(settings.config_dir / "sources.yml")["sec"]
     store = create_object_store(settings)
     await asyncio.to_thread(store.ensure_bucket)
+    control.object_store = store  # parse jobs load stored manifests
     warehouse = await asyncio.to_thread(ClickHouseWarehouse, settings)
+    lazy_egress: LazyEgress | None = None
     try:
-        async with SecHttpClient(settings, egress_lock=SecEgressLock(settings)) as http:
+        async with contextlib.AsyncExitStack() as stack:
+            http: SecHttpClient | None = None
+            ensure_sec_egress = None
+            if requires_sec(job_types):
+                http = await stack.enter_async_context(
+                    SecHttpClient(settings, egress_lock=SecEgressLock(settings))
+                )
+                ensure_sec_egress = http.ensure_egress
+            elif not settings.arelle_offline and (
+                job_types is None or EXTRACTION_JOB_TYPES.intersection(job_types)
+            ):
+                lazy_egress = LazyEgress(SecEgressLock(settings))
+                ensure_sec_egress = lazy_egress.ensure
             repository = PostgresMappingRepository(settings, engine=control.engine)
             mapper = CanonicalMapper.load_rules(
                 settings.config_dir / "canonical_metrics.yml",
@@ -80,21 +120,18 @@ async def runtime_services(
                 store,
                 settings=settings,
             )
-            yield {
+            services: dict[str, Any] = {
                 "control": control,
                 "warehouse": warehouse,
                 "object_store": store,
                 "mapper": mapper,
                 "forms": sources["default_forms"],
-                "discovery": SecDailyIndexDiscovery(
-                    http, sources["daily_index_base"], sources["archive_base"], object_store=store
-                ),
-                "submissions": SecSubmissionsDiscovery(http, sources["data_api_base"]),
-                "http": http,
                 "data_api_base": sources["data_api_base"],
                 "orchestrator": IngestionOrchestrator(
                     control,
-                    downloader=BulkArtifactDownloader(settings, http, store),
+                    downloader=(
+                        BulkArtifactDownloader(settings, http, store) if http is not None else None
+                    ),
                     loader=loader,
                     object_store=store,
                 ),
@@ -107,10 +144,26 @@ async def runtime_services(
                     settings=settings,
                     object_store=store,
                     mapper=mapper,
-                    ensure_sec_egress=http.ensure_egress,
+                    ensure_sec_egress=ensure_sec_egress,
                 ),
             }
+            if http is not None:
+                services.update(
+                    {
+                        "discovery": SecDailyIndexDiscovery(
+                            http,
+                            sources["daily_index_base"],
+                            sources["archive_base"],
+                            object_store=store,
+                        ),
+                        "submissions": SecSubmissionsDiscovery(http, sources["data_api_base"]),
+                        "http": http,
+                    }
+                )
+            yield services
     finally:
+        if lazy_egress is not None:
+            await lazy_egress.close()
         await asyncio.to_thread(warehouse.close)
 
 
@@ -138,30 +191,48 @@ class Worker:
         for signal_name in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(signal_name, self.stop)
-        while not self._stopping.is_set():
-            try:
-                await asyncio.to_thread(self.settings.require_disk_reserve)
-            except DiskReserveError:
-                logger.warning("ingestion_paused_low_disk")
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self._stopping.wait(), timeout=self.settings.worker_poll_seconds
-                    )
-                continue
-            job = await self.control.claim_job(
-                self.settings.worker_id,
-                self.settings.worker_lock_timeout_seconds,
-                self.job_types,
-            )
-            if job is None:
-                try:
-                    await asyncio.wait_for(
-                        self._stopping.wait(), timeout=self.settings.worker_poll_seconds
-                    )
-                except TimeoutError:
+        # Up to `worker_concurrency` jobs run at once, each with its own heartbeat,
+        # lease, and checkpoint ownership; a job is claimed only when a slot is free.
+        running: set[asyncio.Task[None]] = set()
+        try:
+            while not self._stopping.is_set():
+                if len(running) >= self.settings.worker_concurrency:
+                    await self._wait(running)
                     continue
-                continue
-            await self._execute(job)
+                try:
+                    await asyncio.to_thread(self.settings.require_disk_reserve)
+                except DiskReserveError:
+                    logger.warning("ingestion_paused_low_disk")
+                    await self._wait(running, self.settings.worker_poll_seconds)
+                    continue
+                job = await self.control.claim_job(
+                    self.settings.worker_id,
+                    self.settings.worker_lock_timeout_seconds,
+                    self.job_types,
+                )
+                if job is None:
+                    await self._wait(running, self.settings.worker_poll_seconds)
+                    continue
+                task = asyncio.create_task(self._execute(job))
+                running.add(task)
+                task.add_done_callback(running.discard)
+        finally:
+            # Graceful stop: running jobs finish (or checkpoint) before the worker exits.
+            if running:
+                await asyncio.gather(*running, return_exceptions=True)
+
+    async def _wait(
+        self, running: set[asyncio.Task[None]], poll_seconds: float | None = None
+    ) -> None:
+        """Until a running job finishes, the worker is stopped, or `poll_seconds` pass."""
+        stopping = asyncio.create_task(self._stopping.wait())
+        try:
+            await asyncio.wait(
+                {stopping, *running}, timeout=poll_seconds, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            stopping.cancel()
+            await asyncio.gather(stopping, return_exceptions=True)
 
     async def _execute(self, job: JobRecord) -> None:
         handler = self.handlers.get(job.job_type)
@@ -308,6 +379,39 @@ def build_handlers(
 
         handlers[JobType.INGEST_FILING] = _ingest_filing
 
+        async def _fetch_filing(job: JobRecord) -> dict[str, Any] | None:
+            from sec_xbrl_warehouse.domain.models import FilingRef
+
+            filing = FilingRef.model_validate(job.payload["filing"])
+            revision = int(job.payload.get("extraction_revision", CURRENT_EXTRACTION_REVISION))
+            manifest = await ingestor.fetch(filing, job_id=job.id)
+            parse_id = await services["control"].enqueue_job(
+                job_type=JobType.PARSE_FILING.value,
+                idempotency_key=f"parse:{filing.accession}:{revision}",
+                payload={"accession": filing.accession, "extraction_revision": revision},
+            )
+            return {
+                "accession": filing.accession,
+                "package_object_key": manifest.package_object_key,
+                "parse_job_id": str(parse_id) if parse_id is not None else None,
+            }
+
+        handlers[JobType.FETCH_FILING] = _fetch_filing
+
+        async def _parse_filing(job: JobRecord) -> dict[str, Any] | None:
+            accession = str(job.payload["accession"])
+            revision = int(job.payload.get("extraction_revision", CURRENT_EXTRACTION_REVISION))
+            result: dict[str, Any] | None = await ingestor.parse(
+                accession, extraction_revision=revision, job_id=job.id
+            )
+            if result is not None and result.get("status") == "complete":
+                cik = result.get("cik") or await _filing_cik(services, accession)
+                if cik is not None:
+                    result = {**result, "series": await _rebuild_series(services, int(cik))}
+            return result
+
+        handlers[JobType.PARSE_FILING] = _parse_filing
+
         async def _reconcile_filing(job: JobRecord) -> dict[str, Any] | None:
             result: dict[str, Any] = await ingestor.reconcile(str(job.payload["accession"]))
             return result
@@ -377,8 +481,8 @@ def build_handlers(
                     )
             for filing in filings:
                 await services["control"].enqueue_job(
-                    job_type=JobType.INGEST_FILING.value,
-                    idempotency_key=f"filing:{filing.accession}:{CURRENT_EXTRACTION_REVISION}",
+                    job_type=JobType.FETCH_FILING.value,
+                    idempotency_key=f"fetch:{filing.accession}:{CURRENT_EXTRACTION_REVISION}",
                     payload={
                         "filing": filing.model_dump(mode="json"),
                         "extraction_revision": CURRENT_EXTRACTION_REVISION,
@@ -438,6 +542,19 @@ async def _rebuild_series(services: dict[str, Any], cik: int) -> dict[str, Any]:
         logger.exception("series_rebuild_failed", cik=cik)
         return {"status": "failed", "error": str(exc)[:2000]}
     return {"status": "rebuilt", "rows": written}
+
+
+async def _filing_cik(services: dict[str, Any], accession: str) -> int | None:
+    """The filing's CIK for the series rebuild (from its stored manifest)."""
+    getter = getattr(services.get("control"), "get_filing_manifest", None)
+    if getter is None:
+        return None
+    try:
+        manifest = await getter(accession)
+    except Exception:
+        logger.exception("series_rebuild_cik_lookup_failed", accession=accession)
+        return None
+    return manifest.filing.cik if manifest is not None else None
 
 
 def _payload_date(value: Any) -> Any:

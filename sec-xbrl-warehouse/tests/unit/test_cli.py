@@ -41,7 +41,7 @@ class _Connection:
         return None
 
     async def scalar(self, statement: object) -> str:
-        return "0005_job_deferral"
+        return "0006_filing_manifest_pointer"
 
 
 class _Engine:
@@ -194,7 +194,7 @@ def test_worker_metrics_server_lives_for_worker_process(
             events.append("control-close")
 
     @asynccontextmanager
-    async def services(settings: Settings, control: _RuntimeControl):
+    async def services(settings: Settings, control: _RuntimeControl, job_types=None):
         yield {"ready": True}
 
     monkeypatch.setattr(cli, "get_settings", lambda: settings)
@@ -339,3 +339,53 @@ def test_jobs_list_and_retry_commands(
     assert "is retry" in capsys.readouterr().out
     with pytest.raises(typer.Exit):
         cli.jobs_retry(str(uuid4()))
+
+
+def test_worker_memory_check_compares_concurrency_with_container_limit() -> None:
+    settings = Settings(env="test", worker_concurrency=4, arelle_memory_limit_bytes=2 * 1024**3)
+    assert cli._worker_memory_check(settings, limit=16 * 1024**3)[1] is True
+    name, ok, details = cli._worker_memory_check(settings, limit=6 * 1024**3)
+    assert (name, ok) == ("Worker memory", False)
+    assert "XBRL_WORKER_CONCURRENCY" in details
+
+
+def test_filing_enqueue_queues_a_fetch_job(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from sec_xbrl_warehouse.domain.enums import JobType
+
+    calls: list[dict] = []
+
+    class _Control:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def enqueue_job(self, **kwargs):
+            calls.append(kwargs)
+            return "job-1"
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(env="test"))
+    monkeypatch.setattr(cli, "PostgresControlRepository", _Control)
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "filing",
+            "enqueue",
+            "--accession",
+            "0000320193-25-000079",
+            "--cik",
+            "320193",
+            "--company-name",
+            "Apple Inc.",
+            "--form",
+            "10-K",
+            "--filed-date",
+            "2025-10-31",
+            "--extraction-revision",
+            "3",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls[0]["job_type"] == JobType.FETCH_FILING.value
+    assert calls[0]["idempotency_key"] == "fetch:0000320193-25-000079:3"

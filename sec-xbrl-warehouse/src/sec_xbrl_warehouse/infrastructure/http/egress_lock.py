@@ -131,3 +131,32 @@ class SecEgressLock:
             connection, self._connection = self._connection, None
             if connection is not None:
                 connection.terminate()
+
+
+class LazyEgress:
+    """Holds the SEC egress lock from first use until `close` (no SEC client needed).
+
+    Parse-only workers in online Arelle mode use it: Arelle may resolve taxonomies
+    from SEC hosts, and that traffic must count as this process's SEC egress.
+    """
+
+    def __init__(self, lock: EgressLock) -> None:
+        self.lock = lock
+        self._held = False
+        self._guard = asyncio.Lock()
+
+    async def ensure(self) -> None:
+        if self._held:
+            verify = getattr(self.lock, "verify", None)
+            if verify is not None:
+                await verify()
+            return
+        async with self._guard:
+            if not self._held:
+                await self.lock.acquire()
+                self._held = True
+
+    async def close(self) -> None:
+        if self._held:
+            self._held = False
+            await self.lock.release()

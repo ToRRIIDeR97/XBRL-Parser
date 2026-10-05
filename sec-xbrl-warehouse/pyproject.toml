@@ -98,6 +98,7 @@ module = [
   "pyarrow.*",
   "pyarrow.parquet.*",
   "aiofiles.*",
+  "asyncpg.*",
   "lxml.*",
   "lxml.etree.*",
 ]

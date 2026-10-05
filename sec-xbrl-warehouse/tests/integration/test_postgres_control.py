@@ -565,3 +565,116 @@ async def test_ticker_move_removes_matching_exchange(postgres_settings: Settings
         assert stale == {555001}
     finally:
         await repo.close()
+
+
+async def test_deferred_failure_returns_job_without_spending_an_attempt(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        job_id = await repo.enqueue_job(
+            job_type="reconcile_filing",
+            idempotency_key=f"defer-{uuid4()}",
+            payload={},
+            priority=-200,
+            max_attempts=1,
+        )
+        job = await repo.claim_job("w-defer", 900, [JobType.RECONCILE_FILING])
+        assert job is not None and job.id == job_id and job.attempts == 1
+        await repo.fail_job(
+            job.id,
+            "another process holds the SEC egress lock",
+            retryable=True,
+            defer_seconds=0,
+            worker_id="w-defer",
+            attempt=job.attempts,
+        )
+        again = await repo.claim_job("w-defer", 900, [JobType.RECONCILE_FILING])
+        assert again is not None and again.id == job_id and again.attempts == 1
+    finally:
+        await repo.close()
+
+
+async def test_deferral_is_capped_from_first_deferral(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        job_id = await repo.enqueue_job(
+            job_type="reconcile_filing",
+            idempotency_key=f"defer-cap-{uuid4()}",
+            payload={},
+            priority=-300,
+        )
+        job = await repo.claim_job("w-cap", 900, [JobType.RECONCILE_FILING])
+        assert job is not None and job.id == job_id
+        state = await repo.fail_job(
+            job.id,
+            "busy",
+            retryable=True,
+            defer_seconds=0,
+            max_defer_seconds=3600,
+            worker_id="w-cap",
+            attempt=job.attempts,
+        )
+        assert state is JobState.RETRY
+        async with repo.sessions.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE ingestion_jobs SET deferred_since = now() - interval '2 hours' "
+                    "WHERE id = :id"
+                ),
+                {"id": job_id},
+            )
+        job = await repo.claim_job("w-cap", 900, [JobType.RECONCILE_FILING])
+        assert job is not None and job.id == job_id
+        state = await repo.fail_job(
+            job.id,
+            "busy",
+            retryable=True,
+            defer_seconds=0,
+            max_defer_seconds=3600,
+            worker_id="w-cap",
+            attempt=job.attempts,
+        )
+        assert state is JobState.DEAD
+        (row,) = [item for item in await repo.list_jobs(state="dead") if item.id == job_id]
+        assert "waiting for the SEC egress lock" in (row.last_error or "")
+        revived = await repo.retry_job(job_id)
+        assert revived.state is JobState.RETRY
+    finally:
+        await repo.close()
+
+
+async def test_egress_lock_verify_reacquires_after_dropped_connection(
+    postgres_settings: Settings,
+) -> None:
+    import asyncpg
+    from sqlalchemy.engine import make_url
+
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import (
+        SecEgressBusyError,
+        SecEgressLock,
+    )
+
+    holder = SecEgressLock(postgres_settings, check_interval_seconds=0)
+    other = SecEgressLock(postgres_settings, check_interval_seconds=0)
+    admin = await asyncpg.connect(
+        make_url(postgres_settings.postgres_dsn)
+        .set(drivername="postgresql")
+        .render_as_string(hide_password=False)
+    )
+    try:
+        await holder.acquire()
+        await holder.verify()  # healthy: no change
+        pid = holder._connection.get_server_pid()
+        await admin.execute("SELECT pg_terminate_backend($1)", pid)
+        await other.acquire()  # the dropped session freed the lock
+        with pytest.raises(SecEgressBusyError):
+            await holder.verify()
+        await other.release()
+        await holder.verify()  # nothing held after the failed re-acquire
+        await holder.acquire()
+        await holder.release()
+    finally:
+        await admin.close()
+        await other.release()
+        await holder.release()

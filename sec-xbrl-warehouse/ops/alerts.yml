@@ -44,3 +44,10 @@ groups:
           severity: warning
         annotations:
           summary: The worker cannot read queue metrics from PostgreSQL
+      - alert: XbrlSecEgressDeferrals
+        expr: sum by (job_type) (increase(xbrl_job_transitions_total{state="deferred"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Jobs have been deferred on the SEC egress lock for about 30 minutes (deferrals in every 15-minute window for 15 minutes)

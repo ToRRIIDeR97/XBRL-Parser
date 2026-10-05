@@ -7,7 +7,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
-from sec_xbrl_warehouse.domain.enums import ArtifactState, JobType, SecTable
+from sec_xbrl_warehouse.domain.enums import ArtifactState, JobState, JobType, SecTable
 from sec_xbrl_warehouse.domain.models import (
     Company,
     DatasetArtifact,
@@ -153,7 +153,9 @@ class ControlRepository(Protocol):
         worker_id: str | None = None,
         attempt: int | None = None,
         retry_at: datetime | None = None,
-    ) -> None: ...
+        defer_seconds: float | None = None,
+        max_defer_seconds: float | None = None,
+    ) -> JobState: ...
 
     async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
         """Insert or update a filing row.

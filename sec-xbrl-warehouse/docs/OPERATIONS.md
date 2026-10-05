@@ -19,6 +19,24 @@
 - ClickHouse disk free space exceeds the configured safety threshold.
 - Quarantine and mapping-review queues are triaged.
 
+## SEC egress lock
+
+Only one process sends SEC traffic at a time (see SEC_ACCESS.md). If `catalog sync`,
+`taxonomy sync`, or a second worker reports "another process holds the SEC egress
+lock", wait for the SEC-active worker to finish or stop it. Workers scoped to non-SEC
+jobs aren't affected. A worker that hits the lock defers the job by
+`XBRL_SEC_EGRESS_BUSY_RETRY_SECONDS` without spending an attempt and without recording
+validation issues. Deferral is capped: after `XBRL_SEC_EGRESS_MAX_DEFER_SECONDS`
+(default 6 hours) from the first deferral the job goes `dead` with that reason
+(`xbrl_job_dead_letters_total{reason="egress_busy_timeout"}`); `XbrlSecEgressDeferrals`
+fires after about 30 minutes of continued deferrals (15-minute window held 15 minutes).
+
+A worker keeps the lock for its whole lifetime once it has sent an SEC request, so
+`catalog sync` and `taxonomy sync` fail as busy until that worker stops. The holder
+checks its lock connection at most every `XBRL_SEC_EGRESS_CHECK_SECONDS` (default 30)
+before SEC requests; if the connection dropped (which releases the lock), it
+re-acquires the lock or stops with `SecEgressBusyError` instead of sending.
+
 ## Job queue
 
 - **Retries.** A failed job is retried when the error is transient: network and
@@ -150,7 +168,7 @@ Stop producers first, then wait for active jobs to checkpoint. Stop workers only
 2. Set `XBRL_ARROW_BATCH_ROWS` so one batch plus conversion overhead fits comfortably inside the worker memory limit; 50,000 is only a starting point.
 3. Reserve space for bronze bytes, silver Parquet, ClickHouse data/merges, and one preserving schema copy before a backfill.
 4. Increase workers one at a time. Stop when SEC throttling, PostgreSQL claims, object throughput, Arelle memory, or ClickHouse latency becomes the bottleneck.
-5. Keep the aggregate SEC request ceiling at or below policy across every replica; the supplied limiter is process-local.
+5. Keep the aggregate SEC request ceiling at or below policy. The limiter is process-local; the SEC egress lock lets only one process sharing this control database send SEC traffic, so extra worker replicas can only run non-SEC jobs.
 
 Before a preserving ClickHouse upgrade, `doctor` must pass and free ClickHouse space must exceed 110% of the affected table bytes. The upgrade command refuses insufficient capacity and retains named backup tables.
 

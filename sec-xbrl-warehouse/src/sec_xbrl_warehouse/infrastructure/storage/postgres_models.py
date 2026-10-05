@@ -117,6 +117,8 @@ class IngestionJobRow(TimestampMixin, Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # First deferral on a busy SEC egress lock since the job last ran; caps deferral.
+    deferred_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class JobCheckpointRow(Base):

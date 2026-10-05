@@ -594,3 +594,81 @@ def test_snapshot_on_loop_cancels_on_timeout() -> None:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(2)
         loop.close()
+
+
+def test_busy_egress_lock_defers_job_without_spending_an_attempt() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
+    from sec_xbrl_warehouse.worker import Worker
+
+    class _Control:
+        async def heartbeat_job(self, *args, **kwargs):
+            return None
+
+        async def fail_job(self, job_id, error, retryable, **kwargs):
+            self.captured = (error, retryable, kwargs)
+
+    async def handler(job):
+        raise SecEgressBusyError("another process holds the SEC egress lock")
+
+    control = _Control()
+    settings = Settings(
+        env="test", sec_egress_busy_retry_seconds=45, worker_lock_timeout_seconds=60
+    )
+    asyncio.run(
+        Worker(settings, control, {JobType.INGEST_FILING: handler})._execute(
+            _job(JobType.INGEST_FILING)
+        )
+    )
+    error, retryable, options = control.captured
+    assert "egress lock" in error and retryable
+    assert options["defer_seconds"] == 45
+    assert is_retryable_exception(SecEgressBusyError("busy"))
+
+
+def test_busy_deferral_that_hits_the_cap_is_counted_dead() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.domain.enums import JobState
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
+    from sec_xbrl_warehouse.observability.metrics import JOB_TRANSITIONS
+    from sec_xbrl_warehouse.worker import Worker
+
+    class _Control:
+        async def heartbeat_job(self, *args, **kwargs):
+            return None
+
+        async def fail_job(self, job_id, error, retryable, **kwargs):
+            self.options = kwargs
+            return JobState.DEAD
+
+    async def handler(job):
+        raise SecEgressBusyError("busy")
+
+    control = _Control()
+    settings = Settings(
+        env="test", sec_egress_max_defer_seconds=120, worker_lock_timeout_seconds=60
+    )
+    dead = JOB_TRANSITIONS.labels(state="dead", job_type="ingest_filing")
+    before = dead._value.get()
+    asyncio.run(
+        Worker(settings, control, {JobType.INGEST_FILING: handler})._execute(
+            _job(JobType.INGEST_FILING)
+        )
+    )
+    assert control.options["max_defer_seconds"] == 120
+    assert dead._value.get() == before + 1
+
+
+def test_alert_rule_watches_egress_deferrals() -> None:
+    from pathlib import Path
+
+    from sec_xbrl_warehouse.config_files import load_yaml
+
+    rules = [
+        rule
+        for group in load_yaml(Path(__file__).resolve().parents[2] / "ops/alerts.yml")["groups"]
+        for rule in group["rules"]
+    ]
+    rule = next(rule for rule in rules if rule["alert"] == "XbrlSecEgressDeferrals")
+    assert 'state="deferred"' in rule["expr"] and "[15m]" in rule["expr"]
+    assert rule["for"] == "15m" and "30 minutes" in rule["annotations"]["summary"]

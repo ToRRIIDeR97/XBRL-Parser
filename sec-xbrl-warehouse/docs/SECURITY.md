@@ -89,8 +89,9 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
   result-byte budgets.
 - Each API process runs one readiness probe at a time. Overlapping probes get 503.
 - SEC requests use the configured user agent. They default to 8 req/s with jitter and
-  honor `Retry-After`. **The limiter is process-local.** Run one SEC-active process at a time and
-  don't scale workers until egress is coordinated globally.
+  honor `Retry-After`. **The limiter is process-local**, so a PostgreSQL advisory lock
+  (`SecEgressLock`, see SEC_ACCESS.md) lets only one process send SEC traffic at a
+  time. A second SEC-active process fails fast instead of doubling the rate.
 - Containers run as UID/GID `10001:10001` with all capabilities dropped and
   `no-new-privileges`. Host ports bind to `127.0.0.1`.
 - Disk reserve checks (`XBRL_DISK_RESERVE_BYTES`) pause claims and downloads

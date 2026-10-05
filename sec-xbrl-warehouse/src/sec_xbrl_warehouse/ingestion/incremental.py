@@ -5,6 +5,7 @@ import inspect
 import json
 import tempfile
 import traceback
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -23,6 +24,7 @@ from sec_xbrl_warehouse.domain.ports import (
 )
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
+from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     iter_xbrl_tables,
 )
@@ -56,6 +58,7 @@ class IncrementalFilingIngestor:
         settings: Settings | None = None,
         object_store: ObjectStore | None = None,
         mapper: CanonicalMapper | None = None,
+        ensure_sec_egress: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.control = control
         self.package_store = package_store
@@ -65,6 +68,9 @@ class IncrementalFilingIngestor:
         self.settings = settings or Settings()
         self.object_store = object_store
         self.mapper = mapper
+        # Online Arelle may fetch taxonomies from SEC hosts; hold the SEC egress
+        # lock first so those requests count as this process's SEC traffic.
+        self.ensure_sec_egress = ensure_sec_egress
 
     async def ingest(
         self, filing: FilingRef, *, extraction_revision: int = 1, job_id: UUID | None = None
@@ -123,6 +129,8 @@ class IncrementalFilingIngestor:
                         )
                     await self.control.update_filing_package(manifest)
                     await self._save(job_id, "package", manifest.model_dump(mode="json"))
+                    if self.ensure_sec_egress is not None and not self.settings.arelle_offline:
+                        await self.ensure_sec_egress()
                     with STAGE_LATENCY.labels(pipeline="filing", stage="extract").time():
                         bundle = await asyncio.to_thread(
                             self.extractor.extract,
@@ -222,6 +230,10 @@ class IncrementalFilingIngestor:
                 }
                 await self._save(job_id, "complete", result)
                 return result
+        except SecEgressBusyError:
+            # A deferral, not a failure: the worker reschedules the job, so record no
+            # diagnostics here (they would repeat on every deferral).
+            raise
         except Exception as exc:
             details = {
                 "error": str(exc),

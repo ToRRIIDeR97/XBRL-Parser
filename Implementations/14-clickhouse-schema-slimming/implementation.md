@@ -174,3 +174,25 @@ independently authored.
 - Operator follow-up: back up, stop workers, `doctor`, `db upgrade-clickhouse --yes`,
   `doctor`, grant `xbrl_api` on the new objects; drop the `__backup_*` tables only
   after verifying.
+
+### Follow-up (verifier, 5 October 2026)
+
+- **Filer labels no longer leak across filings.** SEC filings don't load the standard
+  label linkbases, so a standard concept's labels in a bundle come from label arcs; a
+  concept is filer-labelled when the filing has a label arc for it in one of its own
+  documents (`metadata.source_documents`). Those concepts' full label sets go to the
+  new per-filing `xbrl_concept_labels` table (concept granularity: the filing's exact
+  `labels_json`, which keeps the view's output identical to what the filing had);
+  `taxonomy_concepts` stores `[]` with `labels_rank` 0 for them, and taxonomy-owned
+  labels with rank 1 (`ReplacingMergeTree(labels_rank)`). `v_filing_concepts_latest`
+  uses the filing's own labels where present. The upgrade applies the same rule from
+  `xbrl_relationships` and the published extraction's `source_documents`.
+  `xbrl_concept_labels` row counts are checked at publish.
+- Tests: a two-filer integration test (same us-gaap concept, different labels), and
+  the main-DDL upgrade test now includes a filer label arc. Verifier probes rerun from
+  `scratchpad/impl/` on temporary databases: `test_labels.py` shows "Net sales" for
+  Apple and "Total revenue (Other Corp)" only for the other filer; `phase.py` (plan 13
+  code → upgrade) gives 26 of 26 result sets identical, 9.11 → 4.89 MB.
+- Non-hex identifiers keep the SHA-256 mapping (plan 10/11 tests use them); documented
+  as test-only in DATA_MODEL.md, with a `non_hex_identifier_hashed` warning outside
+  `XBRL_ENV=test`.

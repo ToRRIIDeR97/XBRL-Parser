@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from collections.abc import Iterator, Sequence
@@ -16,19 +17,21 @@ import pyarrow as pa
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
-from sec_xbrl_warehouse.domain.enums import FactValueKind, SecTable
+from sec_xbrl_warehouse.domain.enums import FactValueKind, RelationshipType, SecTable
 from sec_xbrl_warehouse.domain.models import Company
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle, XbrlFact
 from sec_xbrl_warehouse.exceptions import ConfigurationError, WarehouseWriteError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     canonical_fact_schema,
     clickhouse_facts_schema,
+    concept_labels_schema,
     require_exact_schema,
     sec_warehouse_schema,
     taxonomy_concepts_schema,
     xbrl_warehouse_schema,
 )
 from sec_xbrl_warehouse.infrastructure.storage.hashing import stable_json_hash
+from sec_xbrl_warehouse.logging import get_logger
 from sec_xbrl_warehouse.normalization.disclosures import (
     CoverPage,
     SegmentRow,
@@ -41,6 +44,8 @@ from sec_xbrl_warehouse.normalization.statements import (
     classify_roles,
 )
 from sec_xbrl_warehouse.observability.metrics import ROWS_WRITTEN
+
+logger = get_logger(__name__)
 
 _SEC_TABLE_NAMES: dict[SecTable, str] = {
     SecTable.SUB: "sec_submissions",
@@ -323,18 +328,49 @@ class ClickHouseWarehouse:
     def _move_taxonomy_concepts(
         self, definitions: dict[str, tuple[str, str]], source: str, contract: dict[str, Any]
     ) -> None:
-        """Copy a legacy table's standard concepts into `taxonomy_concepts` (deduplicated)."""
+        """Copy a legacy table's standard concepts into `taxonomy_concepts` (deduplicated).
+
+        Labels of concepts a filing labels itself (a label arc in one of its own
+        documents, per `xbrl_relationships` and the published extraction's
+        `source_documents`) go to `xbrl_concept_labels` for that filing; only the
+        others' labels are shared. Rows of unpublished revisions share no labels.
+        """
         self.client.command(definitions["taxonomy_concepts"][0])
-        target = self._columns("taxonomy_concepts")
+        self.client.command(definitions["xbrl_concept_labels"][0])
+        db = self.database
+        own = (
+            f"(accession, extraction_revision, concept_qname) IN ("
+            f"SELECT r.accession, r.extraction_revision, r.from_qname "
+            f"FROM {db}.xbrl_relationships AS r INNER JOIN {db}.xbrl_extractions AS e "
+            f"ON e.accession = r.accession AND e.extraction_revision = r.extraction_revision "
+            f"WHERE r.network_type = 'label' AND has(JSONExtract(e.metadata_json, "
+            f"'source_documents', 'Array(String)'), r.source_document))"
+        )
+        shared = (
+            f"NOT ({own}) AND (accession, extraction_revision) IN "
+            f"(SELECT accession, extraction_revision FROM {db}.xbrl_extractions)"
+        )
         row_hash = (
             _hash_projection("_row_hash", "fixedstring(32)")
             if _normalize_sql(contract["_row_hash"][0]) != "fixedstring(32)"
             else "_row_hash"
         )
-        selects = [row_hash if column == "_row_hash" else column for column in target]
+        target = self._columns("taxonomy_concepts")
+        overrides = {
+            "_row_hash": row_hash,
+            "labels_json": f"if({shared}, labels_json, '[]') AS labels_json",
+            "labels_rank": f"toUInt8({shared}) AS labels_rank",
+        }
+        selects = [overrides.get(column, column) for column in target]
         self.client.command(
-            f"INSERT INTO {self.database}.taxonomy_concepts ({', '.join(target)}) "
-            f"SELECT {', '.join(selects)} FROM {self.database}.{source} WHERE is_extension = 0"
+            f"INSERT INTO {db}.taxonomy_concepts ({', '.join(target)}) "
+            f"SELECT {', '.join(selects)} FROM {db}.{source} WHERE is_extension = 0"
+        )
+        labels = self._columns("xbrl_concept_labels")
+        self.client.command(
+            f"INSERT INTO {db}.xbrl_concept_labels ({', '.join(labels)}) "
+            f"SELECT {', '.join(row_hash if c == '_row_hash' else c for c in labels)} "
+            f"FROM {db}.{source} WHERE is_extension = 0 AND {own}"
         )
 
     def _column_contract(self, table: str) -> dict[str, tuple[str, str, str]]:
@@ -452,6 +488,17 @@ class ClickHouseWarehouse:
                     target="clickhouse",
                 )
             )
+        # The filing's own labels for standard concepts belong to this revision.
+        counts["concept_labels"] = sum(
+            self._insert_arrow("xbrl_concept_labels", table)
+            for table in iter_xbrl_tables(
+                bundle,
+                "concept_labels",
+                self.settings.arrow_batch_rows,
+                self.settings.arrow_batch_bytes,
+                target="clickhouse",
+            )
+        )
         # Standard concepts are shared across filings (not part of the revision's
         # published row counts).
         for table in iter_xbrl_tables(
@@ -497,7 +544,7 @@ class ClickHouseWarehouse:
         Entities missing from `counts` (written before the derived entities existed)
         are not checked.
         """
-        for entity in (entity for entity in XBRL_ENTITIES if entity in counts):
+        for entity in (entity for entity in (*XBRL_ENTITIES, "concept_labels") if entity in counts):
             result = self.query(
                 f"SELECT count() AS count FROM xbrl_{entity} FINAL WHERE accession = %(accession)s AND extraction_revision = %(revision)s",
                 {"accession": bundle.filing.accession, "revision": bundle.extraction_revision},
@@ -604,6 +651,7 @@ HASH_COLUMNS: dict[str, frozenset[str]] = {
     "xbrl_contexts": frozenset({"context_hash", "_row_hash"}),
     "xbrl_concepts": frozenset({"_row_hash"}),
     "taxonomy_concepts": frozenset({"_row_hash"}),
+    "xbrl_concept_labels": frozenset({"_row_hash"}),
     "xbrl_facts": frozenset(
         {"fact_id", "context_hash", "dimension_hash", "duplicate_set_hash", "_row_hash"}
     ),
@@ -627,9 +675,10 @@ _EMPTY_HASH = bytes(32)
 def hash_bytes(value: str | None) -> bytes | None:
     """64-character hex SHA-256 -> its 32 bytes; '' (a tuple fact's context) -> zero bytes.
 
-    Pipeline identifiers are always hex SHA-256. Any other identifier is stored as
-    the SHA-256 of its text, the same mapping the upgrade applies to existing rows,
-    so joins between tables still match.
+    Pipeline identifiers are always hex SHA-256. Any other identifier (only test
+    fixtures use them) is stored as the SHA-256 of its text, the same mapping the
+    upgrade applies, so joins still match; outside tests this logs a warning,
+    because the view then can't return the original text.
     """
     if value is None:
         return None
@@ -637,6 +686,8 @@ def hash_bytes(value: str | None) -> bytes | None:
         return _EMPTY_HASH
     if _HEX_DIGEST.fullmatch(value):
         return bytes.fromhex(value)
+    if os.environ.get("XBRL_ENV", "") != "test":
+        logger.warning("non_hex_identifier_hashed", identifier=value[:80])
     return hashlib.sha256(value.encode("utf-8")).digest()
 
 
@@ -697,6 +748,7 @@ def iter_xbrl_tables(
         "contexts": contexts_table,
         "concepts": concepts_table if clickhouse else silver_concepts_table,
         "taxonomy_concepts": taxonomy_concepts_table,
+        "concept_labels": concept_labels_table,
         "facts": facts_table if clickhouse else silver_facts_table,
         "relationships": relationships_table,
         "footnotes": footnotes_table,
@@ -750,6 +802,13 @@ def xbrl_entity_records(bundle: XbrlExtractionBundle, entity: str) -> Sequence[A
     """The records one entity table holds for a bundle."""
     if entity == "taxonomy_concepts":
         return tuple(concept for concept in bundle.concepts if not concept.is_extension)
+    if entity == "concept_labels":
+        filer = filer_labelled_concepts(bundle)
+        return tuple(
+            concept
+            for concept in bundle.concepts
+            if not concept.is_extension and concept.qname in filer
+        )
     if entity == "statement_lines":
         return build_statement_lines(bundle)
     if entity == "cover_pages":
@@ -770,7 +829,7 @@ def _build_chunk(
 ) -> pa.Table:
     if entity in DERIVED_XBRL_ENTITIES:
         return build(records)
-    source = "concepts" if entity == "taxonomy_concepts" else entity
+    source = "concepts" if entity in {"taxonomy_concepts", "concept_labels"} else entity
     return build(bundle.model_copy(update={source: tuple(records)}))
 
 
@@ -964,14 +1023,37 @@ def concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
     return table.filter(pc.equal(table.column("is_extension"), 1))
 
 
+def filer_labelled_concepts(bundle: XbrlExtractionBundle) -> frozenset[str]:
+    """QNames the filing labels itself: a label arc in one of the filing's documents.
+
+    SEC filings don't load the standard label linkbases, so these labels (for
+    example AAPL's terse label "Net sales" on a us-gaap revenue concept) belong to
+    the filer and must not be shared through `taxonomy_concepts`.
+    """
+    own_documents = set(bundle.metadata.source_documents)
+    return frozenset(
+        relationship.from_qname
+        for relationship in bundle.relationships
+        if relationship.relationship_type is RelationshipType.LABEL
+        and relationship.source_document in own_documents
+    )
+
+
 def taxonomy_concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
     """Standard taxonomy concepts, keyed by concept and taxonomy version only.
 
-    `_row_hash` covers the concept alone, so identical concepts from different
-    filings are the same row in `taxonomy_concepts`.
+    Labels are kept only when taxonomy-owned (`labels_rank` 1); a concept the filing
+    labels itself gets `[]` and rank 0, and its labels go to `concept_labels_table`.
+    `_row_hash` covers the stored row alone, so identical concepts from different
+    filings are the same row.
     """
-    rows = [
-        {
+    filer = filer_labelled_concepts(bundle)
+    rows = []
+    for concept in bundle.concepts:
+        if concept.is_extension:
+            continue
+        own = concept.qname in filer
+        row = {
             "concept_namespace": concept.namespace,
             "concept_name": concept.name,
             "concept_qname": concept.qname,
@@ -982,16 +1064,49 @@ def taxonomy_concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:
             "balance": concept.balance,
             "abstract": int(concept.abstract),
             "nillable": int(concept.nillable),
-            "labels_json": _labels_json(concept.labels),
+            "labels_json": "[]" if own else _labels_json(concept.labels),
             "documentation": concept.documentation,
             "references_json": (None if not concept.references else _json(concept.references)),
-            "_row_hash": stable_json_hash({"concept": concept.model_dump(mode="json")}),
-            "_ingested_at": bundle.metadata.extracted_at,
+            "labels_rank": 0 if own else 1,
         }
-        for concept in bundle.concepts
-        if not concept.is_extension
-    ]
+        rows.append(
+            {
+                **row,
+                "_row_hash": stable_json_hash({"taxonomy_concept": row}),
+                "_ingested_at": bundle.metadata.extracted_at,
+            }
+        )
     return pa.Table.from_pylist(rows, schema=taxonomy_concepts_schema())
+
+
+def concept_labels_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    """The filing's labels for standard concepts it labels itself (`xbrl_concept_labels`)."""
+    filer = filer_labelled_concepts(bundle)
+    rows = []
+    for concept in bundle.concepts:
+        if concept.is_extension or concept.qname not in filer:
+            continue
+        labels = _labels_json(concept.labels)
+        rows.append(
+            {
+                "accession": bundle.filing.accession,
+                "concept_namespace": concept.namespace,
+                "concept_name": concept.name,
+                "concept_qname": concept.qname,
+                "labels_json": labels,
+                "extraction_revision": bundle.extraction_revision,
+                "_row_hash": stable_json_hash(
+                    {
+                        "accession": bundle.filing.accession,
+                        "concept": concept.qname,
+                        "labels": labels,
+                        "revision": bundle.extraction_revision,
+                    }
+                ),
+                "_ingested_at": bundle.metadata.extracted_at,
+            }
+        )
+    return pa.Table.from_pylist(rows, schema=concept_labels_schema())
 
 
 def silver_concepts_table(bundle: XbrlExtractionBundle) -> pa.Table:

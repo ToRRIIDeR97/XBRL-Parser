@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <link:roleRef roleURI="http://example.com/role/BalanceSheet" xlink:type="simple" xlink:href="fs-20251231.xsd#BalanceSheet"/>
+  <link:roleRef roleURI="http://example.com/role/BalanceSheetParenthetical" xlink:type="simple" xlink:href="fs-20251231.xsd#BalanceSheetParenthetical"/>
+  <link:roleRef roleURI="http://example.com/role/IncomeStatement" xlink:type="simple" xlink:href="fs-20251231.xsd#IncomeStatement"/>
+  <link:roleRef roleURI="http://example.com/role/CashFlow" xlink:type="simple" xlink:href="fs-20251231.xsd#CashFlow"/>
+  <link:roleRef roleURI="http://example.com/role/RevenueDetails" xlink:type="simple" xlink:href="fs-20251231.xsd#RevenueDetails"/>
+  <link:presentationLink xlink:type="extended" xlink:role="http://example.com/role/BalanceSheet">
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_BalanceSheetAbstract" xlink:label="loc_BalanceSheetAbstract"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_AssetsAbstract" xlink:label="loc_AssetsAbstract"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_BalanceSheetAbstract" xlink:to="loc_AssetsAbstract" order="1"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_CashAndCashEquivalentsAtCarryingValue" xlink:label="loc_CashAndCashEquivalentsAtCarryingValue"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_AssetsAbstract" xlink:to="loc_CashAndCashEquivalentsAtCarryingValue" order="1"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_AccountsReceivableNetCurrent" xlink:label="loc_AccountsReceivableNetCurrent"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_AssetsAbstract" xlink:to="loc_AccountsReceivableNetCurrent" order="2"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_AssetsCurrent" xlink:label="loc_AssetsCurrent"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_AssetsAbstract" xlink:to="loc_AssetsCurrent" order="3" preferredLabel="http://www.xbrl.org/2003/role/totalLabel"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_PropertyPlantAndEquipmentNet" xlink:label="loc_PropertyPlantAndEquipmentNet"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_AssetsAbstract" xlink:to="loc_PropertyPlantAndEquipmentNet" order="4"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_Assets" xlink:label="loc_Assets"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_AssetsAbstract" xlink:to="loc_Assets" order="5" preferredLabel="http://www.xbrl.org/2003/role/totalLabel"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_LiabilitiesAndEquityAbstract" xlink:label="loc_LiabilitiesAndEquityAbstract"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_BalanceSheetAbstract" xlink:to="loc_LiabilitiesAndEquityAbstract" order="2"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_Liabilities" xlink:label="loc_Liabilities"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_LiabilitiesAndEquityAbstract" xlink:to="loc_Liabilities" order="1"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_StockholdersEquity" xlink:label="loc_StockholdersEquity"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_LiabilitiesAndEquityAbstract" xlink:to="loc_StockholdersEquity" order="2"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_LiabilitiesAndStockholdersEquity" xlink:label="loc_LiabilitiesAndStockholdersEquity"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_LiabilitiesAndEquityAbstract" xlink:to="loc_LiabilitiesAndStockholdersEquity" order="3" preferredLabel="http://www.xbrl.org/2003/role/totalLabel"/>
+  </link:presentationLink>
+  <link:presentationLink xlink:type="extended" xlink:role="http://example.com/role/BalanceSheetParenthetical">
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_BalanceSheetAbstract" xlink:label="loc_BalanceSheetAbstract"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_CommonStockSharesAuthorized" xlink:label="loc_CommonStockSharesAuthorized"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_BalanceSheetAbstract" xlink:to="loc_CommonStockSharesAuthorized" order="1"/>
+  </link:presentationLink>
+  <link:presentationLink xlink:type="extended" xlink:role="http://example.com/role/IncomeStatement">
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_IncomeStatementAbstract" xlink:label="loc_IncomeStatementAbstract"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_Revenues" xlink:label="loc_Revenues"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_IncomeStatementAbstract" xlink:to="loc_Revenues" order="1"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_CostOfRevenue" xlink:label="loc_CostOfRevenue"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_IncomeStatementAbstract" xlink:to="loc_CostOfRevenue" order="2"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_GrossProfit" xlink:label="loc_GrossProfit"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_IncomeStatementAbstract" xlink:to="loc_GrossProfit" order="3" preferredLabel="http://www.xbrl.org/2003/role/totalLabel"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_NetIncomeLoss" xlink:label="loc_NetIncomeLoss"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_IncomeStatementAbstract" xlink:to="loc_NetIncomeLoss" order="4"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_EarningsPerShareDiluted" xlink:label="loc_EarningsPerShareDiluted"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_IncomeStatementAbstract" xlink:to="loc_EarningsPerShareDiluted" order="5"/>
+  </link:presentationLink>
+  <link:presentationLink xlink:type="extended" xlink:role="http://example.com/role/CashFlow">
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_CashFlowAbstract" xlink:label="loc_CashFlowAbstract"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_NetIncomeLoss" xlink:label="loc_NetIncomeLoss"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_CashFlowAbstract" xlink:to="loc_NetIncomeLoss" order="1"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_NetCashProvidedByUsedInOperatingActivities" xlink:label="loc_NetCashProvidedByUsedInOperatingActivities"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_CashFlowAbstract" xlink:to="loc_NetCashProvidedByUsedInOperatingActivities" order="2" preferredLabel="http://www.xbrl.org/2003/role/totalLabel"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_PaymentsToAcquirePropertyPlantAndEquipment" xlink:label="loc_PaymentsToAcquirePropertyPlantAndEquipment"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_CashFlowAbstract" xlink:to="loc_PaymentsToAcquirePropertyPlantAndEquipment" order="3"/>
+  </link:presentationLink>
+  <link:presentationLink xlink:type="extended" xlink:role="http://example.com/role/RevenueDetails">
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_RevenueDetailsAbstract" xlink:label="loc_RevenueDetailsAbstract"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_RevenueFromProducts" xlink:label="loc_RevenueFromProducts"/>
+    <link:presentationArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child" xlink:from="loc_RevenueDetailsAbstract" xlink:to="loc_RevenueFromProducts" order="1"/>
+  </link:presentationLink>
+</link:linkbase>

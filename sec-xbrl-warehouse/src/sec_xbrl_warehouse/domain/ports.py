@@ -115,7 +115,13 @@ class ControlRepository(Protocol):
         retry_at: datetime | None = None,
     ) -> None: ...
 
-    async def upsert_filing(self, filing: FilingRef) -> None: ...
+    async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
+        """Insert or update a filing row.
+
+        With `keep_derived`, stored `fiscal_year`, `fiscal_period`, and
+        `report_date` are not replaced by NULL (discovery metadata lacks them).
+        """
+        ...
 
     async def update_filing_package(
         self, manifest: FilingPackageManifest, revision: int | None = None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import tempfile
 import traceback
@@ -83,7 +84,7 @@ class IncrementalFilingIngestor:
                 )
             return completed
         self.settings.ensure_directories()
-        await self.control.upsert_filing(filing)
+        await _upsert_discovered_filing(self.control, filing)
         try:
             with tempfile.TemporaryDirectory(
                 prefix="filing-", dir=self.settings.temp_dir
@@ -341,3 +342,16 @@ class IncrementalFilingIngestor:
             await asyncio.to_thread(self.object_store.put_bytes, data, key)
             result["report_object_key"] = key
         return result
+
+
+async def _upsert_discovered_filing(control: ControlRepository, filing: FilingRef) -> None:
+    """Upsert discovery metadata without erasing fiscal fields an extraction stored.
+
+    Repositories whose `upsert_filing` lacks the `keep_derived` keyword (test
+    doubles, older adapters) get a plain upsert; the post-extraction upsert
+    rewrites the derived fields either way.
+    """
+    if "keep_derived" in inspect.signature(control.upsert_filing).parameters:
+        await control.upsert_filing(filing, keep_derived=True)
+    else:
+        await control.upsert_filing(filing)

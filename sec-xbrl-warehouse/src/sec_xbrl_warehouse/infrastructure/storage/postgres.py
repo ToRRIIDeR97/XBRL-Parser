@@ -580,6 +580,7 @@ class PostgresControlRepository:
                 )
             row.state = JobState.RETRY.value
             row.attempts = 0
+            row.deferred_since = None
             row.available_at = func.now()
             row.locked_at = None
             row.locked_by = None
@@ -664,6 +665,7 @@ class PostgresControlRepository:
                     locked_by=None,
                     heartbeat_at=None,
                     last_error=None,
+                    deferred_since=None,
                 )
             )
             if changed.rowcount != 1:  # type: ignore[attr-defined]
@@ -679,12 +681,15 @@ class PostgresControlRepository:
         attempt: int | None = None,
         retry_at: datetime | None = None,
         defer_seconds: float | None = None,
-    ) -> None:
+        max_defer_seconds: float | None = None,
+    ) -> JobState:
         """Record a failure: retry with backoff, or dead when out of attempts/permanent.
 
         `defer_seconds` marks a deferral, not a failure (for example the SEC egress
         lock is busy): the job returns to `retry` after that delay and the attempt
-        isn't counted.
+        isn't counted. Deferral is capped: once the job has been deferred for
+        `max_defer_seconds` since its first deferral (database time), it goes
+        `dead` with that reason. Returns the job's new state.
         """
         async with self.sessions.begin() as session:
             row = await session.scalar(
@@ -699,14 +704,31 @@ class PostgresControlRepository:
             ):
                 raise StateTransitionError(f"Cannot fail a job no longer owned: {job_id}")
             if defer_seconds is not None:
+                database_now = await session.scalar(select(func.now()))
+                if database_now is None:
+                    raise RuntimeError("PostgreSQL did not return now()")
+                first_deferred = row.deferred_since or database_now
+                row.deferred_since = first_deferred
+                deferred_for = (database_now - first_deferred).total_seconds()
+                row.locked_at = None
+                row.locked_by = None
+                row.heartbeat_at = None
+                if max_defer_seconds is not None and deferred_for >= max_defer_seconds:
+                    row.state = JobState.DEAD.value
+                    row.last_error = (
+                        f"Deferred for {deferred_for:.0f}s (limit {max_defer_seconds:.0f}s) "
+                        f"waiting for the SEC egress lock: {error}"
+                    )[:16_000]
+                    JOB_DEAD_LETTERS.labels(
+                        job_type=row.job_type, reason="egress_busy_timeout"
+                    ).inc()
+                    return JobState.DEAD
                 row.state = JobState.RETRY.value
                 row.attempts = max(0, row.attempts - 1)
                 row.available_at = func.now() + timedelta(seconds=max(0.0, defer_seconds))
                 row.last_error = error[:16_000]
-                row.locked_at = None
-                row.locked_by = None
-                row.heartbeat_at = None
-                return
+                return JobState.RETRY
+            row.deferred_since = None
             can_retry = retryable and row.attempts < row.max_attempts
             row.state = JobState.RETRY.value if can_retry else JobState.DEAD.value
             # Database time plus jittered exponential backoff, capped at one hour,
@@ -722,6 +744,7 @@ class PostgresControlRepository:
             row.locked_at = None
             row.locked_by = None
             row.heartbeat_at = None
+            return JobState(row.state)
 
     async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
         values = {

@@ -24,6 +24,7 @@ from sec_xbrl_warehouse.domain.ports import (
 )
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
+from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     iter_xbrl_tables,
 )
@@ -229,6 +230,10 @@ class IncrementalFilingIngestor:
                 }
                 await self._save(job_id, "complete", result)
                 return result
+        except SecEgressBusyError:
+            # A deferral, not a failure: the worker reschedules the job, so record no
+            # diagnostics here (they would repeat on every deferral).
+            raise
         except Exception as exc:
             details = {
                 "error": str(exc),

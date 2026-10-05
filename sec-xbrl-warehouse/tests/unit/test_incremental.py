@@ -331,3 +331,26 @@ def test_ingestor_takes_egress_lock_before_online_extraction_only() -> None:
         )
         assert asyncio.run(ingestor.ingest(_filing()))["status"] == "complete"
         assert len(calls) == expected
+
+
+def test_busy_egress_lock_records_no_diagnostics() -> None:
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
+
+    async def busy() -> None:
+        raise SecEgressBusyError("busy")
+
+    control = _FakeControl()
+    ingestor = IncrementalFilingIngestor(
+        control,
+        _FakePackageStore(),
+        _FakeExtractor(),
+        _FakeWriter(),
+        _FakeWarehouse(),
+        settings=Settings(env="test", arelle_offline=False),
+        ensure_sec_egress=busy,
+    )
+    for _ in range(3):
+        with pytest.raises(SecEgressBusyError):
+            asyncio.run(ingestor.ingest(_filing()))
+    # The validation stage runs after extraction, so a busy lock records nothing.
+    assert not hasattr(control, "issues")

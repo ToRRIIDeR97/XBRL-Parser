@@ -10,6 +10,7 @@ the next process. No table is involved.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Protocol
 
 import asyncpg
@@ -34,11 +35,23 @@ class EgressLock(Protocol):
 class SecEgressLock:
     """Session-level PostgreSQL advisory lock guarding SEC egress for one process."""
 
-    def __init__(self, settings: Settings, *, connect_timeout_seconds: float = 10.0) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        connect_timeout_seconds: float = 10.0,
+        check_interval_seconds: float | None = None,
+    ) -> None:
         url = make_url(settings.postgres_dsn).set(drivername="postgresql")
         self._dsn = url.render_as_string(hide_password=False)
         self._timeout = connect_timeout_seconds
+        self._check_interval = (
+            check_interval_seconds
+            if check_interval_seconds is not None
+            else settings.sec_egress_check_seconds
+        )
         self._connection: Any = None
+        self._checked_at = 0.0
         self._guard = asyncio.Lock()
 
     @property
@@ -68,6 +81,36 @@ class SecEgressLock:
                     "send SEC requests at a time"
                 )
             self._connection = connection
+            self._checked_at = time.monotonic()
+
+    async def verify(self) -> None:
+        """Confirm the held lock is still ours, at most every `check_interval` seconds.
+
+        A session lock lives exactly as long as its connection. If the connection
+        dropped silently, PostgreSQL has released the lock and another process may
+        hold it now, so the lock is re-acquired (raising `SecEgressBusyError` if
+        that fails) before more SEC requests are sent.
+        """
+        if self._connection is None or time.monotonic() - self._checked_at < self._check_interval:
+            return
+        async with self._guard:
+            connection = self._connection
+            if connection is None:
+                return
+            try:
+                held = await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND pid = pg_backend_pid() AND granted)",
+                    timeout=self._timeout,
+                )
+            except Exception:
+                held = False
+            if held:
+                self._checked_at = time.monotonic()
+                return
+            self._connection = None
+            connection.terminate()
+        await self.acquire()
 
     async def release(self) -> None:
         """Unlock and close the dedicated connection. Safe to call when not held."""

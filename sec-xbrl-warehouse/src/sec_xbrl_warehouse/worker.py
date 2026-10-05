@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from sec_xbrl_warehouse.config import Settings
-from sec_xbrl_warehouse.domain.enums import JobType
+from sec_xbrl_warehouse.domain.enums import JobState, JobType
 from sec_xbrl_warehouse.domain.models import JobRecord
 from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.exceptions import (
@@ -200,18 +200,20 @@ class Worker:
             # Another process is sending SEC traffic: defer without spending an attempt.
             logger.warning("sec_egress_busy", job_id=str(job.id), job_type=job.job_type.value)
             try:
-                await self.control.fail_job(
+                deferred_state = await self.control.fail_job(
                     job.id,
                     str(exc),
                     retryable=True,
                     defer_seconds=self.settings.sec_egress_busy_retry_seconds,
+                    max_defer_seconds=self.settings.sec_egress_max_defer_seconds,
                     worker_id=self.settings.worker_id,
                     attempt=job.attempts,
                 )
             except StateTransitionError:
                 JOB_TRANSITIONS.labels(state="lease_lost", job_type=job.job_type.value).inc()
             else:
-                JOB_TRANSITIONS.labels(state="deferred", job_type=job.job_type.value).inc()
+                outcome = "dead" if deferred_state == JobState.DEAD else "deferred"
+                JOB_TRANSITIONS.labels(state=outcome, job_type=job.job_type.value).inc()
         except Exception as exc:
             logger.exception("job_failed", job_id=str(job.id), job_type=job.job_type.value)
             retryable = is_retryable_exception(exc)

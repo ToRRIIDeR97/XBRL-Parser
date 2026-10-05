@@ -32,7 +32,12 @@ connection.
   ("another process holds the SEC egress lock"); nothing is sent. A worker defers
   such a job by `XBRL_SEC_EGRESS_BUSY_RETRY_SECONDS` (default 60) without spending
   an attempt. A CLI command exits with the error.
-- If the holder crashes, PostgreSQL ends its session and frees the lock.
+- If the holder crashes, PostgreSQL ends its session and frees the lock. A holder
+  checks its lock connection every `XBRL_SEC_EGRESS_CHECK_SECONDS` before SEC requests,
+  so a silently dropped connection can't leave two SEC-active processes.
+- Deferral is capped by `XBRL_SEC_EGRESS_MAX_DEFER_SECONDS` (default 6 hours) from
+  the first deferral; the job then goes `dead` (migration `0005_job_deferral` adds
+  `ingestion_jobs.deferred_since`).
 - Online Arelle taxonomy fetches (`XBRL_ARELLE_OFFLINE=false`) run only after the
   worker holds the lock. With pinned packages and offline mode there are none.
 - The lock lives in the control-plane database, so it coordinates processes that

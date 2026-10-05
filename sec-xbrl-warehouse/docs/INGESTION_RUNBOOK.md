@@ -25,11 +25,25 @@ xbrl-warehouse worker run
 1. Discover the latest daily XBRL index.
 2. Normalize and upsert filing references.
 3. Enqueue accessions not already complete for the current extraction revision.
-4. Download each filing directory manifest and package.
+4. Download each filing directory index and the package files Arelle needs (see the
+   bronze section of ARCHITECTURE.md). A filing whose index lists only the `.txt`
+   submission and `<accession>-xbrl.zip` is expanded from the ZIP.
 5. Run Arelle extraction and validation.
 6. Write silver Parquet and ClickHouse.
 7. Run filing-level reconciliation and quality checks.
 8. Mark complete or retry/quarantine.
+
+New filing jobs default to the current extraction revision
+(`CURRENT_EXTRACTION_REVISION` in `domain/xbrl.py`, now 3). To re-extract a filing
+already loaded at an older revision, enqueue it again; the new revision gets its own
+job idempotency key, and older lineage is retained:
+
+```bash
+xbrl-warehouse filing enqueue --accession <accession> --cik <cik> \
+  --company-name <name> --form <form> --filed-date <YYYY-MM-DD> \
+  --primary-document <file>
+xbrl-warehouse worker run --job-type ingest_filing
+```
 
 ## Recovery
 

@@ -147,6 +147,15 @@ class XbrlDocumentMetadata(XbrlModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+# Extraction revision for newly queued filing jobs. Increment it when a change
+# alters extraction input or output (package selection, Arelle loading, fact
+# shaping) so re-ingestion writes a new revision instead of replacing lineage.
+# 3: inline document sets exclude exhibits and rendered pages, and `-xbrl.zip`
+# packages are expanded (filing package selection policy 2), filing fiscal
+# fields come from dei facts, and SEC `ixt-sec` inline transforms are applied.
+CURRENT_EXTRACTION_REVISION = 3
+
+
 class XbrlExtractionBundle(XbrlModel):
     filing: FilingRef
     metadata: XbrlDocumentMetadata

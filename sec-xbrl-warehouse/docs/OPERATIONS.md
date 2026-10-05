@@ -51,6 +51,8 @@ xbrl-warehouse taxonomy sync     # download missing or corrupt enabled packages
   `XBRL_ARELLE_OFFLINE=true` or `XBRL_ENV=production`. Elsewhere, extraction records a
   `warehouse:taxonomyPackageMissing` warning and resolves that taxonomy through the
   allowlisted web cache, so results can depend on the cache until `sync` runs.
+- `taxonomy status` reports `mapping_missing` for an `archive` entry whose mapped
+  directory has no files in the zip, which also stops extraction.
 - `taxonomy status` and `doctor` report an `uncovered` row for each required prefix
   with no enabled entry. `doctor` fails its "Taxonomy packages" check when any
   enabled entry isn't `ok`, any required prefix is uncovered, or `XBRL_ENV=production`

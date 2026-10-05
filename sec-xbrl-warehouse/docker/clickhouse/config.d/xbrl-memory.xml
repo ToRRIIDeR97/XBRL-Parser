@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<!--
+  Memory and retention settings for the 4 GiB ClickHouse container.
+
+  ClickHouse's server-wide limit is 0.9 x the container limit (3.6 GiB), and every
+  query, merge and cache counts against it. Two defaults made unrelated queries fail
+  with MEMORY_LIMIT_EXCEEDED (code 241):
+
+  - system.metric_log (and query_metric_log) have about a thousand columns. Each
+    background merge of metric_log peaked at 3.1 GiB, and whatever query ran during
+    that second was killed. The warehouse exports its own Prometheus metrics, so
+    both logs are turned off.
+  - Cache defaults (5-8 GiB each) are larger than the container itself.
+
+  Other system logs had no retention; trace_log alone reached 130 million rows.
+-->
+<clickhouse>
+    <metric_log remove="1"/>
+    <query_metric_log remove="1"/>
+
+    <trace_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></trace_log>
+    <text_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></text_log>
+    <query_log><ttl>event_date + INTERVAL 14 DAY DELETE</ttl></query_log>
+    <part_log><ttl>event_date + INTERVAL 14 DAY DELETE</ttl></part_log>
+    <processors_profile_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></processors_profile_log>
+    <asynchronous_metric_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></asynchronous_metric_log>
+
+    <mark_cache_size>268435456</mark_cache_size>
+    <uncompressed_cache_size>268435456</uncompressed_cache_size>
+    <primary_index_cache_size>268435456</primary_index_cache_size>
+    <index_mark_cache_size>134217728</index_mark_cache_size>
+    <vector_similarity_index_cache_size>67108864</vector_similarity_index_cache_size>
+</clickhouse>

@@ -116,6 +116,10 @@ them, so discovery usually leaves them NULL.
 - Raw dei facts and the saved extraction checkpoint are unchanged. The values are
   derived again on replay, so they are deterministic. No date-based calendar
   inference is done. Bulk FSNDS rows keep the SEC's own `fy` and `fp`.
+- `upsert_filing` never replaces a stored `fiscal_year`, `fiscal_period`, or
+  `report_date` with NULL, so the discovery-only upsert at the start of a re-ingestion
+  doesn't erase values an earlier extraction stored. A later non-NULL value still
+  replaces them. A period that differs from discovery only in case isn't a mismatch.
 
 ### `xbrl_contexts`
 

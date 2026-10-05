@@ -450,13 +450,8 @@ class PostgresControlRepository:
             "is_amendment": filing.is_amendment,
             "is_inline_xbrl": filing.is_inline_xbrl,
         }
-        statement = pg_insert(FilingRow).values(**values)
-        statement = statement.on_conflict_do_update(
-            index_elements=[FilingRow.accession],
-            set_={key: value for key, value in values.items() if key != "accession"},
-        )
         async with self.sessions.begin() as session:
-            await session.execute(statement)
+            await session.execute(filing_upsert_statement(values))
 
     async def record_validation_issues(self, issues: Sequence[ValidationIssue]) -> None:
         if not issues:
@@ -513,3 +508,18 @@ class PostgresControlRepository:
             locked_at=row.locked_at,
             locked_by=row.locked_by,
         )
+
+
+# Filing-level fields derived from the filing's own dei facts. Discovery usually
+# lacks them, so a NULL from discovery (for example the early upsert when a
+# filing is re-ingested) must not erase a value an earlier extraction stored.
+_PRESERVED_FILING_FIELDS = ("report_date", "fiscal_year", "fiscal_period")
+
+
+def filing_upsert_statement(values: dict[str, Any]) -> Any:
+    """Insert or update a filing row, keeping stored fiscal fields over NULLs."""
+    statement = pg_insert(FilingRow).values(**values)
+    updates: dict[str, Any] = {key: value for key, value in values.items() if key != "accession"}
+    for key in _PRESERVED_FILING_FIELDS:
+        updates[key] = func.coalesce(statement.excluded[key], getattr(FilingRow, key))
+    return statement.on_conflict_do_update(index_elements=[FilingRow.accession], set_=updates)

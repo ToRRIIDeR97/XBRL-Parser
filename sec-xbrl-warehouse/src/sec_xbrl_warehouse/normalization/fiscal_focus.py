@@ -57,7 +57,9 @@ def derive_fiscal_focus(
     mismatches = {
         field: {"discovery": _json(getattr(filing, field)), "dei": _json(value)}
         for field, value in updates.items()
-        if value is not None and getattr(filing, field) not in (None, value)
+        if value is not None
+        and getattr(filing, field) is not None
+        and _comparable(getattr(filing, field)) != _comparable(value)
     }
     if mismatches:
         issues.append(
@@ -70,6 +72,11 @@ def derive_fiscal_focus(
             )
         )
     return filing.model_copy(update=updates), tuple(issues)
+
+
+def _comparable(value: object) -> object:
+    # Discovery may spell the period in another case ("q1"); that isn't a mismatch.
+    return value.strip().upper() if isinstance(value, str) else value
 
 
 def _json(value: object) -> object:

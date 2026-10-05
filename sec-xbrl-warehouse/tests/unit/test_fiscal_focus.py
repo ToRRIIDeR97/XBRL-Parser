@@ -163,7 +163,12 @@ def test_ingest_preserves_derived_fields_only_on_the_discovery_upsert() -> None:
         async def upsert_filing(self, filing):
             calls.append({"plain": True})
 
+    class _KwargsControl:
+        async def upsert_filing(self, filing, **options):
+            calls.append(options)
+
     filing = _with().filing
     asyncio.run(_upsert_discovered_filing(_Control(), filing))  # type: ignore[arg-type]
     asyncio.run(_upsert_discovered_filing(_PlainControl(), filing))  # type: ignore[arg-type]
-    assert calls == [{"keep_derived": True}, {"plain": True}]
+    asyncio.run(_upsert_discovered_filing(_KwargsControl(), filing))  # type: ignore[arg-type]
+    assert calls == [{"keep_derived": True}, {"plain": True}, {"keep_derived": True}]

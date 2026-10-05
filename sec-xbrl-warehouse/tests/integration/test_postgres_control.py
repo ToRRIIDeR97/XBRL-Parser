@@ -298,7 +298,7 @@ async def test_upsert_filing_and_validation_issues(postgres_settings: Settings) 
         await repo.close()
 
 
-async def test_upsert_filing_keeps_stored_fiscal_fields_over_nulls(
+async def test_discovery_upsert_keeps_stored_fiscal_fields_over_nulls(
     postgres_settings: Settings,
 ) -> None:
     from sqlalchemy import select
@@ -316,7 +316,9 @@ async def test_upsert_filing_keeps_stored_fiscal_fields_over_nulls(
             }
         )
         await repo.upsert_filing(enriched)
-        await repo.upsert_filing(_filing(accession).model_copy(update={"form": "10-K/A"}))
+        await repo.upsert_filing(
+            _filing(accession).model_copy(update={"form": "10-K/A"}), keep_derived=True
+        )
         async with repo.sessions() as session:
             row = (
                 await session.execute(select(FilingRow).where(FilingRow.accession == accession))
@@ -333,6 +335,13 @@ async def test_upsert_filing_keeps_stored_fiscal_fields_over_nulls(
                 await session.execute(select(FilingRow).where(FilingRow.accession == accession))
             ).scalar_one()
         assert row.fiscal_period == "Q4"
+        # A later extraction that derives NULL (conflicting dei values) clears it.
+        await repo.upsert_filing(enriched.model_copy(update={"fiscal_year": None}))
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert row.fiscal_year is None
     finally:
         await repo.close()
 

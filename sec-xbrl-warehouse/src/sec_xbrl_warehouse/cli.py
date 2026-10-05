@@ -18,6 +18,7 @@ from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.enums import DatasetKind, JobType
 from sec_xbrl_warehouse.domain.models import BackfillPlan, DatasetArtifact, FilingRef
 from sec_xbrl_warehouse.domain.ports import ControlRepository
+from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.infrastructure.http.sec_client import (
     SecHttpClient,
     build_archive_directory_url,
@@ -344,7 +345,7 @@ def filing_enqueue(
     filed_date: str = typer.Option(..., help="Filing date in YYYY-MM-DD format."),
     primary_document: str | None = typer.Option(None),
     instance_document: str | None = typer.Option(None),
-    extraction_revision: int = typer.Option(1, min=1),
+    extraction_revision: int = typer.Option(CURRENT_EXTRACTION_REVISION, min=1),
 ) -> None:
     """Queue one accession without guessing issuer identity from its number."""
     parsed_filed_date = _parse_cli_date(filed_date, "filed-date")

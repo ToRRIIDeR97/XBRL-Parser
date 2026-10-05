@@ -274,7 +274,7 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
         )
     )
     assert discovered == {"filings_enqueued": 1}
-    assert control.jobs[0]["idempotency_key"] == "filing:0000000001-26-000001:1"
+    assert control.jobs[0]["idempotency_key"] == "filing:0000000001-26-000001:3"
 
 
 def test_worker_handles_missing_handler_and_stops_while_idle() -> None:

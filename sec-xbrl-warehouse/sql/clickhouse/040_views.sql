@@ -23,3 +23,9 @@ WHERE (accession, extraction_revision) IN
     (SELECT accession, max(extraction_revision) FROM {{database}}.xbrl_extractions GROUP BY accession)
 ORDER BY mapping_version DESC, _ingested_at DESC
 LIMIT 1 BY accession, raw_fact_id, canonical_metric;
+
+CREATE OR REPLACE VIEW {{database}}.v_statement_lines_latest AS
+SELECT *
+FROM {{database}}.xbrl_statement_lines FINAL
+WHERE (accession, extraction_revision) IN
+    (SELECT accession, max(extraction_revision) FROM {{database}}.xbrl_extractions GROUP BY accession);

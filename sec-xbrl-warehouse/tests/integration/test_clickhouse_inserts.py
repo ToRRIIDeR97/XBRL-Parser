@@ -150,3 +150,180 @@ def test_xbrl_publication_and_canonical_views_are_replay_safe(
         )[0]["n"]
         == 1
     )
+
+
+def test_statement_lines_are_replay_safe_and_latest_revision_only(
+    warehouse: ClickHouseWarehouse,
+) -> None:
+    from sec_xbrl_warehouse.domain.enums import RelationshipType
+    from sec_xbrl_warehouse.domain.xbrl import (
+        XbrlDocumentMetadata,
+        XbrlExtractionBundle,
+        XbrlRelationship,
+        XbrlRole,
+    )
+    from sec_xbrl_warehouse.normalization.statements import PARENT_CHILD_ARCROLE
+
+    role = "http://example.com/role/BalanceSheet"
+    bundle = XbrlExtractionBundle(
+        filing=FilingRef(
+            accession="0000000010-26-000010",
+            cik=10,
+            company_name="Lines Corp",
+            form="10-K",
+            filed_date=date(2026, 2, 15),
+            archive_directory_url="https://www.sec.gov/Archives/edgar/data/10/10",
+        ),
+        metadata=XbrlDocumentMetadata(
+            entrypoint="x.htm",
+            document_type="inline",
+            taxonomy_namespaces=(),
+            source_documents=("x.htm",),
+            software_name="arelle",
+            software_version="test",
+        ),
+        contexts=(),
+        concepts=(),
+        facts=(),
+        relationships=tuple(
+            XbrlRelationship(
+                relationship_id=f"{index:064d}",
+                relationship_type=RelationshipType.PRESENTATION,
+                link_role_uri=role,
+                arc_role_uri=PARENT_CHILD_ARCROLE,
+                from_qname="ex:BalanceSheetAbstract",
+                to_qname=f"ex:{child}",
+                order=Decimal(index),
+            )
+            for index, child in enumerate(("Assets", "Liabilities"), start=1)
+        ),
+        footnotes=(),
+        validation_issues=(),
+        extraction_revision=1,
+        roles=(
+            XbrlRole(
+                role_uri=role,
+                definition="100000 - Statement - Balance Sheets",
+                sort_code="100000",
+                category="statement",
+            ),
+        ),
+    )
+    counts = warehouse.insert_xbrl_bundle(bundle)
+    assert (counts["roles"], counts["statement_lines"]) == (1, 3)
+    warehouse.publish_xbrl_bundle(bundle, counts)
+    warehouse.insert_xbrl_bundle(bundle)  # replay
+    revised = bundle.model_copy(update={"extraction_revision": 2})
+    revised = revised.model_copy(update={"relationships": revised.relationships[:1]})
+    revised_counts = warehouse.insert_xbrl_bundle(revised)
+    query = (
+        "SELECT extraction_revision, line_number, concept_qname FROM v_statement_lines_latest "
+        "WHERE accession = %(accession)s ORDER BY line_number"
+    )
+    rows = warehouse.query(query, {"accession": bundle.filing.accession})
+    assert [row["concept_qname"] for row in rows] == [
+        "ex:BalanceSheetAbstract",
+        "ex:Assets",
+        "ex:Liabilities",
+    ]
+    warehouse.publish_xbrl_bundle(revised, revised_counts)
+    rows = warehouse.query(query, {"accession": bundle.filing.accession})
+    assert [(row["extraction_revision"], row["concept_qname"]) for row in rows] == [
+        (2, "ex:BalanceSheetAbstract"),
+        (2, "ex:Assets"),
+    ]
+    roles = warehouse.query(
+        "SELECT statement_kind FROM xbrl_roles FINAL WHERE accession = %(accession)s",
+        {"accession": bundle.filing.accession},
+    )
+    assert {row["statement_kind"] for row in roles} == {"balance_sheet"}
+
+
+def test_series_rebuild_versions_priority_and_company_mirror(
+    warehouse: ClickHouseWarehouse,
+) -> None:
+    from datetime import UTC, datetime
+
+    from sec_xbrl_warehouse.domain.models import Company
+    from sec_xbrl_warehouse.query.series import rebuild_metric_series
+    from sec_xbrl_warehouse.query.service import QueryService
+
+    cik = 555555
+
+    def canonical(accession, accepted, value, concept, raw):
+        return CanonicalFact(
+            canonical_fact_id=(raw + "c" * 64)[:64],
+            raw_fact_id=(raw + "r" * 64)[:64],
+            accession=accession,
+            cik=cik,
+            filed_date=accepted.date(),
+            accepted_at=accepted,
+            form="10-K",
+            canonical_metric="revenue",
+            normalized_value_decimal=Decimal(value),
+            normalized_unit="USD",
+            period_kind="duration",
+            period_start=date(2024, 1, 1),
+            period_end=date(2024, 12, 31),
+            dimensions_json="[]",
+            mapping_id=UUID(int=9),
+            mapping_version=1,
+            mapping_confidence=1.0,
+            mapping_explanation="integration",
+            extraction_revision=1,
+            concept_namespace="http://fasb.org/us-gaap/2024",
+            concept_qname=concept,
+            fiscal_year=2024,
+            fiscal_period="FY",
+            report_date=date(2024, 12, 31),
+        )
+
+    warehouse.insert_canonical_facts(
+        [
+            canonical(
+                "0000555555-25-000001",
+                datetime(2025, 2, 1, tzinfo=UTC),
+                100,
+                "us-gaap:Revenues",
+                "a",
+            ),
+            canonical(
+                "0000555555-25-000001",
+                datetime(2025, 2, 1, tzinfo=UTC),
+                90,
+                "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                "b",
+            ),
+            canonical(
+                "0000555555-26-000001",
+                datetime(2026, 2, 1, tzinfo=UTC),
+                105,
+                "us-gaap:Revenues",
+                "c",
+            ),
+        ]
+    )
+    priorities = {
+        ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"): 1,
+        ("us-gaap", "Revenues"): 2,
+    }
+    rebuild_metric_series(warehouse, cik, priorities=priorities)
+    rebuild_metric_series(warehouse, cik, priorities=priorities)  # replay is idempotent
+    service = QueryService(warehouse)
+
+    def annual(**kwargs):
+        rows = service.metric_series(cik=cik, metrics=["revenue"], **kwargs)
+        return [
+            (Decimal(str(row["value"])), row["concept_qname"], row["fiscal_year"]) for row in rows
+        ]
+
+    assert annual() == [(Decimal(105), "us-gaap:Revenues", 2024)]
+    assert annual(as_of=datetime(2025, 6, 1, tzinfo=UTC)) == [
+        (Decimal(90), "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax", 2024)
+    ]
+    assert annual(view="as_reported")[0][0] == Decimal(90)
+    assert annual(as_of=datetime(2025, 1, 1, tzinfo=UTC)) == []
+
+    warehouse.upsert_company_mirror(Company(cik=cik, name="Mirror Co", tickers=("mir",)))
+    assert service.cik_for_ticker("MIR") == cik
+    assert service.cik_for_ticker("NONE") is None

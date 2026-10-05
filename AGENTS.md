@@ -17,8 +17,9 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 - Before changing application code, read `sec-xbrl-warehouse/AGENTS.md` (the data and
   validation contract), `HANDOFF.md`, `docs/ARCHITECTURE.md`, and `docs/DATA_MODEL.md`.
 - Check `HANDOFF.md` for live ingestion state before starting a worker, enqueueing
-  jobs, or running discovery. Run only one SEC-active process at a time; the SEC rate
-  limiter is process-local.
+  jobs, or running discovery. Only one process can send SEC traffic at a time: the
+  SEC rate limiter is process-local, so a PostgreSQL advisory lock (`SecEgressLock`)
+  makes a second SEC-active process fail fast with `SecEgressBusyError`.
 - `worker run --job-type <type>` (repeatable) claims only those job types and leaves
   other queued jobs untouched, e.g. `--job-type ingest_filing` while bulk loads are held.
 - Retain Arelle semantics, immutable raw artifacts, reversible canonical mappings,
@@ -46,12 +47,15 @@ docker compose build api worker
 docker compose up -d postgres clickhouse minio minio-init
 docker compose run --rm --entrypoint alembic worker upgrade head
 docker compose run --rm worker db init-clickhouse
+docker compose run --rm worker taxonomy sync
 docker compose run --rm worker doctor
 docker compose up -d api
 ```
 
+`doctor` fails while a pinned taxonomy package is missing; `taxonomy sync` installs them.
+
 Privileged and operator CLI commands (migrations, `catalog`, `backfill`, `filing`,
-`mapping`) run through the `worker` service. The `api` service has no writer
+`mapping`, `taxonomy`, `company`, `jobs`) run through the `worker` service. The `api` service has no writer
 credentials or data volume. It connects as `xbrl_api` to PostgreSQL and ClickHouse, and
 those identities must be provisioned first (see SECURITY.md). Docs are served at
 `http://127.0.0.1:8080/docs`. Avoid `docker compose down -v`, which deletes data volumes.

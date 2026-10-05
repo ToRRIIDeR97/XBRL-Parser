@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema"
+        xmlns:xbrli="http://www.xbrl.org/2003/instance"
+        targetNamespace="https://xbrl.fasb.org/fixture-taxonomy/2025"
+        elementFormDefault="qualified">
+  <import namespace="http://www.xbrl.org/2003/instance"
+          schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <element name="Revenues" id="fx_Revenues" type="xbrli:monetaryItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+</schema>

@@ -147,6 +147,30 @@ class XbrlDocumentMetadata(XbrlModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
+# Extraction revision for newly queued filing jobs. Increment it when a change
+# alters extraction input or output (package selection, Arelle loading, fact
+# shaping) so re-ingestion writes a new revision instead of replacing lineage.
+# 3: inline document sets exclude exhibits and rendered pages, and `-xbrl.zip`
+# packages are expanded (filing package selection policy 2), filing fiscal
+# fields come from dei facts, SEC `ixt-sec` inline transforms are applied, fact
+# `taxonomy_version` comes from the concept namespace (was the XML Schema "2001"),
+# and role types (statement definitions) are captured.
+CURRENT_EXTRACTION_REVISION = 3
+
+
+class XbrlRole(XbrlModel):
+    """An extended link role type (for example a statement) as declared in the DTS."""
+
+    role_uri: str
+    definition: str | None = None
+    used_on: tuple[str, ...] = ()
+    # Leading digits of an SEC-style definition ("100000 - Statement - ...").
+    sort_code: str | None = None
+    # Middle token of the SEC definition convention, lower-cased: statement,
+    # disclosure, document, or other.
+    category: str = "other"
+
+
 class XbrlExtractionBundle(XbrlModel):
     filing: FilingRef
     metadata: XbrlDocumentMetadata
@@ -157,3 +181,5 @@ class XbrlExtractionBundle(XbrlModel):
     footnotes: tuple[XbrlFootnote, ...]
     validation_issues: tuple[ValidationIssue, ...]
     extraction_revision: int = 1
+    # Defaults to () so extraction JSON written before roles were captured still loads.
+    roles: tuple[XbrlRole, ...] = ()

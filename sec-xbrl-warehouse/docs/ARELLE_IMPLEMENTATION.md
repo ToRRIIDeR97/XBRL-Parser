@@ -15,10 +15,48 @@ The implementation should:
 
 Do not assume the primary HTML document is the only document containing inline facts. Preserve and load the entire filing package so Arelle can resolve schemas, linkbases, and multi-document inline sets.
 
+## SEC inline transformations
+
+EDGAR filings use the SEC `ixt-sec` transformation registry for cover-page and some
+numeric facts. `_create_controller` always loads the in-repo plugin
+`infrastructure/xbrl/sec_transforms.py` by path, independent of
+`XBRL_ARELLE_PLUGIN_PATHS`. The plugin registers its functions through Arelle's
+`ModelManager.LoadCustomTransforms` hook. Controller creation fails with
+`XbrlExtractionError` if the plugin can't be loaded or any of its transforms is
+missing afterward.
+
+- Registered transforms: `boolballotbox`, `yesnoballotbox`, `countrynameen`,
+  `stateprovnameen`, `edgarprovcountryen`, `exchnameen`, `entityfilercategoryen`,
+  `numwordsen`, `numinf`, `numneginf`, `numnan`, `duryear`, `durmonth`, `durweek`,
+  `durday`, `durhour`, `durwordsen`, `datequarterend`.
+- Arelle still applies each transform and validates the result against the concept
+  type. The plugin only maps displayed text to an XBRL lexical value.
+- Input a transform can't map raises Arelle's `FunctionArgType`, which Arelle reports
+  as `transformValueError`. A format in the `ixt-sec` namespace that isn't registered
+  is reported as `invalidTransformation`.
+- The fact keeps its displayed text in `raw_value`. Its typed value is `None`; the
+  `(ixTransformValueError)` sentinel is never stored.
+- The name tables (states and provinces, countries, EDGAR location codes, exchanges)
+  are data checked against the SEC staff reference plugin, the dei 2024/2025 code
+  lists, and the SEC "EDGAR State and Country Codes" list. A displayed name matches
+  only as a whole, ignoring case, accents, and punctuation. `edgarprovcountryen`
+  covers Canadian provinces, US territories, and countries, not US states, so
+  "Georgia" is the country (`2Q`). `entityfilercategoryen` accepts only the three
+  accelerated-filer categories in dei 2024 and later. `booltrue` and `boolfalse`
+  aren't SEC transforms and are reported as `invalidTransformation`.
+- `metadata.provenance["transform_registries"]` lists every available registry as
+  `{"namespace", "version", "source"}`: the standard `ixt` registries from
+  `arelle-release` and the `ixt-sec` plugin version.
+
+To update the plugin, change `sec_transforms.py`, bump `SEC_TRANSFORM_REGISTRY_VERSION`
+and `CURRENT_EXTRACTION_REVISION`, extend `tests/unit/test_sec_transforms.py`, and
+re-extract the affected filings.
+
 ## Taxonomy cache and network policy
 
 - Store Arelle's web cache under `XBRL_ARELLE_CACHE_DIR`; do not use a user-global cache in workers or tests.
-- Put reviewed, checksum-pinned taxonomy packages under `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR` and register them in `config/taxonomy_packages.yml`.
+- Put reviewed, checksum-pinned taxonomy packages under `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR` and register them in `config/taxonomy_packages.yml`. `infrastructure/xbrl/taxonomy_packages.py` owns the registry, `package_status`, and `sync_taxonomy_packages`; `_create_controller` uses the same code to verify every entry, register `package` entries with Arelle, and add verified `archive`/`file` prefix mappings (plus http/https twins of every prefix) to Arelle's package remappings (see OPERATIONS.md, "Taxonomy packages").
+- `www.w3.org/2001/xml.xsd` and `www.w3.org/2001/03/xml.xsd` resolve to copies shipped in `infrastructure/xbrl/schemas/`. Arelle's taxonomy package schema imports them, so packages load in offline mode.
 - Filing-package documents must resolve locally from immutable bronze bytes. Controlled cache fills may be allowed only for standard taxonomy hosts listed in configuration.
 - `XBRL_ARELLE_OFFLINE=true` must make any uncached remote dependency a deterministic failure, not an implicit network request.
 - Record Arelle, plugin, disclosure-system, taxonomy-package, and extraction-schema versions with every extraction revision.

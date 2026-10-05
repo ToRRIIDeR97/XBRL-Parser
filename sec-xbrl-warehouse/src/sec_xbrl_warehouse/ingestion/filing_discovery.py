@@ -160,22 +160,23 @@ async def enrich_companies(
     as_of: date,
     data_api_base: str = "https://data.sec.gov",
     max_age_days: int | None = None,
+    now: datetime | None = None,
 ) -> int:
     """Fetch submissions for new (and, optionally, stale) CIKs and store them.
 
     The input is deduplicated. CIKs without a company row are always fetched.
     With `max_age_days`, stored companies fetched more than that many days before
-    `as_of` are fetched again. Each discovery run costs at most one rate-limited
-    request per such CIK. Returns the number of companies stored.
+    now (UTC) are fetched again; staleness is wall-clock, so historical backfills
+    refresh too. `as_of` is the discovery date that triggered enrichment. Each
+    discovery run costs at most one rate-limited request per such CIK. Returns the
+    number of companies stored.
     """
     wanted = sorted({int(cik) for cik in ciks})
     if not wanted:
         return 0
     skip = set(await control.known_company_ciks(wanted))
     if max_age_days is not None and skip:
-        cutoff = datetime.combine(as_of, datetime.min.time(), tzinfo=UTC) - timedelta(
-            days=max_age_days
-        )
+        cutoff = (now or datetime.now(UTC)) - timedelta(days=max_age_days)
         skip -= set(await control.stale_company_ciks(sorted(skip), cutoff))
     stored = 0
     for cik in wanted:

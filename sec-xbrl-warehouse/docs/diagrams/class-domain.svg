@@ -1,0 +1,185 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1250 930" width="1250" height="930" role="img" aria-labelledby="t d">
+<title id="t">UML class view: core domain types</title>
+<desc id="d">Pydantic domain types in src/sec_xbrl_warehouse/domain and their associations: filings, packages, extraction bundles, raw and canonical facts, mappings, artifacts, validation issues, and jobs.</desc>
+<defs>
+<marker id="open" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11" fill="none" stroke="#3d444d" stroke-width="1.4"/></marker>
+<marker id="filled" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11 Z" fill="#3d444d"/></marker>
+<marker id="diamond" viewBox="0 0 16 10" refX="1" refY="5" markerWidth="16" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,5 L8,1 L15,5 L8,9 Z" fill="#3d444d"/></marker>
+</defs>
+<style>
+text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #1f2328; }
+.m { fill: #57606a; }
+.halo { paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+</style>
+<rect width="1250" height="930" fill="#ffffff"/>
+<text x="20" y="30" font-size="17" text-anchor="start" font-weight="600">Class view · core domain types (domain/models.py, domain/xbrl.py, domain/canonical.py)</text>
+<text x="20" y="50" font-size="11.5" text-anchor="start" class="m">Selected attributes only. ◆ = composition (the bundle or manifest owns its parts). Associations by key are labelled with the key field.</text>
+<rect x="30" y="80" width="200" height="98" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="130.0" y="98" font-size="13" text-anchor="middle" font-weight="600">Company</text>
+<path d="M30,106 L230,106" stroke="#3d444d" stroke-width="1"/>
+<text x="38" y="122" font-size="11" text-anchor="start">cik: int</text>
+<text x="38" y="137" font-size="11" text-anchor="start">name: str</text>
+<text x="38" y="152" font-size="11" text-anchor="start">tickers: tuple[str]</text>
+<text x="38" y="167" font-size="11" text-anchor="start">fiscal_year_end: str?</text>
+<rect x="290" y="80" width="250" height="128" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="415.0" y="98" font-size="13" text-anchor="middle" font-weight="600">FilingRef</text>
+<path d="M290,106 L540,106" stroke="#3d444d" stroke-width="1"/>
+<text x="298" y="122" font-size="11" text-anchor="start">accession: str  {id}</text>
+<text x="298" y="137" font-size="11" text-anchor="start">cik: int</text>
+<text x="298" y="152" font-size="11" text-anchor="start">form: str</text>
+<text x="298" y="167" font-size="11" text-anchor="start">filed_date: date</text>
+<text x="298" y="182" font-size="11" text-anchor="start">fiscal_year, fiscal_period</text>
+<text x="298" y="197" font-size="11" text-anchor="start">is_amendment: bool</text>
+<rect x="620" y="80" width="260" height="98" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="750.0" y="98" font-size="13" text-anchor="middle" font-weight="600">FilingPackageManifest</text>
+<path d="M620,106 L880,106" stroke="#3d444d" stroke-width="1"/>
+<text x="628" y="122" font-size="11" text-anchor="start">package_object_key: str?</text>
+<text x="628" y="137" font-size="11" text-anchor="start">package_checksum_sha256: str?</text>
+<text x="628" y="152" font-size="11" text-anchor="start">manifest_object_key: str?</text>
+<text x="628" y="167" font-size="11" text-anchor="start">acquired_at: datetime</text>
+<rect x="960" y="80" width="260" height="113" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="1090.0" y="98" font-size="13" text-anchor="middle" font-weight="600">PackageMember</text>
+<path d="M960,106 L1220,106" stroke="#3d444d" stroke-width="1"/>
+<text x="968" y="122" font-size="11" text-anchor="start">name: str</text>
+<text x="968" y="137" font-size="11" text-anchor="start">source_url: str</text>
+<text x="968" y="152" font-size="11" text-anchor="start">checksum_sha256, size_bytes</text>
+<text x="968" y="167" font-size="11" text-anchor="start">is_xbrl_entrypoint: bool</text>
+<text x="968" y="182" font-size="11" text-anchor="start">source_archive: str?</text>
+<rect x="30" y="300" width="200" height="68" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="130.0" y="318" font-size="13" text-anchor="middle" font-weight="600">XbrlContext</text>
+<path d="M30,326 L230,326" stroke="#3d444d" stroke-width="1"/>
+<text x="38" y="342" font-size="11" text-anchor="start">context_hash, period_kind</text>
+<text x="38" y="357" font-size="11" text-anchor="start">dimensions: DimensionMember[*]</text>
+<rect x="30" y="390" width="200" height="68" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="130.0" y="408" font-size="13" text-anchor="middle" font-weight="600">XbrlConcept</text>
+<path d="M30,416 L230,416" stroke="#3d444d" stroke-width="1"/>
+<text x="38" y="432" font-size="11" text-anchor="start">qname, taxonomy_version</text>
+<text x="38" y="447" font-size="11" text-anchor="start">is_extension, labels</text>
+<rect x="30" y="480" width="200" height="68" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="130.0" y="498" font-size="13" text-anchor="middle" font-weight="600">XbrlRelationship</text>
+<path d="M30,506 L230,506" stroke="#3d444d" stroke-width="1"/>
+<text x="38" y="522" font-size="11" text-anchor="start">relationship_type, arc_role</text>
+<text x="38" y="537" font-size="11" text-anchor="start">from_qname → to_qname</text>
+<rect x="30" y="570" width="200" height="53" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="130.0" y="588" font-size="13" text-anchor="middle" font-weight="600">XbrlFootnote</text>
+<path d="M30,596 L230,596" stroke="#3d444d" stroke-width="1"/>
+<text x="38" y="612" font-size="11" text-anchor="start">linked_fact_ids: tuple[str]</text>
+<rect x="30" y="645" width="200" height="53" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="130.0" y="663" font-size="13" text-anchor="middle" font-weight="600">XbrlRole</text>
+<path d="M30,671 L230,671" stroke="#3d444d" stroke-width="1"/>
+<text x="38" y="687" font-size="11" text-anchor="start">role_uri, category</text>
+<rect x="290" y="320" width="250" height="68" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="415.0" y="338" font-size="13" text-anchor="middle" font-weight="600">XbrlExtractionBundle</text>
+<path d="M290,346 L540,346" stroke="#3d444d" stroke-width="1"/>
+<text x="298" y="362" font-size="11" text-anchor="start">extraction_revision: int</text>
+<text x="298" y="377" font-size="11" text-anchor="start">metadata: XbrlDocumentMetadata</text>
+<rect x="620" y="320" width="260" height="128" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="750.0" y="338" font-size="13" text-anchor="middle" font-weight="600">XbrlFact</text>
+<path d="M620,346 L880,346" stroke="#3d444d" stroke-width="1"/>
+<text x="628" y="362" font-size="11" text-anchor="start">fact_id: str</text>
+<text x="628" y="377" font-size="11" text-anchor="start">concept_qname, taxonomy_version</text>
+<text x="628" y="392" font-size="11" text-anchor="start">context_hash: str</text>
+<text x="628" y="407" font-size="11" text-anchor="start">value_decimal | value_text | …</text>
+<text x="628" y="422" font-size="11" text-anchor="start">dimension_hash: str</text>
+<text x="628" y="437" font-size="11" text-anchor="start">duplicate_ordinal: int</text>
+<rect x="960" y="320" width="260" height="128" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="1090.0" y="338" font-size="13" text-anchor="middle" font-weight="600">ConceptMapping</text>
+<path d="M960,346 L1220,346" stroke="#3d444d" stroke-width="1"/>
+<text x="968" y="362" font-size="11" text-anchor="start">namespace, concept_name</text>
+<text x="968" y="377" font-size="11" text-anchor="start">taxonomy_version?, cik?</text>
+<text x="968" y="392" font-size="11" text-anchor="start">canonical_metric: str</text>
+<text x="968" y="407" font-size="11" text-anchor="start">mapping_type, confidence</text>
+<text x="968" y="422" font-size="11" text-anchor="start">approved: bool, version: int</text>
+<text x="968" y="437" font-size="11" text-anchor="start">valid_from?, valid_to?</text>
+<rect x="290" y="560" width="250" height="113" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="415.0" y="578" font-size="13" text-anchor="middle" font-weight="600">ValidationIssue</text>
+<path d="M290,586 L540,586" stroke="#3d444d" stroke-width="1"/>
+<text x="298" y="602" font-size="11" text-anchor="start">source, code: str</text>
+<text x="298" y="617" font-size="11" text-anchor="start">severity: Severity</text>
+<text x="298" y="632" font-size="11" text-anchor="start">accession: str?</text>
+<text x="298" y="647" font-size="11" text-anchor="start">artifact_id: UUID?</text>
+<text x="298" y="662" font-size="11" text-anchor="start">extraction_revision: int?</text>
+<rect x="620" y="560" width="260" height="128" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="750.0" y="578" font-size="13" text-anchor="middle" font-weight="600">CanonicalFact</text>
+<path d="M620,586 L880,586" stroke="#3d444d" stroke-width="1"/>
+<text x="628" y="602" font-size="11" text-anchor="start">canonical_fact_id: str</text>
+<text x="628" y="617" font-size="11" text-anchor="start">raw_fact_id: str</text>
+<text x="628" y="632" font-size="11" text-anchor="start">canonical_metric: str</text>
+<text x="628" y="647" font-size="11" text-anchor="start">normalized_value_decimal?</text>
+<text x="628" y="662" font-size="11" text-anchor="start">mapping_id, mapping_version</text>
+<text x="628" y="677" font-size="11" text-anchor="start">extraction_revision: int</text>
+<rect x="960" y="560" width="260" height="98" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="1090.0" y="578" font-size="13" text-anchor="middle" font-weight="600">CanonicalMetric</text>
+<path d="M960,586 L1220,586" stroke="#3d444d" stroke-width="1"/>
+<text x="968" y="602" font-size="11" text-anchor="start">code: str</text>
+<text x="968" y="617" font-size="11" text-anchor="start">statement, period_type</text>
+<text x="968" y="632" font-size="11" text-anchor="start">unit_family: str</text>
+<text x="968" y="647" font-size="11" text-anchor="start">formula: str?, additive: bool</text>
+<rect x="30" y="780" width="200" height="68" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="130.0" y="798" font-size="13" text-anchor="middle" font-weight="600">DatasetArtifact</text>
+<path d="M30,806 L230,806" stroke="#3d444d" stroke-width="1"/>
+<text x="38" y="822" font-size="11" text-anchor="start">dataset, period</text>
+<text x="38" y="837" font-size="11" text-anchor="start">source_url, etag, last_modified</text>
+<rect x="290" y="780" width="250" height="98" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="415.0" y="798" font-size="13" text-anchor="middle" font-weight="600">SourceArtifactRef</text>
+<path d="M290,806 L540,806" stroke="#3d444d" stroke-width="1"/>
+<text x="298" y="822" font-size="11" text-anchor="start">id: UUID</text>
+<text x="298" y="837" font-size="11" text-anchor="start">dataset, period, revision</text>
+<text x="298" y="852" font-size="11" text-anchor="start">object_key: str?</text>
+<text x="298" y="867" font-size="11" text-anchor="start">state: ArtifactState</text>
+<rect x="620" y="780" width="260" height="113" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<text x="750.0" y="798" font-size="13" text-anchor="middle" font-weight="600">JobRecord</text>
+<path d="M620,806 L880,806" stroke="#3d444d" stroke-width="1"/>
+<text x="628" y="822" font-size="11" text-anchor="start">id: UUID, job_type: JobType</text>
+<text x="628" y="837" font-size="11" text-anchor="start">state: JobState</text>
+<text x="628" y="852" font-size="11" text-anchor="start">idempotency_key: str</text>
+<text x="628" y="867" font-size="11" text-anchor="start">payload: dict</text>
+<text x="628" y="882" font-size="11" text-anchor="start">attempts, max_attempts</text>
+<path d="M960,780 L1208,780 L1220,792 L1220,900 L960,900 Z" fill="#fffbe6" stroke="#3d444d" stroke-width="1.1"/>
+<path d="M1208,780 L1208,792 L1220,792" fill="none" stroke="#3d444d" stroke-width="1.1"/>
+<text x="970" y="798" font-size="11" text-anchor="start">JobRecord.payload carries a</text>
+<text x="970" y="813" font-size="11" text-anchor="start">FilingRef, SourceArtifactRef, or</text>
+<text x="970" y="828" font-size="11" text-anchor="start">accession by value (no foreign key).</text>
+<text x="970" y="843" font-size="11" text-anchor="start">Persisted rows: postgres_models.py;</text>
+<text x="970" y="858" font-size="11" text-anchor="start">ClickHouse tables: DATA_MODEL.md.</text>
+<path d="M230,130 L290,130" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="236" y="124" font-size="11" text-anchor="start" class="halo">1</text>
+<text x="284" y="124" font-size="11" text-anchor="end" class="halo">0..*</text>
+<text x="260" y="146" font-size="11" text-anchor="middle" class="m">cik</text>
+<path d="M620,130 L540,130" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="580" y="124" font-size="11" text-anchor="start" class="halo">filing 1</text>
+<path d="M880,130 L960,130" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
+<text x="952" y="124" font-size="11" text-anchor="end" class="halo">1..*</text>
+<text x="920" y="146" font-size="11" text-anchor="middle" class="halo">members</text>
+<path d="M415,320 L415,208" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="421" y="270" font-size="11" text-anchor="start" class="halo">filing 1</text>
+<path d="M540,355 L620,355" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
+<text x="612" y="349" font-size="11" text-anchor="end" class="halo">facts 0..*</text>
+<path d="M290,352 L230,334" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
+<text x="236" y="329" font-size="11" text-anchor="start" class="halo">0..*</text>
+<path d="M290,352 L230,424" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
+<text x="236" y="419" font-size="11" text-anchor="start" class="halo">0..*</text>
+<path d="M290,352 L230,514" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
+<text x="236" y="509" font-size="11" text-anchor="start" class="halo">0..*</text>
+<path d="M290,352 L230,596" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
+<text x="236" y="591" font-size="11" text-anchor="start" class="halo">0..*</text>
+<path d="M290,352 L230,671" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
+<text x="236" y="666" font-size="11" text-anchor="start" class="halo">0..*</text>
+<path d="M415,388 L415,560" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
+<text x="421" y="545" font-size="11" text-anchor="start" class="halo">validation_issues 0..*</text>
+<path d="M650,320 L650,290 L130,290 L130,300" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="560" y="284" font-size="11" text-anchor="start" class="halo">context_hash 1</text>
+<path d="M750,560 L750,448" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="756" y="510" font-size="11" text-anchor="start" class="halo">raw_fact_id 1 (lineage)</text>
+<path d="M880,585 L1000,448" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="938" y="512" font-size="11" text-anchor="end" class="halo">mapping_id +</text>
+<text x="938" y="525" font-size="11" text-anchor="end" class="halo">version 1</text>
+<path d="M1090,448 L1090,560" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="1096" y="510" font-size="11" text-anchor="start" class="halo">canonical_metric 1</text>
+<path d="M540,600 L578,600 L578,180 L540,180" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="572" y="470" font-size="11" text-anchor="middle" class="halo" transform="rotate(-90 572 470)">accession 0..1</text>
+<path d="M415,673 L415,780" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="421" y="740" font-size="11" text-anchor="start" class="halo">artifact_id 0..1</text>
+<path d="M230,815 L290,815" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<text x="260" y="808" font-size="11" text-anchor="middle" class="halo">recorded as</text>
+</svg>

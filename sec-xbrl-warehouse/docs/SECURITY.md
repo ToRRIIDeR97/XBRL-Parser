@@ -16,18 +16,7 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 
 ## Trust boundaries
 
-```mermaid
-flowchart LR
-  SEC[SEC EDGAR / bulk ZIPs<br/>untrusted bytes] -->|HTTPS, rate-limited| W[Worker / operator CLI<br/>writer credentials]
-  TAX[Taxonomy hosts<br/>untrusted] -->|HTTPS 443, byte limits| W
-  W --> OS[(MinIO/S3<br/>private bucket)]
-  W --> PG[(PostgreSQL)]
-  W --> CH[(ClickHouse)]
-  C[API client] -->|Bearer key when set| API[API<br/>reader credentials only]
-  API -->|SELECT-only reader, budgets| CH
-  API -->|CONNECT-only health login| PG
-  P[Prometheus] -->|/metrics| API
-```
+![Trust boundaries: untrusted SEC, taxonomy, and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
 
 - **SEC and taxonomy content is untrusted.** ZIP members, filing packages, TSV
   rows, and taxonomy responses are bounded before allocation. Unsafe names,
@@ -92,8 +81,10 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
   honor `Retry-After`. **The limiter is process-local**, so a PostgreSQL advisory lock
   (`SecEgressLock`, see SEC_ACCESS.md) lets only one process send SEC traffic at a
   time. A second SEC-active process fails fast instead of doubling the rate.
-- Containers run as UID/GID `10001:10001` with all capabilities dropped and
-  `no-new-privileges`. Host ports bind to `127.0.0.1`.
+- The `api`, `worker`, and `worker-parse` containers run the application image as
+  UID/GID `10001:10001` with all capabilities dropped and `no-new-privileges`. The
+  third-party storage and monitoring images keep their own defaults. Host ports bind
+  to `127.0.0.1`.
 - Disk reserve checks (`XBRL_DISK_RESERVE_BYTES`) pause claims and downloads
   when local space runs low.
 
@@ -127,7 +118,10 @@ by the statement, series, and disclosure work: `metric_series`, `companies`,
 `xbrl_roles`, `xbrl_statement_lines`, `v_statement_lines_latest`, `xbrl_cover_pages`,
 `xbrl_segment_facts`, `v_cover_pages_latest`, `v_segment_facts_latest`,
 `v_text_blocks_latest`, `taxonomy_concepts`, `xbrl_concept_labels`, and
-`v_filing_concepts_latest` (in addition to the existing latest views). The API reads them only through bounded `QueryService` queries.
+`v_filing_concepts_latest` (in addition to the existing latest views). Today `QueryService`
+reads only `v_xbrl_facts_latest`, `v_canonical_facts_latest`, `metric_series`, and
+`companies`. No API route reads the statement or disclosure objects yet, so those grants
+matter only to readers that query ClickHouse directly with the `xbrl_api` identity.
 
 
 Production authentication, a dedicated bounded ClickHouse reader, TLS, managed

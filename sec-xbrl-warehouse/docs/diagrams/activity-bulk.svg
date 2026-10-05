@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1160" width="1180" height="1160" role="img" aria-labelledby="t d">
+<title id="t">UML activity view: bulk FSNDS backfill</title>
+<desc id="d">Swimlane activity for historical SEC bulk data: catalog sync and backfill planning, download_bulk acquisition, and load_bulk validation, loading, reconciliation, quarantine, and failure handling.</desc>
+<defs>
+<marker id="open" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11" fill="none" stroke="#3d444d" stroke-width="1.4"/></marker>
+<marker id="filled" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11 Z" fill="#3d444d"/></marker>
+<marker id="diamond" viewBox="0 0 16 10" refX="1" refY="5" markerWidth="16" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,5 L8,1 L15,5 L8,9 Z" fill="#3d444d"/></marker>
+</defs>
+<style>
+text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #1f2328; }
+.m { fill: #57606a; }
+.halo { paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+</style>
+<rect width="1180" height="1160" fill="#ffffff"/>
+<text x="20" y="30" font-size="17" text-anchor="start" font-weight="600">Activity view · bulk FSNDS backfill</text>
+<text x="20" y="50" font-size="11.5" text-anchor="start" class="m">Sources: cli.py (catalog, backfill), ingestion/orchestrator.py, ingestion/bulk_loader.py load_artifact().</text>
+<rect x="20" y="70" width="260" height="1060" rx="0" fill="#fafbfc" stroke="#3d444d" stroke-width="1"/>
+<rect x="20" y="70" width="260" height="30" rx="0" fill="#eef1f4" stroke="#3d444d" stroke-width="1"/>
+<text x="150.0" y="90" font-size="12.5" text-anchor="middle" font-weight="600">Operator (CLI)</text>
+<rect x="280" y="70" width="300" height="1060" rx="0" fill="#fafbfc" stroke="#3d444d" stroke-width="1"/>
+<rect x="280" y="70" width="300" height="30" rx="0" fill="#eef1f4" stroke="#3d444d" stroke-width="1"/>
+<text x="430.0" y="90" font-size="12.5" text-anchor="middle" font-weight="600">SEC-active worker (download_bulk)</text>
+<rect x="580" y="70" width="580" height="1060" rx="0" fill="#fafbfc" stroke="#3d444d" stroke-width="1"/>
+<rect x="580" y="70" width="580" height="30" rx="0" fill="#eef1f4" stroke="#3d444d" stroke-width="1"/>
+<text x="870.0" y="90" font-size="12.5" text-anchor="middle" font-weight="600">Worker (load_bulk)</text>
+<circle cx="150" cy="110" r="8" fill="#3d444d"/>
+<rect x="35" y="135" width="230" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="150.0" y="156.775" font-size="11.5" text-anchor="middle">catalog sync --dataset notes</text>
+<text x="150.0" y="171.275" font-size="11.5" text-anchor="middle">(SEC catalog page)</text>
+<path d="M150,118 L150,135" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="35" y="215" width="230" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="150.0" y="236.775" font-size="11.5" text-anchor="middle">backfill plan --from-year</text>
+<text x="150.0" y="251.275" font-size="11.5" text-anchor="middle">--to-year (plan JSON)</text>
+<path d="M150,185 L150,215" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="35" y="295" width="230" height="64" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="150.0" y="316.525" font-size="11.5" text-anchor="middle">backfill enqueue: one</text>
+<text x="150.0" y="331.025" font-size="11.5" text-anchor="middle">download_bulk per artifact</text>
+<text x="150.0" y="345.525" font-size="11.5" text-anchor="middle">(stable idempotency key)</text>
+<path d="M150,265 L150,295" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M35,400 L253,400 L265,412 L265,512 L35,512 Z" fill="#fffbe6" stroke="#3d444d" stroke-width="1.1"/>
+<path d="M253,400 L253,412 L265,412" fill="none" stroke="#3d444d" stroke-width="1.1"/>
+<text x="45" y="418" font-size="11" text-anchor="start">catalog sync (and backfill plan</text>
+<text x="45" y="433" font-size="11" text-anchor="start">without --catalog-file) send SEC</text>
+<text x="45" y="448" font-size="11" text-anchor="start">traffic from the CLI process and</text>
+<text x="45" y="463" font-size="11" text-anchor="start">fail fast while a worker holds</text>
+<text x="45" y="478" font-size="11" text-anchor="start">the SEC egress lock.</text>
+<rect x="320" y="302" width="220" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="430.0" y="323.775" font-size="11.5" text-anchor="middle">Claim download_bulk;</text>
+<text x="430.0" y="338.275" font-size="11.5" text-anchor="middle">take SEC egress lock</text>
+<path d="M265,327 L320,327" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M430,379 L446,395 L430,411 L414,395 Z" fill="#ffffff" stroke="#3d444d" stroke-width="1.3"/>
+<text x="408" y="399" font-size="11" text-anchor="end" font-style="italic" class="m">checkpoint?</text>
+<path d="M430,352 L430,379" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="320" y="435" width="220" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="430.0" y="456.775" font-size="11.5" text-anchor="middle">Download ZIP from SEC;</text>
+<text x="430.0" y="471.275" font-size="11.5" text-anchor="middle">store bronze object</text>
+<path d="M430,411 L430,435" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="436" y="427" font-size="11" text-anchor="start" font-style="italic" class="m">[none]</text>
+<rect x="320" y="515" width="220" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="430.0" y="536.775" font-size="11.5" text-anchor="middle">Upsert source artifact</text>
+<text x="430.0" y="551.275" font-size="11.5" text-anchor="middle">(acquired); save checkpoint</text>
+<path d="M430,485 L430,515" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M430,584 L446,600 L430,616 L414,600 Z" fill="#ffffff" stroke="#3d444d" stroke-width="1.3"/>
+<path d="M430,565 L430,584" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M446,395 L560,395 L560,600 L446,600" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="496" y="389" font-size="11" text-anchor="start" font-style="italic" class="m">[saved]</text>
+<rect x="320" y="635" width="220" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="430.0" y="656.775" font-size="11.5" text-anchor="middle">Enqueue load_bulk</text>
+<text x="430.0" y="671.275" font-size="11.5" text-anchor="middle">(bulk-load:&lt;artifact&gt;:&lt;rev&gt;)</text>
+<path d="M430,616 L430,635" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M295,730 L553,730 L565,742 L565,842 L295,842 Z" fill="#fffbe6" stroke="#3d444d" stroke-width="1.1"/>
+<path d="M553,730 L553,742 L565,742" fill="none" stroke="#3d444d" stroke-width="1.1"/>
+<text x="305" y="748" font-size="11" text-anchor="start">Artifact identity: dataset, period,</text>
+<text x="305" y="763" font-size="11" text-anchor="start">source URL, checksum. A changed</text>
+<text x="305" y="778" font-size="11" text-anchor="start">republication loads as a new</text>
+<text x="305" y="793" font-size="11" text-anchor="start">revision. Handlers read checkpoints</text>
+<text x="305" y="808" font-size="11" text-anchor="start">first, so a retried job resumes.</text>
+<rect x="620" y="635" width="240" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="740.0" y="656.775" font-size="11.5" text-anchor="middle">Claim load_bulk; get bronze</text>
+<text x="740.0" y="671.275" font-size="11.5" text-anchor="middle">ZIP (≤ download_max_bytes)</text>
+<path d="M540,660 L620,660" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M740,714 L756,730 L740,746 L724,730 Z" fill="#ffffff" stroke="#3d444d" stroke-width="1.3"/>
+<text x="718" y="734" font-size="11" text-anchor="end" font-style="italic" class="m">already complete?</text>
+<path d="M740,685 L740,714" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="900" y="705" width="150" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="975.0" y="726.775" font-size="11.5" text-anchor="middle">return recorded</text>
+<text x="975.0" y="741.275" font-size="11.5" text-anchor="middle">load_stats</text>
+<path d="M756,730 L900,730" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="790" y="724" font-size="11" text-anchor="start" font-style="italic" class="m">[yes]</text>
+<circle cx="975" cy="790" r="11" fill="#ffffff" stroke="#3d444d" stroke-width="1.4"/>
+<circle cx="975" cy="790" r="6.5" fill="#3d444d"/>
+<path d="M975,755 L975,779" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="606" y="768" width="266" height="240" rx="14" fill="none" stroke="#3d444d" stroke-width="1.1" stroke-dasharray="6 4"/>
+<text x="612" y="1022" font-size="10.5" text-anchor="start" font-style="italic" class="m">interruptible region</text>
+<rect x="620" y="780" width="240" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="740.0" y="801.775" font-size="11.5" text-anchor="middle">validating: checksum, ZIP</text>
+<text x="740.0" y="816.275" font-size="11.5" text-anchor="middle">safety, TSV headers</text>
+<path d="M740,746 L740,780" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="746" y="766" font-size="11" text-anchor="start" font-style="italic" class="m">[no]</text>
+<rect x="620" y="855" width="240" height="64" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="740.0" y="876.525" font-size="11.5" text-anchor="middle">loading: per SEC table,</text>
+<text x="740.0" y="891.025" font-size="11.5" text-anchor="middle">TSV batches → Parquet →</text>
+<text x="740.0" y="905.525" font-size="11.5" text-anchor="middle">ClickHouse (checkpointed)</text>
+<path d="M740,830 L740,855" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="620" y="945" width="240" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="740.0" y="966.775" font-size="11.5" text-anchor="middle">reconciling: source vs</text>
+<text x="740.0" y="981.275" font-size="11.5" text-anchor="middle">silver vs gold row counts</text>
+<path d="M740,919 L740,945" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="620" y="1040" width="240" height="44" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="740.0" y="1066.025" font-size="11.5" text-anchor="middle">complete, with load_stats</text>
+<path d="M740,995 L740,1040" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<circle cx="740" cy="1110" r="11" fill="#ffffff" stroke="#3d444d" stroke-width="1.4"/>
+<circle cx="740" cy="1110" r="6.5" fill="#3d444d"/>
+<path d="M740,1084 L740,1099" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M930,880 L1100,880 L1100,930 L930,930 L944,905.0 Z" fill="#fdecec" stroke="#3d444d" stroke-width="1.2"/>
+<text x="1021.0" y="902.0" font-size="11.5" text-anchor="middle">exception raised</text>
+<text x="1021.0" y="916.0" font-size="11.5" text-anchor="middle">in a stage above</text>
+<path d="M872,890 L894,890 L886,906 L922,906" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M1015,954 L1031,970 L1015,986 L999,970 Z" fill="#ffffff" stroke="#3d444d" stroke-width="1.3"/>
+<path d="M1015,930 L1015,954" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="895" y="1010" width="130" height="62" rx="12" fill="#fdecec" stroke="#3d444d" stroke-width="1.2"/>
+<text x="960.0" y="1030.525" font-size="11.5" text-anchor="middle">quarantined;</text>
+<text x="960.0" y="1045.025" font-size="11.5" text-anchor="middle">diagnostic in</text>
+<text x="960.0" y="1059.525" font-size="11.5" text-anchor="middle">quarantine/bulk/</text>
+<path d="M999,970 L960,970 L960,1010" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="955" y="962" font-size="11" text-anchor="end" font-style="italic" class="m">[quarantinable]</text>
+<rect x="1035" y="1010" width="120" height="62" rx="12" fill="#fdecec" stroke="#3d444d" stroke-width="1.2"/>
+<text x="1095.0" y="1030.525" font-size="11.5" text-anchor="middle">failed; retry</text>
+<text x="1095.0" y="1045.025" font-size="11.5" text-anchor="middle">if transient,</text>
+<text x="1095.0" y="1059.525" font-size="11.5" text-anchor="middle">else dead</text>
+<path d="M1031,970 L1095,970 L1095,1010" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="1062" y="962" font-size="11" text-anchor="start" font-style="italic" class="m">[other]</text>
+<circle cx="960" cy="1104" r="9" fill="#ffffff" stroke="#3d444d" stroke-width="1.4"/>
+<path d="M953.7,1097.7 L966.3,1110.3 M966.3,1097.7 L953.7,1110.3" stroke="#3d444d" stroke-width="1.4"/>
+<path d="M960,1072 L960,1095" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<circle cx="1095" cy="1104" r="9" fill="#ffffff" stroke="#3d444d" stroke-width="1.4"/>
+<path d="M1088.7,1097.7 L1101.3,1110.3 M1101.3,1097.7 L1088.7,1110.3" stroke="#3d444d" stroke-width="1.4"/>
+<path d="M1095,1072 L1095,1095" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="600" y="1146" font-size="10.5" text-anchor="start" class="m">quarantinable = ArtifactIntegrityError, SchemaDriftError, DataQualityError</text>
+</svg>

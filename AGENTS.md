@@ -4,7 +4,8 @@ The application lives in `sec-xbrl-warehouse/`. It downloads SEC filings, extrac
 XBRL and inline XBRL facts with Arelle, stores them in PostgreSQL, ClickHouse, and
 MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 
-- System design: [ARCHITECTURE.md](sec-xbrl-warehouse/docs/ARCHITECTURE.md)
+- System design and UML views (component, deployment, class, activity, state machine,
+  sequence) with a coverage index: [ARCHITECTURE.md](sec-xbrl-warehouse/docs/ARCHITECTURE.md)
 - Security model: [SECURITY.md](sec-xbrl-warehouse/docs/SECURITY.md)
 - Operations: [OPERATIONS.md](sec-xbrl-warehouse/docs/OPERATIONS.md),
   [INGESTION_RUNBOOK.md](sec-xbrl-warehouse/docs/INGESTION_RUNBOOK.md),
@@ -37,7 +38,7 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
   review, and completion.
 - When a change alters a component boundary, public interface, data flow, trust
   boundary, secret, deployment step, or canonical command, update the owning document
-  in the same change.
+  and its SVGs in `sec-xbrl-warehouse/docs/diagrams/` in the same change.
 
 ## Run locally
 
@@ -80,6 +81,10 @@ RUN_XBRL_INTEGRATION=1 pytest -m integration
 
 The integration run needs the local storage services. It creates and removes its own
 databases and bucket. In PowerShell, set `$env:RUN_XBRL_INTEGRATION = "1"` first.
+
+## Development workflow
+
+![Development workflow: read the docs, branch, change code with tests and docs, run the Validate gates until they pass, open a PR, merge after user approval, then delete the branch](sec-xbrl-warehouse/docs/diagrams/development-workflow.svg)
 
 ## Merging
 

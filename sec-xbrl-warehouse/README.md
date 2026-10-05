@@ -14,7 +14,7 @@ The historical and incremental ingestion paths are implemented end to end. Produ
 ## Included
 
 - Docker Compose services for PostgreSQL, ClickHouse, and MinIO.
-- PostgreSQL SQLAlchemy models and an initial Alembic migration.
+- PostgreSQL SQLAlchemy models and Alembic migrations.
 - ClickHouse DDL for SEC bulk tables, full-fidelity XBRL facts, concepts, contexts, relationships, and canonical facts.
 - Typed domain models for the SEC FSNDS tables and Arelle extraction results.
 - SEC-aware HTTP client with an explicit user agent, throttling, retries, and resumable-download hooks.
@@ -22,7 +22,7 @@ The historical and incremental ingestion paths are implemented end to end. Produ
 - Full-fidelity Arelle extraction, filing-package archiving, canonical mapping review, raw/canonical APIs, Prometheus metrics, and a Grafana dashboard.
 - Current implementation and acceptance status in [`HANDOFF.md`](HANDOFF.md).
 - A coding-agent operating contract in [`AGENTS.md`](AGENTS.md).
-- A transparent build/validation record in [`BUILD_REPORT.md`](BUILD_REPORT.md).
+- System design and UML views in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); dated build and audit records in [`docs/history/`](docs/history/README.md).
 
 ## Quick start
 
@@ -101,11 +101,8 @@ xbrl-warehouse filing discover-latest --lookback-days 3
 ```text
 sec-xbrl-warehouse/
 ├── AGENTS.md                 # Development and validation contract
-├── BUILD_REPORT.md           # Delivered scope, validation, and known limitations
 ├── HANDOFF.md                # Current operations and acceptance boundary
 ├── FUNCTION_STUBS.md         # Protocol/interface index
-├── PROJECT_STRUCTURE.md      # Component ownership map
-├── PROJECT_TREE.txt          # Generated full repository tree
 ├── docker-compose.yml        # Storage, application, and monitoring profiles
 ├── ops/                      # Prometheus and Grafana provisioning
 ├── pyproject.toml            # Runtime/dev dependencies and tooling configuration
@@ -116,7 +113,7 @@ sec-xbrl-warehouse/
 ├── src/sec_xbrl_warehouse/   # Application source code
 ├── scripts/                  # Bootstrap, diagnostics and helper scripts
 ├── tests/                    # Unit/integration contracts and synthetic fixtures
-└── docs/                     # Architecture, runbooks, data model and implementation notes
+└── docs/                     # Architecture and UML views (diagrams/), runbooks, data model, history/
 ```
 
 ## Non-negotiable data guarantees

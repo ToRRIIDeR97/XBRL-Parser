@@ -46,8 +46,25 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 - **Production startup** (`XBRL_ENV=production`) fails unless an API key and a separate,
   non-empty ClickHouse reader identity are configured. See `src/sec_xbrl_warehouse/api/app.py`.
 - **ClickHouse reader.** Production expects a SELECT-only user whose settings profile
-  enforces the API query budgets. The API refuses to start if the effective limits are
-  missing or looser than configured.
+  enforces the API query budgets below. The API requests these settings on its own
+  connection and refuses to start if the effective limits are missing, unlimited, or
+  looser than configured (a `readonly=1` profile may block per-request overrides, so set
+  them in the profile). Worker connections keep their ingestion settings.
+
+  | ClickHouse setting | API budget (default) | Setting |
+  | --- | --- | --- |
+  | `readonly` | 1 | fixed |
+  | `max_execution_time` | 30 s | `XBRL_API_QUERY_TIMEOUT_SECONDS` |
+  | `timeout_before_checking_execution_speed` | 0 | fixed |
+  | `max_memory_usage` | 512 MiB | `XBRL_API_QUERY_MAX_MEMORY_BYTES` |
+  | `max_rows_to_read` | 5,000,000 | `XBRL_API_QUERY_MAX_ROWS` |
+  | `max_bytes_to_read` | 1 GiB | `XBRL_API_QUERY_MAX_BYTES` |
+  | `max_result_rows` | 10,000 | fixed |
+  | `max_result_bytes` | 16 MiB | `XBRL_API_RESULT_MAX_BYTES` |
+  | `max_threads` | 2 | fixed |
+  | `result_overflow_mode`, `read_overflow_mode`, `timeout_overflow_mode` | `throw` | fixed |
+
+  Source: `ClickHouseWarehouse.__init__` (`read_only=True`) and `config.py`.
 - **PostgreSQL API login.** The API needs a login with CONNECT and no table or writer
   privileges (`XBRL_API_POSTGRES_DSN`).
 - **Unknown:** the repository contains no script that provisions the `xbrl_api`
@@ -124,7 +141,8 @@ reads only `v_xbrl_facts_latest`, `v_canonical_facts_latest`, `metric_series`, a
 matter only to readers that query ClickHouse directly with the `xbrl_api` identity.
 
 
-Production authentication, a dedicated bounded ClickHouse reader, TLS, managed
-secrets, synced taxonomy packages with offline parsing, private service networks, a pinned and scanned release image, and a completed
-backup restore drill. The remaining limits are tracked in `HANDOFF.md` and
-`docs/HARDENING_REMEDIATION_2026-09-08.md`.
+Public exposure also needs production authentication, a dedicated bounded ClickHouse
+reader, TLS, managed secrets, synced taxonomy packages with offline parsing, private
+service networks, a pinned and scanned release image, and a completed backup restore
+drill. Remaining limits are tracked in `HANDOFF.md` and the repository's GitHub issues;
+the audits that led here are in [history/](history/README.md).

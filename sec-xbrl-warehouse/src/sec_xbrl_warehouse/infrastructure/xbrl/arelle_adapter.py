@@ -284,10 +284,13 @@ class ArelleExtractor:
         controller.webCache._filing_root = entrypoint.parent.resolve()
         source = str(entrypoint)
         if entrypoint.suffix.lower() in {".htm", ".html"}:
+            # Only inline XBRL documents join the document set; exhibits and
+            # rendered pages in the same directory are not XBRL inputs.
             documents = sorted(
                 path
                 for path in entrypoint.parent.iterdir()
                 if path.suffix.lower() in {".htm", ".html"}
+                and (path == entrypoint or _declares_inline_xbrl(path))
             )
             if len(documents) > 1:
                 source = str(entrypoint.parent / IXDS_SURROGATE) + IXDS_DOC_SEPARATOR.join(
@@ -681,6 +684,39 @@ def _require_complete_dts(log_records: list[dict[str, Any]]) -> None:
             raise XbrlExtractionError(
                 f"Taxonomy did not load completely ({record['code']}): {record.get('message')}"
             )
+
+
+_INLINE_XBRL_NAMESPACES = frozenset(
+    {"http://www.xbrl.org/2013/inlineXBRL", "http://www.xbrl.org/2008/inlineXBRL"}
+)
+
+
+def _declares_inline_xbrl(path: Path) -> bool:
+    """Return whether `path` declares the inline XBRL namespace.
+
+    Streams the document without entity resolution or network access and stops
+    at the first inline declaration. Documents that are not well-formed XML
+    before any such declaration (typical of exhibits) are not inline XBRL.
+    """
+    from lxml import etree
+
+    try:
+        for event, item in etree.iterparse(
+            str(path),
+            events=("start-ns", "end"),
+            resolve_entities=False,
+            no_network=True,
+            load_dtd=False,
+            huge_tree=False,
+        ):
+            if event == "start-ns":
+                if item[1] in _INLINE_XBRL_NAMESPACES:
+                    return True
+            else:
+                item.clear()
+    except (etree.XMLSyntaxError, OSError):
+        return False
+    return False
 
 
 def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:

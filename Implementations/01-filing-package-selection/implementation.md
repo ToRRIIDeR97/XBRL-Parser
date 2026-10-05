@@ -156,3 +156,21 @@ All 12 tests fail for the intended reasons:
 To be filled in by the implementer and the reviewer: criteria met, commands run,
 results, remaining limitations. The plan author wrote both test sets. If the same
 agent implements this plan, the verification set isn't independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-1/AC-2: `select_package_files(..., filing_summary=)` with selection policy 2;
+  the downloader fetches `FilingSummary.xml` first, or reads it from a cached manifest.
+- AC-3: `_load_model` adds a non-entrypoint `.htm` to the IXDS only when it declares
+  the inline XBRL namespace (`_declares_inline_xbrl`, streamed lxml, no entities or network).
+- AC-4/AC-7: `-xbrl.zip` fallback. The archive is stored as raw bronze, checked with
+  `validate_zip_integrity` plus `filing_max_members`/`filing_max_bytes`, and only then
+  are its members published. Members carry `PackageMember.source_archive`.
+- AC-5: `asyncio.TaskGroup` under a `sec_max_concurrency` semaphore with a shared
+  byte budget; members are sorted by name.
+- AC-6: cache key gains `selection-v2/`; old keys are not read or removed.
+- `CURRENT_EXTRACTION_REVISION = 3` (`domain/xbrl.py`) is the default for
+  `filing enqueue` and filing discovery.
+- Gates: compileall, ruff check/format, mypy, `pytest -m "not integration"` (189 passed),
+  `scan_stubs.py` (0), integration (23 passed), plan tests (12 passed).
+- Not done: re-extracting AAPL and ingesting `0000320193-19-000010` (operator step).

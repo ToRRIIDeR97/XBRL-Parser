@@ -94,6 +94,9 @@ class PackageMember(DomainModel):
     checksum_sha256: str | None = None
     is_primary_document: bool = False
     is_xbrl_entrypoint: bool = False
+    # Listed archive (`<accession>-xbrl.zip`) this member was expanded from;
+    # None for files fetched directly from the filing directory.
+    source_archive: str | None = None
 
 
 class FilingPackageManifest(DomainModel):

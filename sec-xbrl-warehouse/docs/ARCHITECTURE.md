@@ -64,6 +64,30 @@ The SEC bulk data is the fastest and most reliable historical backfill, but it i
 
 Bronze object keys include a source revision or checksum. Existing objects are never overwritten with different bytes.
 
+Filing packages contain only the files Arelle needs (selection policy 2,
+`select_package_files`):
+
+- Kept: the primary document, the instance document, `*.xsd`, XBRL instance and
+  linkbase `*.xml`, `FilingSummary.xml`, and `MetaLinks.json`.
+- Dropped: rendered `R<n>.htm`/`R<n>.xml` reports, `-index` pages, the `.txt`
+  full submission, images, scripts, stylesheets, spreadsheets, and exhibits.
+- Extra `.htm` documents of a multi-document inline set are kept only when the
+  `<InputFiles>` of `FilingSummary.xml` list them. The downloader fetches
+  `FilingSummary.xml` first (or reads it from a cached manifest), then fetches
+  the rest concurrently, at most `XBRL_SEC_MAX_CONCURRENCY` at once, through
+  the rate-limited SEC client.
+- When the index lists no XBRL input but lists `<accession>-xbrl.zip`, only the
+  archive is fetched. It is stored as raw bronze, checked with the bulk ZIP
+  limits plus `filing_max_members`/`filing_max_bytes`, and only then are its
+  members stored under their own checksum keys. Those manifest members record
+  the archive in `source_archive`, and the flagged instance becomes the
+  entrypoint.
+
+The manifest cache key includes the selection policy version. Manifests cached
+under an earlier policy stay in place and are not reused. The Arelle adapter
+builds an inline document set only from `.htm` files that declare the inline
+XBRL namespace, so stray exhibits never enter the IXDS.
+
 ### Silver: typed Parquet
 
 - One dataset per SEC table or Arelle entity type.
@@ -78,6 +102,15 @@ Silver is the rebuild source for ClickHouse and protects against database corrup
 - Raw SEC bulk tables.
 - Full-fidelity XBRL facts, contexts, concepts, and relationships.
 - Canonical facts with explicit mapping lineage.
+- Standardized metric series (`metric_series`) with latest, as-reported, and as-of
+  views, rebuilt per company from canonical facts; a `companies` mirror for tickers.
+- Primary statements as presented (`xbrl_roles`, `xbrl_statement_lines`,
+  `v_statement_lines_latest`), derived from roles, presentation arcs, and facts and
+  published with the same extraction revision marker.
+- Cover pages, segment/product/geographic breakdowns, and text blocks
+  (`xbrl_cover_pages`, `xbrl_segment_facts`, `v_cover_pages_latest`,
+  `v_segment_facts_latest`, `v_text_blocks_latest`), derived from dei and dimensional
+  facts and published the same way.
 - Query-optimized denormalization such as CIK, filing date, form, and period fields on facts.
 
 ### PostgreSQL control plane

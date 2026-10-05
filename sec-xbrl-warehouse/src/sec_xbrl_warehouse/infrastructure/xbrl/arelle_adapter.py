@@ -32,11 +32,19 @@ from sec_xbrl_warehouse.domain.xbrl import (
     XbrlFact,
     XbrlFootnote,
     XbrlRelationship,
+    XbrlRole,
     XbrlUnit,
 )
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
-from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file
+from sec_xbrl_warehouse.infrastructure.xbrl import sec_transforms
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
+from sec_xbrl_warehouse.infrastructure.xbrl.taxonomy_packages import (
+    TaxonomyPackage,
+    check_package,
+    coverage_gaps,
+    registered_packages,
+    uri_scheme_variants,
+)
 from sec_xbrl_warehouse.validation.xbrl_validation import ArelleIssueNormalizer
 
 # ponytail: Arelle's legacy registries are process-global; use worker processes for parallelism.
@@ -157,6 +165,7 @@ class ArelleExtractor:
                 for fact in facts
             )
             relationships = self._extract_relationships(model_xbrl, facts, footnotes)
+            roles = self._extract_roles(model_xbrl, relationships)
             issues = self._extract_validation_issues(log_records, filing)
             metadata = metadata.model_copy(
                 update={
@@ -176,6 +185,7 @@ class ArelleExtractor:
                 footnotes=footnotes,
                 validation_issues=issues,
                 extraction_revision=extraction_revision,
+                roles=roles,
             )
         except Exception as exc:
             # Retain engine diagnostics even when no bundle can be produced.
@@ -196,6 +206,7 @@ class ArelleExtractor:
         """Create a headless Arelle controller and structured log sink."""
         from arelle import Cntlr, PackageManager, PluginManager
         from arelle.ModelFormulaObject import FormulaOptions
+        from arelle.ModelValue import qname
 
         self.settings.ensure_directories()
         cache_dir = self.settings.arelle_cache_dir
@@ -249,23 +260,77 @@ class ArelleExtractor:
             for plugin in dict.fromkeys(plugins):
                 if PluginManager.addPluginModule(plugin) is None:
                     raise XbrlExtractionError(f"Cannot load configured Arelle plugin: {plugin}")
+            # The SEC `ixt-sec` registry is always on; EDGAR filings depend on it.
+            if PluginManager.addPluginModule(str(Path(sec_transforms.__file__).resolve())) is None:
+                raise XbrlExtractionError("Cannot load the SEC inline transformation registry")
+            controller.modelManager.customTransforms = None
+            controller.modelManager.loadCustomTransforms()
+            loaded = controller.modelManager.customTransforms or {}
+            missing = sorted(
+                name
+                for name in sec_transforms.SEC_TRANSFORMS
+                if qname(sec_transforms.SEC_TRANSFORM_NAMESPACE, f"ixt-sec:{name}") not in loaded
+            )
+            if missing:
+                raise XbrlExtractionError(
+                    f"SEC inline transformation registry is incomplete: missing {missing}"
+                )
             _restrict_taxonomy_access(cache, self.settings)
             PackageManager.init(controller, loadPackagesConfig=False)
-            registry_path = self.settings.config_dir / "taxonomy_packages.yml"
-            registry = load_yaml(registry_path) if registry_path.is_file() else {}
-            for package in registry.get("packages", []):
-                if not package.get("enabled", True):
+            missing_packages: list[str] = []
+            strict = self.settings.arelle_offline or self.settings.env == "production"
+            packages = registered_packages(self.settings)
+            gaps = coverage_gaps(self.settings, packages)
+            if gaps and strict:
+                raise XbrlExtractionError(
+                    f"No pinned taxonomy source for {gaps}; see `xbrl-warehouse taxonomy status`"
+                )
+            prefix_sources: list[TaxonomyPackage] = []
+            for package in packages:
+                status = check_package(package)
+                if status.state == "disabled":
                     continue
-                path = (packages_dir / package["filename"]).resolve()
-                if not path.is_relative_to(packages_dir.resolve()) or not path.is_file():
+                if status.state == "mapping_missing":
                     raise XbrlExtractionError(
-                        f"Missing or unsafe taxonomy package: {package['filename']}"
+                        f"Taxonomy source {package.package_id}: {status.detail}"
                     )
-                if sha256_file(path) != package["sha256"]:
-                    raise XbrlExtractionError(f"Taxonomy package checksum mismatch: {path.name}")
-                if PackageManager.addPackage(controller, str(path)) is None:
-                    raise XbrlExtractionError(f"Arelle rejected taxonomy package: {path.name}")
+                if status.state == "checksum_mismatch":
+                    raise XbrlExtractionError(
+                        f"Taxonomy package checksum mismatch: {package.filename}"
+                    )
+                if status.state == "missing" and not strict:
+                    # Development hosts may run before `taxonomy sync`; the taxonomy
+                    # then resolves through the allowlisted web cache.
+                    missing_packages.append(package.package_id)
+                    continue
+                if status.state != "ok" or package.path is None:
+                    raise XbrlExtractionError(
+                        f"Missing or unsafe taxonomy package: {package.filename}"
+                    )
+                if package.kind != "package":
+                    prefix_sources.append(package)
+                elif PackageManager.addPackage(controller, str(package.path)) is None:
+                    raise XbrlExtractionError(
+                        f"Arelle rejected taxonomy package: {package.filename}"
+                    )
             PackageManager.rebuildRemappings(controller)
+            _register_prefix_sources(PackageManager.packagesConfig, prefix_sources)
+            if missing_packages:
+                records.append(
+                    {
+                        "level": "warning",
+                        "name": "sec_xbrl_warehouse",
+                        "code": "warehouse:taxonomyPackageMissing",
+                        "message": (
+                            f"{len(missing_packages)} registered taxonomy packages are not "
+                            "installed; run `xbrl-warehouse taxonomy sync`"
+                        ),
+                        "file": None,
+                        "line": None,
+                        "column": None,
+                        "details": {"package_ids": missing_packages},
+                    }
+                )
             if self.settings.arelle_validate_efm:
                 if not controller.modelManager.disclosureSystem.select("efm-pragmatic"):
                     raise XbrlExtractionError("The EFM disclosure system is not available")
@@ -284,10 +349,13 @@ class ArelleExtractor:
         controller.webCache._filing_root = entrypoint.parent.resolve()
         source = str(entrypoint)
         if entrypoint.suffix.lower() in {".htm", ".html"}:
+            # Only inline XBRL documents join the document set; exhibits and
+            # rendered pages in the same directory are not XBRL inputs.
             documents = sorted(
                 path
                 for path in entrypoint.parent.iterdir()
                 if path.suffix.lower() in {".htm", ".html"}
+                and (path == entrypoint or _declares_inline_xbrl(path))
             )
             if len(documents) > 1:
                 source = str(entrypoint.parent / IXDS_SURROGATE) + IXDS_DOC_SEPARATOR.join(
@@ -342,6 +410,7 @@ class ArelleExtractor:
                 "validate_efm": self.settings.arelle_validate_efm,
                 "offline": self.settings.arelle_offline,
                 "plugins": self.settings.arelle_plugins,
+                "transform_registries": _transform_registries(model_xbrl),
                 "taxonomy_packages": load_yaml(
                     self.settings.config_dir / "taxonomy_packages.yml"
                 ).get("packages", [])
@@ -487,14 +556,20 @@ class ArelleExtractor:
             raw_value = _fact_raw_value(fact)
             is_nil = bool(getattr(fact, "isNil", False))
             is_numeric = bool(getattr(fact, "isNumeric", False))
+            transformed = getattr(fact, "value", raw_value)
+            # A failed inline transformation yields Arelle's error sentinel. Arelle
+            # has already logged the diagnostic; keep raw_value and store no typed value.
+            failed = not is_nil and _is_transform_error(fact, transformed)
             value_kind, typed = _coerce_fact_value(
-                str(getattr(fact, "value", raw_value)) if not is_nil else raw_value,
+                None if failed else str(transformed) if not is_nil else raw_value,
                 is_nil=is_nil,
                 is_numeric=is_numeric,
                 base_xsd_type=str(
                     getattr(concept, "baseXsdType", None) or getattr(concept, "typeQname", "")
                 ),
             )
+            if failed and is_numeric:
+                value_kind = FactValueKind.NUMERIC
             unit = _fact_unit(fact)
             dimension_hash = _context_dimension_hash(context)
             fact_qname = fact.qname
@@ -504,7 +579,11 @@ class ArelleExtractor:
                     concept_namespace=str(getattr(fact_qname, "namespaceURI", "") or ""),
                     concept_name=str(getattr(fact_qname, "localName", "") or ""),
                     concept_qname=str(fact_qname),
-                    taxonomy_version=_taxonomy_version(str(concept.namespaceURI), model_xbrl),
+                    # The concept's own namespace. `concept.namespaceURI` is the
+                    # namespace of its xs:element declaration (XML Schema, "2001").
+                    taxonomy_version=_taxonomy_version(
+                        str(getattr(fact_qname, "namespaceURI", "") or ""), model_xbrl
+                    ),
                     context_id=str(fact.contextID or ""),
                     context_hash=context.context_hash if context else "",
                     unit=unit,
@@ -622,6 +701,44 @@ class ArelleExtractor:
     ) -> tuple[XbrlFootnote, ...]:
         return _extract_footnote_objects(model_xbrl, facts)
 
+    def _extract_roles(
+        self, model_xbrl: Any, relationships: tuple[XbrlRelationship, ...]
+    ) -> tuple[XbrlRole, ...]:
+        """Role types the filing declares or uses in its relationship networks.
+
+        Roles declared only by standard taxonomies and not used by this filing's
+        arcs are left out, so a filing's roles stay a few dozen rows.
+        """
+        used = {relationship.link_role_uri for relationship in relationships}
+        roles: list[XbrlRole] = []
+        for role_uri, role_types in sorted((getattr(model_xbrl, "roleTypes", None) or {}).items()):
+            local = any(
+                _is_local_document(getattr(item, "modelDocument", None)) for item in role_types
+            )
+            if str(role_uri) not in used and not local:
+                continue
+            definition = next(
+                (
+                    str(item.definition).strip()
+                    for item in role_types
+                    if getattr(item, "definition", None) and str(item.definition).strip()
+                ),
+                None,
+            )
+            used_on = sorted(
+                {str(qname) for item in role_types for qname in getattr(item, "usedOns", ()) or ()}
+            )
+            roles.append(
+                XbrlRole(
+                    role_uri=str(role_uri),
+                    definition=definition,
+                    used_on=tuple(used_on),
+                    sort_code=role_sort_code(definition),
+                    category=role_category(definition),
+                )
+            )
+        return tuple(roles)
+
     def _extract_validation_issues(
         self,
         log_records: Iterable[dict[str, Any]],
@@ -681,6 +798,67 @@ def _require_complete_dts(log_records: list[dict[str, Any]]) -> None:
             raise XbrlExtractionError(
                 f"Taxonomy did not load completely ({record['code']}): {record.get('message')}"
             )
+
+
+_INLINE_XBRL_NAMESPACES = frozenset(
+    {"http://www.xbrl.org/2013/inlineXBRL", "http://www.xbrl.org/2008/inlineXBRL"}
+)
+
+
+def _declares_inline_xbrl(path: Path) -> bool:
+    """Return whether `path` declares the inline XBRL namespace.
+
+    Streams the document without entity resolution or network access and stops
+    at the first inline declaration. Documents that are not well-formed XML
+    before any such declaration (typical of exhibits) are not inline XBRL.
+    """
+    from lxml import etree
+
+    try:
+        for event, item in etree.iterparse(
+            str(path),
+            events=("start-ns", "end"),
+            resolve_entities=False,
+            no_network=True,
+            load_dtd=False,
+            huge_tree=False,
+        ):
+            if event == "start-ns":
+                if item[1] in _INLINE_XBRL_NAMESPACES:
+                    return True
+            else:
+                item.clear()
+    except (etree.XMLSyntaxError, OSError):
+        return False
+    return False
+
+
+def _register_prefix_sources(packages_config: Any, sources: list[TaxonomyPackage]) -> None:
+    """Add verified archive/file mappings and http/https twins to Arelle's remappings.
+
+    Taxonomy packages declare one scheme in their catalogs; filings use either,
+    so each package prefix also maps under the other scheme. Two enabled
+    sources may not claim the same prefix.
+    """
+    remappings: dict[str, str] = packages_config["remappings"]
+    for prefix, target in list(remappings.items()):
+        if prefix.startswith(("http://", "https://")):
+            for variant in uri_scheme_variants(prefix):
+                remappings.setdefault(variant, target)
+    for source in sources:
+        for prefix, target in source.remappings().items():
+            if remappings.get(prefix, target) != target:
+                raise XbrlExtractionError(
+                    f"Taxonomy sources overlap on {prefix}: {remappings[prefix]} and {target}"
+                )
+            remappings[prefix] = target
+
+
+_W3C_SCHEMA_DIR = Path(__file__).resolve().parent / "schemas" / "www.w3.org"
+_W3C_SCHEMAS = {
+    "/2001/xml.xsd": _W3C_SCHEMA_DIR / "2001" / "xml.xsd",
+    "/2001/03/xml.xsd": _W3C_SCHEMA_DIR / "2001" / "03" / "xml.xsd",
+}
 
 
 def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
@@ -784,6 +962,12 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
             return None
         normalized = cache.normalizeUrl(url, base) if base or kwargs.get("normalize") else url
         parsed = urlsplit(normalized)
+        # W3C's xml.xsd (imported by the taxonomy package schema and others) is
+        # shipped with the application and never fetched.
+        if parsed.scheme in {"http", "https"} and parsed.hostname == "www.w3.org":
+            local_schema = _W3C_SCHEMAS.get(parsed.path)
+            if local_schema is not None:
+                return str(local_schema)
         if parsed.scheme not in {"http", "https"}:
             if parsed.scheme not in {"", "file"}:
                 raise XbrlExtractionError(f"Unsupported taxonomy URI: {normalized}")
@@ -792,6 +976,7 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
                 getattr(cache, "_filing_root", settings.temp_dir),
                 settings.arelle_cache_dir,
                 settings.arelle_taxonomy_packages_dir,
+                _W3C_SCHEMA_DIR,
                 Path(cache.builtInCacheDir).parent.parent,
             )
             if not any(local.is_relative_to(Path(root).resolve()) for root in roots):
@@ -834,6 +1019,29 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
         return str(result) if result is not None else None
 
     cache.getfilename = getfilename
+
+
+_ROLE_SORT_CODE = re.compile(r"^\s*(\d+)")
+
+
+def role_sort_code(definition: str | None) -> str | None:
+    """Leading digits of a role definition ("100000 - Statement - ..." -> "100000")."""
+    match = _ROLE_SORT_CODE.match(definition or "")
+    return match.group(1) if match else None
+
+
+def role_category(definition: str | None) -> str:
+    """Middle token of the SEC "<code> - <Category> - <Title>" convention, lower-cased."""
+    parts = [part.strip() for part in (definition or "").split(" - ")]
+    if len(parts) >= 3 and parts[1]:
+        category = parts[1].lower()
+        return category if category in {"statement", "disclosure", "document"} else "other"
+    return "other"
+
+
+def _is_local_document(document: Any) -> bool:
+    uri = str(getattr(document, "uri", "") or "")
+    return bool(uri) and urlsplit(uri).scheme not in {"http", "https"}
 
 
 def _context_entity(context: Any) -> tuple[str, str]:
@@ -916,6 +1124,47 @@ def _source_document(value: Any) -> str:
     if document is None:
         document = getattr(value, "document", None)
     return _document_name(document)
+
+
+def _is_transform_error(fact: Any, value: Any) -> bool:
+    from arelle.ModelValue import INVALIDixVALUE
+
+    return value is INVALIDixVALUE or (
+        getattr(fact, "format", None) is not None and str(value) == str(INVALIDixVALUE)
+    )
+
+
+def _transform_registries(model_xbrl: Any) -> list[dict[str, str]]:
+    """List the inline transformation registries available to this extraction."""
+    from importlib.metadata import version as package_version
+
+    from arelle.FunctionIxt import ixtNamespacesByVersion
+
+    try:
+        arelle_version = package_version("arelle-release")
+    except Exception:
+        arelle_version = "unknown"
+    registries = [
+        {
+            "namespace": namespace,
+            "version": f"TR{number}",
+            "source": f"arelle-release {arelle_version}",
+        }
+        for number, namespace in sorted(ixtNamespacesByVersion.items())
+    ]
+    custom = getattr(model_xbrl.modelManager, "customTransforms", None) or {}
+    if any(
+        getattr(key, "namespaceURI", None) == sec_transforms.SEC_TRANSFORM_NAMESPACE
+        for key in custom
+    ):
+        registries.append(
+            {
+                "namespace": sec_transforms.SEC_TRANSFORM_NAMESPACE,
+                "version": sec_transforms.SEC_TRANSFORM_REGISTRY_VERSION,
+                "source": "sec_xbrl_warehouse.infrastructure.xbrl.sec_transforms",
+            }
+        )
+    return registries
 
 
 def _fact_raw_value(fact: Any) -> str | None:

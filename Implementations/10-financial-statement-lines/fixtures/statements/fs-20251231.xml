@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xbrli:xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:link="http://www.xbrl.org/2003/linkbase" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:iso4217="http://www.xbrl.org/2003/iso4217" xmlns:fs="http://example.com/fs/2025">
+  <link:schemaRef xlink:type="simple" xlink:href="fs-20251231.xsd"/>
+  <xbrli:context id="I2025"><xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:instant>2025-12-31</xbrli:instant></xbrli:period></xbrli:context>
+  <xbrli:context id="I2024"><xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:instant>2024-12-31</xbrli:instant></xbrli:period></xbrli:context>
+  <xbrli:context id="D2025"><xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:startDate>2025-01-01</xbrli:startDate><xbrli:endDate>2025-12-31</xbrli:endDate></xbrli:period></xbrli:context>
+  <xbrli:context id="D2024"><xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier></xbrli:entity><xbrli:period><xbrli:startDate>2024-01-01</xbrli:startDate><xbrli:endDate>2024-12-31</xbrli:endDate></xbrli:period></xbrli:context>
+  <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+  <xbrli:unit id="shares"><xbrli:measure>xbrli:shares</xbrli:measure></xbrli:unit>
+  <xbrli:unit id="USDPerShare"><xbrli:divide><xbrli:unitNumerator><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unitNumerator><xbrli:unitDenominator><xbrli:measure>xbrli:shares</xbrli:measure></xbrli:unitDenominator></xbrli:divide></xbrli:unit>
+  <fs:CashAndCashEquivalentsAtCarryingValue contextRef="I2025" unitRef="USD" decimals="-6">300000000</fs:CashAndCashEquivalentsAtCarryingValue>
+  <fs:CashAndCashEquivalentsAtCarryingValue contextRef="I2024" unitRef="USD" decimals="-6">250000000</fs:CashAndCashEquivalentsAtCarryingValue>
+  <fs:AccountsReceivableNetCurrent contextRef="I2025" unitRef="USD" decimals="-6">200000000</fs:AccountsReceivableNetCurrent>
+  <fs:AccountsReceivableNetCurrent contextRef="I2024" unitRef="USD" decimals="-6">150000000</fs:AccountsReceivableNetCurrent>
+  <fs:AssetsCurrent contextRef="I2025" unitRef="USD" decimals="-6">500000000</fs:AssetsCurrent>
+  <fs:AssetsCurrent contextRef="I2024" unitRef="USD" decimals="-6">400000000</fs:AssetsCurrent>
+  <fs:PropertyPlantAndEquipmentNet contextRef="I2025" unitRef="USD" decimals="-6">500000000</fs:PropertyPlantAndEquipmentNet>
+  <fs:PropertyPlantAndEquipmentNet contextRef="I2024" unitRef="USD" decimals="-6">450000000</fs:PropertyPlantAndEquipmentNet>
+  <fs:Assets contextRef="I2025" unitRef="USD" decimals="-6">1000000000</fs:Assets>
+  <fs:Assets contextRef="I2024" unitRef="USD" decimals="-6">850000000</fs:Assets>
+  <fs:Liabilities contextRef="I2025" unitRef="USD" decimals="-6">600000000</fs:Liabilities>
+  <fs:Liabilities contextRef="I2024" unitRef="USD" decimals="-6">520000000</fs:Liabilities>
+  <fs:StockholdersEquity contextRef="I2025" unitRef="USD" decimals="-6">400000000</fs:StockholdersEquity>
+  <fs:StockholdersEquity contextRef="I2024" unitRef="USD" decimals="-6">330000000</fs:StockholdersEquity>
+  <fs:LiabilitiesAndStockholdersEquity contextRef="I2025" unitRef="USD" decimals="-6">1000000000</fs:LiabilitiesAndStockholdersEquity>
+  <fs:LiabilitiesAndStockholdersEquity contextRef="I2024" unitRef="USD" decimals="-6">850000000</fs:LiabilitiesAndStockholdersEquity>
+  <fs:Revenues contextRef="D2025" unitRef="USD" decimals="-6">2000000000</fs:Revenues>
+  <fs:Revenues contextRef="D2024" unitRef="USD" decimals="-6">1800000000</fs:Revenues>
+  <fs:CostOfRevenue contextRef="D2025" unitRef="USD" decimals="-6">1200000000</fs:CostOfRevenue>
+  <fs:CostOfRevenue contextRef="D2024" unitRef="USD" decimals="-6">1100000000</fs:CostOfRevenue>
+  <fs:GrossProfit contextRef="D2025" unitRef="USD" decimals="-6">800000000</fs:GrossProfit>
+  <fs:GrossProfit contextRef="D2024" unitRef="USD" decimals="-6">700000000</fs:GrossProfit>
+  <fs:NetIncomeLoss contextRef="D2025" unitRef="USD" decimals="-6">300000000</fs:NetIncomeLoss>
+  <fs:NetIncomeLoss contextRef="D2024" unitRef="USD" decimals="-6">260000000</fs:NetIncomeLoss>
+  <fs:NetCashProvidedByUsedInOperatingActivities contextRef="D2025" unitRef="USD" decimals="-6">420000000</fs:NetCashProvidedByUsedInOperatingActivities>
+  <fs:NetCashProvidedByUsedInOperatingActivities contextRef="D2024" unitRef="USD" decimals="-6">380000000</fs:NetCashProvidedByUsedInOperatingActivities>
+  <fs:PaymentsToAcquirePropertyPlantAndEquipment contextRef="D2025" unitRef="USD" decimals="-6">90000000</fs:PaymentsToAcquirePropertyPlantAndEquipment>
+  <fs:PaymentsToAcquirePropertyPlantAndEquipment contextRef="D2024" unitRef="USD" decimals="-6">80000000</fs:PaymentsToAcquirePropertyPlantAndEquipment>
+  <fs:RevenueFromProducts contextRef="D2025" unitRef="USD" decimals="-6">1500000000</fs:RevenueFromProducts>
+  <fs:EarningsPerShareDiluted contextRef="D2025" unitRef="USDPerShare" decimals="2">1.50</fs:EarningsPerShareDiluted>
+  <fs:CommonStockSharesAuthorized contextRef="I2025" unitRef="shares" decimals="INF">50000000000</fs:CommonStockSharesAuthorized>
+</xbrli:xbrl>

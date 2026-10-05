@@ -150,3 +150,90 @@ def test_xbrl_publication_and_canonical_views_are_replay_safe(
         )[0]["n"]
         == 1
     )
+
+
+def test_statement_lines_are_replay_safe_and_latest_revision_only(
+    warehouse: ClickHouseWarehouse,
+) -> None:
+    from sec_xbrl_warehouse.domain.enums import RelationshipType
+    from sec_xbrl_warehouse.domain.xbrl import (
+        XbrlDocumentMetadata,
+        XbrlExtractionBundle,
+        XbrlRelationship,
+        XbrlRole,
+    )
+    from sec_xbrl_warehouse.normalization.statements import PARENT_CHILD_ARCROLE
+
+    role = "http://example.com/role/BalanceSheet"
+    bundle = XbrlExtractionBundle(
+        filing=FilingRef(
+            accession="0000000010-26-000010",
+            cik=10,
+            company_name="Lines Corp",
+            form="10-K",
+            filed_date=date(2026, 2, 15),
+            archive_directory_url="https://www.sec.gov/Archives/edgar/data/10/10",
+        ),
+        metadata=XbrlDocumentMetadata(
+            entrypoint="x.htm",
+            document_type="inline",
+            taxonomy_namespaces=(),
+            source_documents=("x.htm",),
+            software_name="arelle",
+            software_version="test",
+        ),
+        contexts=(),
+        concepts=(),
+        facts=(),
+        relationships=tuple(
+            XbrlRelationship(
+                relationship_id=f"{index:064d}",
+                relationship_type=RelationshipType.PRESENTATION,
+                link_role_uri=role,
+                arc_role_uri=PARENT_CHILD_ARCROLE,
+                from_qname="ex:BalanceSheetAbstract",
+                to_qname=f"ex:{child}",
+                order=Decimal(index),
+            )
+            for index, child in enumerate(("Assets", "Liabilities"), start=1)
+        ),
+        footnotes=(),
+        validation_issues=(),
+        extraction_revision=1,
+        roles=(
+            XbrlRole(
+                role_uri=role,
+                definition="100000 - Statement - Balance Sheets",
+                sort_code="100000",
+                category="statement",
+            ),
+        ),
+    )
+    counts = warehouse.insert_xbrl_bundle(bundle)
+    assert (counts["roles"], counts["statement_lines"]) == (1, 3)
+    warehouse.publish_xbrl_bundle(bundle, counts)
+    warehouse.insert_xbrl_bundle(bundle)  # replay
+    revised = bundle.model_copy(update={"extraction_revision": 2})
+    revised = revised.model_copy(update={"relationships": revised.relationships[:1]})
+    revised_counts = warehouse.insert_xbrl_bundle(revised)
+    query = (
+        "SELECT extraction_revision, line_number, concept_qname FROM v_statement_lines_latest "
+        "WHERE accession = %(accession)s ORDER BY line_number"
+    )
+    rows = warehouse.query(query, {"accession": bundle.filing.accession})
+    assert [row["concept_qname"] for row in rows] == [
+        "ex:BalanceSheetAbstract",
+        "ex:Assets",
+        "ex:Liabilities",
+    ]
+    warehouse.publish_xbrl_bundle(revised, revised_counts)
+    rows = warehouse.query(query, {"accession": bundle.filing.accession})
+    assert [(row["extraction_revision"], row["concept_qname"]) for row in rows] == [
+        (2, "ex:BalanceSheetAbstract"),
+        (2, "ex:Assets"),
+    ]
+    roles = warehouse.query(
+        "SELECT statement_kind FROM xbrl_roles FINAL WHERE accession = %(accession)s",
+        {"accession": bundle.filing.accession},
+    )
+    assert {row["statement_kind"] for row in roles} == {"balance_sheet"}

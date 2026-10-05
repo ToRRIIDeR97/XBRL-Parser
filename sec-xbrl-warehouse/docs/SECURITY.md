@@ -32,6 +32,15 @@ flowchart LR
 - **SEC and taxonomy content is untrusted.** ZIP members, filing packages, TSV
   rows, and taxonomy responses are bounded before allocation. Unsafe names,
   traversal paths, and symlinks are rejected, and checksums are verified before parsing.
+- **Taxonomy packages are pinned.** `taxonomy sync` is a separate outbound path: it
+  downloads only registry URLs that use HTTPS on port 443, carry no credentials, and
+  name a host in `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`. It uses the rate-limited
+  client and byte limits, and installs a file only after its SHA-256 matches the
+  registry. Extraction re-verifies every package. `archive` and `file` entries are
+  the publishers' unmodified files; only verified files are mapped into Arelle. `xbrl.sec.gov` is on the default
+  allowlist because it serves the SEC taxonomies (dei and others) and their packages.
+  The W3C `xml.xsd` schemas are shipped with the application, so `www.w3.org` is never
+  contacted.
 - **The object store is trusted.** Manifest-cache and checkpoint verification detect
   corruption and mismatched reuse. They don't defend against a malicious storage administrator.
 - **The API is a separate, lower-privilege identity.** Compose passes it an explicit
@@ -80,8 +89,9 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
   result-byte budgets.
 - Each API process runs one readiness probe at a time. Overlapping probes get 503.
 - SEC requests use the configured user agent. They default to 8 req/s with jitter and
-  honor `Retry-After`. **The limiter is process-local.** Run one SEC-active process at a time and
-  don't scale workers until egress is coordinated globally.
+  honor `Retry-After`. **The limiter is process-local**, so a PostgreSQL advisory lock
+  (`SecEgressLock`, see SEC_ACCESS.md) lets only one process send SEC traffic at a
+  time. A second SEC-active process fails fast instead of doubling the rate.
 - Containers run as UID/GID `10001:10001` with all capabilities dropped and
   `no-new-privileges`. Host ports bind to `127.0.0.1`.
 - Disk reserve checks (`XBRL_DISK_RESERVE_BYTES`) pause claims and downloads
@@ -89,6 +99,8 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
 
 ## Dependencies
 
+- Taxonomy packages are third-party files pinned by URL and SHA-256 in
+  `config/taxonomy_packages.yml`. They are downloaded at deployment, never committed.
 - `constraints-tested.txt` snapshots tested Python versions. It isn't a hash-locked,
   cross-platform lock.
 - Third-party images are pinned by digest. The application image builds with
@@ -111,6 +123,6 @@ bounded object restores. The full gates are listed in the root `AGENTS.md`.
 ## Before public exposure
 
 Production authentication, a dedicated bounded ClickHouse reader, TLS, managed
-secrets, private service networks, a pinned and scanned release image, and a completed
+secrets, synced taxonomy packages with offline parsing, private service networks, a pinned and scanned release image, and a completed
 backup restore drill. The remaining limits are tracked in `HANDOFF.md` and
 `docs/HARDENING_REMEDIATION_2026-09-08.md`.

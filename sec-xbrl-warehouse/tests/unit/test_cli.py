@@ -41,7 +41,7 @@ class _Connection:
         return None
 
     async def scalar(self, statement: object) -> str:
-        return "0001_control_plane"
+        return "0005_job_deferral"
 
 
 class _Engine:
@@ -77,6 +77,7 @@ class _Warehouse:
                 "v_sec_text_latest",
                 "v_xbrl_facts_latest",
                 "v_canonical_facts_latest",
+                "v_statement_lines_latest",
             )
         ]
 
@@ -218,3 +219,119 @@ def test_worker_run_parses_job_type_filter(monkeypatch: pytest.MonkeyPatch) -> N
     result = CliRunner().invoke(cli.app, ["worker", "run", "--job-type", "ingest_filing"])
     assert result.exit_code == 0, result.output
     assert received == [[JobType.INGEST_FILING]]
+
+
+def test_filing_discover_with_cik_queues_submissions_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    (settings.config_dir / "sources.yml").write_text("sec:\n  default_forms: [10-K]\n")
+    jobs: list[dict[str, object]] = []
+
+    class _Queue:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def enqueue_job(self, **kwargs):
+            jobs.append(kwargs)
+            return "job"
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "PostgresControlRepository", _Queue)
+    cli.filing_discover(None, None, None, False, 320193)
+    assert jobs[0]["payload"] == {
+        "filed_from": None,
+        "filed_to": None,
+        "forms": ["10-K"],
+        "cik": 320193,
+    }
+    # --refresh gives the same issuer a fresh idempotency key.
+    cli.filing_discover(None, None, None, True, 320193)
+    cli.filing_discover(None, None, None, False, 320193)
+    keys = [job["idempotency_key"] for job in jobs]
+    assert keys[0] == keys[2] != keys[1]
+    with pytest.raises(typer.BadParameter):
+        cli.filing_discover(None, None, None, False, None)
+
+
+def test_company_show_resolves_cik_and_ticker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from sec_xbrl_warehouse.domain.models import Company
+
+    apple = Company(cik=320193, name="Apple Inc.", tickers=("AAPL",), fiscal_year_end="0927")
+
+    class _Companies:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def get_company(self, cik):
+            return apple if cik == 320193 else None
+
+        async def find_company_by_ticker(self, ticker):
+            return apple if ticker.upper() == "AAPL" else None
+
+        async def close(self) -> None:
+            pass
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "PostgresControlRepository", _Companies)
+    cli.company_show("aapl")
+    cli.company_show("320193")
+    assert capsys.readouterr().out.count('"cik": 320193') == 2
+    with pytest.raises(typer.Exit):
+        cli.company_show("MSFT")
+
+
+def test_jobs_list_and_retry_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from uuid import uuid4
+
+    from sec_xbrl_warehouse.domain.enums import JobState, JobType
+    from sec_xbrl_warehouse.domain.models import JobRecord
+    from sec_xbrl_warehouse.exceptions import StateTransitionError
+
+    dead = JobRecord(
+        id=uuid4(),
+        job_type=JobType.INGEST_FILING,
+        state=JobState.DEAD,
+        idempotency_key="k",
+        payload={},
+        attempts=5,
+        max_attempts=5,
+        priority=100,
+        available_at=datetime.now(UTC),
+        last_error="boom",
+    )
+    calls: list[object] = []
+
+    class _Jobs:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def list_jobs(self, **kwargs):
+            calls.append(kwargs)
+            return [dead]
+
+        async def retry_job(self, job_id):
+            if job_id != dead.id:
+                raise StateTransitionError("not dead")
+            return dead.model_copy(update={"state": JobState.RETRY, "attempts": 0})
+
+        async def close(self) -> None:
+            pass
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "PostgresControlRepository", _Jobs)
+    cli.jobs_list(JobState.DEAD, JobType.INGEST_FILING, 10)
+    assert calls == [{"state": "dead", "job_type": "ingest_filing", "limit": 10}]
+    cli.jobs_retry(str(dead.id))
+    assert "is retry" in capsys.readouterr().out
+    with pytest.raises(typer.Exit):
+        cli.jobs_retry(str(uuid4()))

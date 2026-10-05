@@ -19,8 +19,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -116,6 +117,8 @@ class IngestionJobRow(TimestampMixin, Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # First deferral on a busy SEC egress lock since the job last ran; caps deferral.
+    deferred_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class JobCheckpointRow(Base):
@@ -142,6 +145,7 @@ class ValidationIssueRow(Base):
         Index("ix_validation_accession", "accession"),
         Index("ix_validation_artifact", "artifact_id"),
         Index("ix_validation_code_severity", "code", "severity"),
+        Index("ix_validation_accession_revision", "accession", "extraction_revision"),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -160,6 +164,7 @@ class ValidationIssueRow(Base):
     line: Mapped[int | None] = mapped_column(Integer)
     column_number: Mapped[int | None] = mapped_column(Integer)
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    extraction_revision: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -239,12 +244,24 @@ class ConceptMappingRow(Base):
 
 
 class MappingReviewRow(Base):
+    """One review per concept while open; `accession`/`fact_id` are the latest sample."""
+
     __tablename__ = "mapping_reviews"
-    __table_args__ = (UniqueConstraint("accession", "fact_id", name="uq_mapping_review_fact"),)
+    __table_args__ = (
+        Index(
+            "uq_mapping_review_open_concept",
+            "concept_namespace",
+            "concept_name",
+            unique=True,
+            postgresql_where=text("state = 'open'"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     accession: Mapped[str] = mapped_column(String(20), nullable=False)
     fact_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    concept_namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    concept_name: Mapped[str] = mapped_column(Text, nullable=False)
     concept_qname: Mapped[str] = mapped_column(Text, nullable=False)
     candidate_metric_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -254,3 +271,48 @@ class MappingReviewRow(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MappingReviewObservationRow(Base):
+    """Unmapped facts of a reviewed concept in one filing (idempotent per accession)."""
+
+    __tablename__ = "mapping_review_observations"
+
+    review_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mapping_reviews.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    accession: Mapped[str] = mapped_column(String(20), primary_key=True)
+    fact_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_fact_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CompanyRow(TimestampMixin, Base):
+    """Issuer metadata from SEC submissions; tickers are upper-cased and unique per holder."""
+
+    __tablename__ = "companies"
+    __table_args__ = (Index("ix_companies_tickers", "tickers", postgresql_using="gin"),)
+
+    cik: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str | None] = mapped_column(Text)
+    sic: Mapped[int | None] = mapped_column(Integer)
+    sic_description: Mapped[str | None] = mapped_column(Text)
+    tickers: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{}", default=list
+    )
+    exchanges: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{}", default=list
+    )
+    fiscal_year_end: Mapped[str | None] = mapped_column(String(4))
+    state_of_incorporation: Mapped[str | None] = mapped_column(Text)
+    filer_category: Mapped[str | None] = mapped_column(Text)
+    former_names: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]", default=list
+    )
+    source_checksum: Mapped[str | None] = mapped_column(String(64))
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -113,3 +113,31 @@ def test_derivation_is_identical_after_checkpoint_round_trip(tmp_path: Path) -> 
     filing, _ = derive_fiscal_focus(bundle)
     assert filing.report_date == date(2025, 12, 31)
     assert bundle.facts == read_bundle(path, 1_000_000).facts
+
+
+def test_discovery_period_case_difference_is_not_a_mismatch() -> None:
+    bundle = _with(
+        _dei("DocumentFiscalYearFocus", "2025"),
+        _dei("DocumentFiscalPeriodFocus", "Q1"),
+    )
+    bundle = bundle.model_copy(
+        update={"filing": bundle.filing.model_copy(update={"fiscal_period": "q1"})}
+    )
+    filing, issues = derive_fiscal_focus(bundle)
+    assert filing.fiscal_period == "Q1"
+    assert issues == ()
+
+
+def test_filing_upsert_keeps_stored_fiscal_fields_when_new_value_is_null() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from sec_xbrl_warehouse.infrastructure.storage.postgres import filing_upsert_statement
+
+    statement = filing_upsert_statement(
+        {"accession": "0000000001-26-000001", "form": "10-K", "fiscal_year": None}
+        | {"fiscal_period": None, "report_date": None}
+    )
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    for column in ("fiscal_year", "fiscal_period", "report_date"):
+        assert f"{column} = coalesce(excluded.{column}, filings.{column})" in sql
+    assert "coalesce(excluded.form" not in sql

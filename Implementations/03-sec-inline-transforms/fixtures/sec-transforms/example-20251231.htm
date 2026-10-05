@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+      xmlns:ixt="http://www.xbrl.org/inlineXBRL/transformation/2020-02-12"
+      xmlns:ixt-sec="http://www.sec.gov/inlineXBRL/transformation/2015-08-31"
+      xmlns:xbrli="http://www.xbrl.org/2003/instance"
+      xmlns:link="http://www.xbrl.org/2003/linkbase"
+      xmlns:xlink="http://www.w3.org/1999/xlink"
+      xmlns:ex="http://example.com/2026">
+<head><title>Example Corp 10-K cover page</title></head>
+<body>
+<div style="display:none">
+<ix:header>
+  <ix:references><link:schemaRef xlink:type="simple" xlink:href="example-20251231.xsd"/></ix:references>
+  <ix:resources>
+    <xbrli:context id="FY2025">
+      <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier></xbrli:entity>
+      <xbrli:period><xbrli:startDate>2025-01-01</xbrli:startDate><xbrli:endDate>2025-12-31</xbrli:endDate></xbrli:period>
+    </xbrli:context>
+    <xbrli:context id="AsOf2026">
+      <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier></xbrli:entity>
+      <xbrli:period><xbrli:instant>2026-01-31</xbrli:instant></xbrli:period>
+    </xbrli:context>
+    <xbrli:unit id="shares"><xbrli:measure>xbrli:shares</xbrli:measure></xbrli:unit>
+  </ix:resources>
+</ix:header>
+</div>
+<p><ix:nonNumeric name="ex:AnnualReport" contextRef="FY2025" format="ixt-sec:boolballotbox">&#9746;</ix:nonNumeric> Annual report</p>
+<p><ix:nonNumeric name="ex:QuarterlyReport" contextRef="FY2025" format="ixt-sec:boolballotbox">&#9744;</ix:nonNumeric> Quarterly report</p>
+<p>State: <ix:nonNumeric name="ex:StateOfIncorporation" contextRef="FY2025" format="ixt-sec:stateprovnameen">California</ix:nonNumeric></p>
+<p>Country: <ix:nonNumeric name="ex:CountryOfIncorporation" contextRef="FY2025" format="ixt-sec:countrynameen">Canada</ix:nonNumeric></p>
+<p>Exchange: <ix:nonNumeric name="ex:SecurityExchange" contextRef="FY2025" format="ixt-sec:exchnameen">The Nasdaq Stock Market LLC</ix:nonNumeric></p>
+<p>Shares: <ix:nonFraction name="ex:Shares" contextRef="AsOf2026" unitRef="shares" decimals="INF" format="ixt-sec:numwordsen">twelve thousand</ix:nonFraction></p>
+<p>Bogus: <ix:nonNumeric name="ex:Bogus" contextRef="FY2025" format="ixt-sec:notarealtransform">x</ix:nonNumeric></p>
+</body>
+</html>

@@ -151,8 +151,8 @@ class XbrlDocumentMetadata(XbrlModel):
 # alters extraction input or output (package selection, Arelle loading, fact
 # shaping) so re-ingestion writes a new revision instead of replacing lineage.
 # 3: inline document sets exclude exhibits and rendered pages, and `-xbrl.zip`
-# packages are expanded (filing package selection policy 2), and filing fiscal
-# fields come from dei facts.
+# packages are expanded (filing package selection policy 2), filing fiscal
+# fields come from dei facts, and SEC `ixt-sec` inline transforms are applied.
 CURRENT_EXTRACTION_REVISION = 3
 
 

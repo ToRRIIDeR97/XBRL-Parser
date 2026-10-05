@@ -6,7 +6,10 @@ Pure functions over an extraction bundle (derived data, rebuildable from silver)
   outstanding sums the class-of-stock members when no non-dimensional value exists.
   Facts on any other axis, including co-registrants on `dei:LegalEntityAxis`, are
   ignored. A missing fact gives `None`; with several values the first in document
-  order wins.
+  order wins. Multi-security filers report `TradingSymbol`, `SecurityExchangeName`,
+  and `Security12bTitle` per security on the class-of-stock axis: every security is
+  kept in `securities`, and without a non-dimensional ticker/exchange both come from
+  one security (common stock first, else the first in document order).
 - `segment_rows` returns numeric facts whose dimensions are all on the allowlisted
   breakdown axes, with member labels from the bundle's concepts (standard label,
   else the member's local name without the `Member` suffix).
@@ -45,8 +48,19 @@ CLASS_OF_STOCK_AXIS = ("us-gaap", "StatementClassOfStockAxis")
 # extension members named the same way.
 _ELIMINATION = re.compile(r"Eliminations?Member$", re.IGNORECASE)
 _SHARES = "EntityCommonStockSharesOutstanding"
+_SECURITY_FIELDS = ("Security12bTitle", "TradingSymbol", "SecurityExchangeName")
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class CoverSecurity:
+    """One registered security from class-of-stock dei facts."""
+
+    member: str
+    title: str | None = None
+    trading_symbol: str | None = None
+    exchange: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +77,7 @@ class CoverPage:
     shares_outstanding: Decimal | None = None
     shares_outstanding_date: date | None = None
     public_float: Decimal | None = None
+    securities: tuple[CoverSecurity, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,13 +107,32 @@ def cover_page(bundle: XbrlExtractionBundle) -> CoverPage:
     """The filing's cover page from its non-dimensional dei facts."""
     plain: dict[str, list[XbrlFact]] = defaultdict(list)
     classes: list[XbrlFact] = []
+    per_security: dict[str, dict[str, str]] = {}
+    concepts = {(concept.namespace, concept.name): concept for concept in bundle.concepts}
     for fact in bundle.facts:
         if fact.is_nil or namespace_family(fact.concept_namespace) != "dei":
             continue
         if not fact.dimensions:
             plain[fact.concept_name].append(fact)
-        elif fact.concept_name == _SHARES and _only_class_of_stock(fact.dimensions):
-            classes.append(fact)
+        elif _only_class_of_stock(fact.dimensions):
+            if fact.concept_name == _SHARES:
+                classes.append(fact)
+            elif fact.concept_name in _SECURITY_FIELDS and (value := _text(fact)) is not None:
+                dimension = fact.dimensions[0]
+                concept = concepts.get(
+                    (dimension.member_namespace or "", dimension.member_name or "")
+                )
+                member = concept.qname if concept is not None else _member_qname(dimension)
+                per_security.setdefault(member, {}).setdefault(fact.concept_name, value)
+    securities = tuple(
+        CoverSecurity(
+            member=member,
+            title=fields.get("Security12bTitle"),
+            trading_symbol=fields.get("TradingSymbol"),
+            exchange=fields.get("SecurityExchangeName"),
+        )
+        for member, fields in per_security.items()
+    )
 
     def first(name: str, read: Callable[[XbrlFact], T | None]) -> T | None:
         return next((value for value in map(read, plain[name]) if value is not None), None)
@@ -108,6 +142,13 @@ def cover_page(bundle: XbrlExtractionBundle) -> CoverPage:
         shares_value, shares_date = shares.value_decimal, shares.period_instant
     else:
         shares_value, shares_date = _sum_classes(classes)
+    symbol = first("TradingSymbol", _text)
+    exchange = first("SecurityExchangeName", _text)
+    if symbol is None or exchange is None:
+        chosen = _primary_security(securities, symbol)
+        if chosen is not None:
+            symbol = symbol if symbol is not None else chosen.trading_symbol
+            exchange = exchange if exchange is not None else chosen.exchange
     return CoverPage(
         accession=bundle.filing.accession,
         document_type=first("DocumentType", _text),
@@ -115,12 +156,13 @@ def cover_page(bundle: XbrlExtractionBundle) -> CoverPage:
         registrant_name=first("EntityRegistrantName", _text),
         filer_category=first("EntityFilerCategory", _text),
         amendment=first("AmendmentFlag", _boolean),
-        trading_symbol=first("TradingSymbol", _text),
-        exchange=first("SecurityExchangeName", _text),
+        trading_symbol=symbol,
+        exchange=exchange,
         auditor_name=first("AuditorName", _text),
         shares_outstanding=shares_value,
         shares_outstanding_date=shares_date,
         public_float=first("EntityPublicFloat", lambda fact: fact.value_decimal),
+        securities=securities,
     )
 
 
@@ -189,6 +231,30 @@ def _only_class_of_stock(dimensions: tuple[DimensionMember, ...]) -> bool:
         )
         == CLASS_OF_STOCK_AXIS
     )
+
+
+def _primary_security(
+    securities: tuple[CoverSecurity, ...], symbol: str | None
+) -> CoverSecurity | None:
+    """The security the cover ticker/exchange describe.
+
+    The one matching a non-dimensional ticker, else common stock (member
+    `CommonStockMember` or a 12(b) title containing "common stock"), else the first
+    security with a ticker or exchange, in document order.
+    """
+    listed = [item for item in securities if item.trading_symbol or item.exchange]
+    if symbol is not None:
+        return next((item for item in listed if item.trading_symbol == symbol), None)
+    common = next(
+        (
+            item
+            for item in listed
+            if item.member.rsplit(":", 1)[-1].rsplit("}", 1)[-1] == "CommonStockMember"
+            or "common stock" in (item.title or "").lower()
+        ),
+        None,
+    )
+    return common or (listed[0] if listed else None)
 
 
 def _sum_classes(facts: list[XbrlFact]) -> tuple[Decimal | None, date | None]:

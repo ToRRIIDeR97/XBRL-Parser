@@ -2,6 +2,7 @@
 -- dei and dimensional facts by normalization/disclosures.py; rebuildable from silver).
 
 -- One row per filing and revision: the registrant's own non-dimensional dei facts.
+-- The security_* arrays list each security reported on the class-of-stock axis.
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_cover_pages
 (
     accession String,
@@ -19,6 +20,10 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_cover_pages
     shares_outstanding Nullable(Decimal256(18)),
     shares_outstanding_date Nullable(Date),
     public_float Nullable(Decimal256(18)),
+    security_members Array(String),
+    security_titles Array(Nullable(String)),
+    security_symbols Array(Nullable(String)),
+    security_exchanges Array(Nullable(String)),
     extraction_revision UInt32,
     _row_hash FixedString(64),
     _ingested_at DateTime64(3, 'UTC')

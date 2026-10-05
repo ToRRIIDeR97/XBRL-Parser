@@ -156,3 +156,14 @@ independently authored.
   DATA_MODEL.md and ARCHITECTURE.md document the tables and example queries.
 - Optional API endpoints were not added.
 - Operator check (step 5) is pending a revision-3 AAPL extraction.
+
+### Follow-up (verifier, 5 October 2026)
+
+- Multi-security filers report `TradingSymbol`, `SecurityExchangeName`, and
+  `Security12bTitle` per security on `us-gaap:StatementClassOfStockAxis`. `cover_page`
+  now keeps every such security (`CoverPage.securities`; arrays `security_members`,
+  `security_titles`, `security_symbols`, `security_exchanges` on `xbrl_cover_pages`)
+  and, without a non-dimensional ticker/exchange, takes both from one security: the one
+  matching a non-dimensional ticker, else common stock (`CommonStockMember` or a title
+  containing "Common Stock"), else the first listed. The verifier's AAPL probe (temp
+  databases) gives `AAPL` / `NASDAQ` and eight securities.

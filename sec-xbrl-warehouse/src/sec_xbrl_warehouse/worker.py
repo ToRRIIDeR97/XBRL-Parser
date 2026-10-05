@@ -11,6 +11,7 @@ import httpx
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import JobType
 from sec_xbrl_warehouse.domain.models import JobRecord
+from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.exceptions import (
     ArtifactIntegrityError,
     DiskReserveError,
@@ -313,8 +314,11 @@ def build_handlers(
             for filing in filings:
                 await services["control"].enqueue_job(
                     job_type=JobType.INGEST_FILING.value,
-                    idempotency_key=f"filing:{filing.accession}:1",
-                    payload={"filing": filing.model_dump(mode="json"), "extraction_revision": 1},
+                    idempotency_key=f"filing:{filing.accession}:{CURRENT_EXTRACTION_REVISION}",
+                    payload={
+                        "filing": filing.model_dump(mode="json"),
+                        "extraction_revision": CURRENT_EXTRACTION_REVISION,
+                    },
                 )
             return {"filings_enqueued": len(filings)}
 

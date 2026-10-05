@@ -80,7 +80,9 @@ class Settings(BaseSettings):
     arelle_cache_dir: Path = Path("data/cache/arelle")
     arelle_taxonomy_packages_dir: Path = Path("data/taxonomy-packages")
     arelle_offline: bool = False
-    arelle_allowed_taxonomy_hosts: str = "www.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org"
+    arelle_allowed_taxonomy_hosts: str = (
+        "www.sec.gov,xbrl.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org"
+    )
     arelle_timeout_seconds: float = Field(default=600, gt=0)
     arelle_memory_limit_bytes: int = Field(default=2 * 1024**3, gt=0)
     extraction_max_bytes: int = Field(default=512 * 1024**2, gt=0)

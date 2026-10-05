@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -142,6 +143,7 @@ class ValidationIssueRow(Base):
         Index("ix_validation_accession", "accession"),
         Index("ix_validation_artifact", "artifact_id"),
         Index("ix_validation_code_severity", "code", "severity"),
+        Index("ix_validation_accession_revision", "accession", "extraction_revision"),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -160,6 +162,7 @@ class ValidationIssueRow(Base):
     line: Mapped[int | None] = mapped_column(Integer)
     column_number: Mapped[int | None] = mapped_column(Integer)
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    extraction_revision: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -239,12 +242,24 @@ class ConceptMappingRow(Base):
 
 
 class MappingReviewRow(Base):
+    """One review per concept while open; `accession`/`fact_id` are the latest sample."""
+
     __tablename__ = "mapping_reviews"
-    __table_args__ = (UniqueConstraint("accession", "fact_id", name="uq_mapping_review_fact"),)
+    __table_args__ = (
+        Index(
+            "uq_mapping_review_open_concept",
+            "concept_namespace",
+            "concept_name",
+            unique=True,
+            postgresql_where=text("state = 'open'"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     accession: Mapped[str] = mapped_column(String(20), nullable=False)
     fact_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    concept_namespace: Mapped[str] = mapped_column(Text, nullable=False)
+    concept_name: Mapped[str] = mapped_column(Text, nullable=False)
     concept_qname: Mapped[str] = mapped_column(Text, nullable=False)
     candidate_metric_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -254,3 +269,21 @@ class MappingReviewRow(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MappingReviewObservationRow(Base):
+    """Unmapped facts of a reviewed concept in one filing (idempotent per accession)."""
+
+    __tablename__ = "mapping_review_observations"
+
+    review_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("mapping_reviews.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    accession: Mapped[str] = mapped_column(String(20), primary_key=True)
+    fact_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_fact_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

@@ -221,7 +221,10 @@ def test_mapping_batches_cache_lookups_but_check_each_facts_period():
     repo.mappings = []
     assert asyncio.run(mapper.map_batch(facts, _filing(), extraction_revision=1)) == ()
     assert repo.lookup_calls == 2
-    assert repo.batch_calls == 4  # one incompatible review, then 500 + 500 + 1
+    # One incompatible review, then one review for the concept's 1001 unmapped facts.
+    assert repo.batch_calls == 2
+    assert repo.reviews[-1][3]["fact_count"] == 1001
+    assert len(repo.reviews[-1][3]["sample_fact_ids"]) == 5
 
 
 def test_mapping_and_canonical_insert_obey_byte_budget():

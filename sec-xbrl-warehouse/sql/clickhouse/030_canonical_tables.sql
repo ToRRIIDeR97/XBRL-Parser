@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS {{database}}.canonical_facts
     mapping_confidence Float32,
     mapping_explanation String CODEC(ZSTD(6)),
     extraction_revision UInt32,
+    accepted_at Nullable(DateTime64(3, 'UTC')),
+    fiscal_year Nullable(UInt16),
+    fiscal_period LowCardinality(Nullable(String)),
+    report_date Nullable(Date),
     _row_hash FixedString(64),
     _ingested_at DateTime64(3, 'UTC')
 )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -60,3 +60,9 @@ class CanonicalFact(CanonicalModel):
     mapping_confidence: float
     mapping_explanation: str
     extraction_revision: int
+    # Filing context for point-in-time series: SEC acceptance time (None when
+    # discovery didn't supply it) and the filing's dei fiscal focus and period end.
+    accepted_at: datetime | None = None
+    fiscal_year: int | None = None
+    fiscal_period: str | None = None
+    report_date: date | None = None

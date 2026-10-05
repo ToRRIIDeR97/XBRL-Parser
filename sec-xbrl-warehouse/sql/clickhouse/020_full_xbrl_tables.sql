@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_facts
     filed_date Date,
     fiscal_year Nullable(Int16),
     fiscal_period LowCardinality(Nullable(String)),
+    accepted_at Nullable(DateTime64(3, 'UTC')),
     concept_namespace String,
     concept_name String,
     concept_qname String,

@@ -83,7 +83,12 @@ class SecHttpClient:
 
     async def ensure_egress(self) -> None:
         """Hold the SEC egress lock before the first request (no-op without a lock)."""
-        if self.egress_lock is None or self._egress_held:
+        if self.egress_lock is None:
+            return
+        if self._egress_held:
+            verify = getattr(self.egress_lock, "verify", None)
+            if verify is not None:
+                await verify()
             return
         async with self._egress_guard:
             if not self._egress_held:

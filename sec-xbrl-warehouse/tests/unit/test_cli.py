@@ -41,7 +41,7 @@ class _Connection:
         return None
 
     async def scalar(self, statement: object) -> str:
-        return "0004_companies"
+        return "0005_job_deferral"
 
 
 class _Engine:

@@ -25,7 +25,17 @@ Only one process sends SEC traffic at a time (see SEC_ACCESS.md). If `catalog sy
 `taxonomy sync`, or a second worker reports "another process holds the SEC egress
 lock", wait for the SEC-active worker to finish or stop it. Workers scoped to non-SEC
 jobs aren't affected. A worker that hits the lock defers the job by
-`XBRL_SEC_EGRESS_BUSY_RETRY_SECONDS` without spending an attempt.
+`XBRL_SEC_EGRESS_BUSY_RETRY_SECONDS` without spending an attempt and without recording
+validation issues. Deferral is capped: after `XBRL_SEC_EGRESS_MAX_DEFER_SECONDS`
+(default 6 hours) from the first deferral the job goes `dead` with that reason
+(`xbrl_job_dead_letters_total{reason="egress_busy_timeout"}`); `XbrlSecEgressDeferrals`
+fires after 30 minutes of deferrals.
+
+A worker keeps the lock for its whole lifetime once it has sent an SEC request, so
+`catalog sync` and `taxonomy sync` fail as busy until that worker stops. The holder
+checks its lock connection at most every `XBRL_SEC_EGRESS_CHECK_SECONDS` (default 30)
+before SEC requests; if the connection dropped (which releases the lock), it
+re-acquires the lock or stops with `SecEgressBusyError` instead of sending.
 
 ## Job queue
 

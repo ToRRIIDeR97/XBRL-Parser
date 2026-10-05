@@ -120,6 +120,10 @@ class ControlRepository(Protocol):
 
     async def known_company_ciks(self, ciks: Sequence[int]) -> set[int]: ...
 
+    async def stale_company_ciks(
+        self, ciks: Sequence[int], fetched_before: datetime
+    ) -> set[int]: ...
+
     async def extraction_checkpoint(
         self, accession: str, revision: int
     ) -> dict[str, Any] | None: ...

@@ -419,6 +419,10 @@ def test_discovery_stores_companies_for_cik_and_daily_index_jobs() -> None:
         async def known_company_ciks(self, ciks):
             return {1} & set(ciks)
 
+        async def stale_company_ciks(self, ciks, fetched_before):
+            self.stale_cutoff = fetched_before
+            return set()
+
     class _Submissions:
         async def discover_with_company(self, cik, *, forms, filed_from, filed_to):
             self.received = (cik, tuple(forms), filed_from, filed_to)

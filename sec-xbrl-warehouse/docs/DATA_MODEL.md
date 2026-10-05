@@ -145,12 +145,15 @@ and `exchanges` (text arrays in source order, tickers upper-cased),
 `{name, valid_from, valid_to}`), `source_checksum` (hash of the submissions
 document), and `fetched_at`. EIN, phone, and addresses are not stored.
 
-- A ticker belongs to at most one company: an upsert that lists a ticker removes it
-  from any other company in the same transaction.
+- `tickers` and `exchanges` are parallel lists, as in the SEC submissions JSON
+  (a missing exchange is `""`). A ticker belongs to at most one company: an upsert that
+  lists a ticker removes it, and the exchange at the same position, from any other
+  company in the same transaction.
 - Ticker lookups are case-insensitive.
 - Rows come from `filing discover --cik` (the same submissions request as the
   filings) and, for daily-index discovery, from one submissions request per CIK not
-  yet stored. Existing rows are refreshed by later `--cik` discoveries.
+  yet stored or fetched more than `XBRL_COMPANY_REFRESH_DAYS` (default 30) days before
+  the discovery date. `--cik` discoveries always refresh the row.
 
 ## Validation issues
 

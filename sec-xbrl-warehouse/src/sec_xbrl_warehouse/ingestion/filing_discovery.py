@@ -134,8 +134,7 @@ def parse_company(payload: dict[str, Any], *, fetched_at: datetime | None = None
         entity_type=_optional_text(payload.get("entityType")),
         sic=_optional_int(payload.get("sic")),
         sic_description=_optional_text(payload.get("sicDescription")),
-        tickers=_text_tuple(payload.get("tickers")),
-        exchanges=_text_tuple(payload.get("exchanges")),
+        **_tickers_and_exchanges(payload.get("tickers"), payload.get("exchanges")),
         fiscal_year_end=_fiscal_year_end(payload.get("fiscalYearEnd")),
         state_of_incorporation=_optional_text(payload.get("stateOfIncorporation")),
         filer_category=_optional_text(payload.get("category")),
@@ -160,21 +159,27 @@ async def enrich_companies(
     ciks: Iterable[int],
     as_of: date,
     data_api_base: str = "https://data.sec.gov",
+    max_age_days: int | None = None,
 ) -> int:
-    """Fetch submissions for CIKs without a company row and store them; return the count.
+    """Fetch submissions for new (and, optionally, stale) CIKs and store them.
 
-    The input is deduplicated and CIKs `known_company_ciks` returns are skipped,
-    so each discovery run costs at most one rate-limited request per new CIK.
-    `as_of` is the discovery date that triggered enrichment; `fetched_at` records
-    the request time.
+    The input is deduplicated. CIKs without a company row are always fetched.
+    With `max_age_days`, stored companies fetched more than that many days before
+    `as_of` are fetched again. Each discovery run costs at most one rate-limited
+    request per such CIK. Returns the number of companies stored.
     """
     wanted = sorted({int(cik) for cik in ciks})
     if not wanted:
         return 0
-    known = set(await control.known_company_ciks(wanted))
+    skip = set(await control.known_company_ciks(wanted))
+    if max_age_days is not None and skip:
+        cutoff = datetime.combine(as_of, datetime.min.time(), tzinfo=UTC) - timedelta(
+            days=max_age_days
+        )
+        skip -= set(await control.stale_company_ciks(sorted(skip), cutoff))
     stored = 0
-    for cik in wanted:  # as_of is informational; fetched_at records the request time
-        if cik in known:
+    for cik in wanted:
+        if cik in skip:
             continue
         payload = await http.get_json(f"{data_api_base.rstrip('/')}/submissions/CIK{cik:010d}.json")
         await control.upsert_company(parse_company(payload, fetched_at=datetime.now(UTC)))
@@ -185,6 +190,26 @@ async def enrich_companies(
 def _optional_text(value: Any) -> str | None:
     text = str(value).strip() if value is not None else ""
     return text or None
+
+
+def _tickers_and_exchanges(tickers: Any, exchanges: Any) -> dict[str, tuple[str, ...]]:
+    """Keep SEC's parallel `tickers`/`exchanges` lists aligned.
+
+    When both lists have the same length, positions with a blank ticker are dropped
+    from both and a missing exchange becomes "". Otherwise each list is cleaned
+    on its own.
+    """
+    if isinstance(tickers, list) and isinstance(exchanges, list) and len(tickers) == len(exchanges):
+        pairs = [
+            (str(ticker).strip(), str(exchange).strip() if exchange is not None else "")
+            for ticker, exchange in zip(tickers, exchanges, strict=True)
+            if ticker is not None and str(ticker).strip()
+        ]
+        return {
+            "tickers": tuple(ticker for ticker, _ in pairs),
+            "exchanges": tuple(exchange for _, exchange in pairs),
+        }
+    return {"tickers": _text_tuple(tickers), "exchanges": _text_tuple(exchanges)}
 
 
 def _text_tuple(value: Any) -> tuple[str, ...]:

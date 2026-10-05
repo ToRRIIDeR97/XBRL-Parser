@@ -529,3 +529,39 @@ async def test_concurrent_claims_with_dead_letters_never_double_claim(
         await repo.close()
         for worker in others:
             await worker.close()
+
+
+async def test_ticker_move_removes_matching_exchange(postgres_settings: Settings) -> None:
+    from sec_xbrl_warehouse.domain.models import Company
+
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.upsert_company(
+            Company(
+                cik=555001,
+                name="Holder A",
+                tickers=("AAA", "MOVE", "aaa"),
+                exchanges=("NYSE", "Nasdaq", "NYSE"),
+                fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+        stored = await repo.get_company(555001)
+        assert stored is not None
+        assert (stored.tickers, stored.exchanges) == (("AAA", "MOVE"), ("NYSE", "Nasdaq"))
+        await repo.upsert_company(
+            Company(
+                cik=555002,
+                name="Holder B",
+                tickers=("MOVE",),
+                exchanges=("CboeBZX",),
+                fetched_at=datetime(2026, 10, 1, tzinfo=UTC),
+            )
+        )
+        old = await repo.get_company(555001)
+        assert old is not None and (old.tickers, old.exchanges) == (("AAA",), ("NYSE",))
+        stale = await repo.stale_company_ciks(
+            [555001, 555002, 999], datetime(2026, 6, 1, tzinfo=UTC)
+        )
+        assert stale == {555001}
+    finally:
+        await repo.close()

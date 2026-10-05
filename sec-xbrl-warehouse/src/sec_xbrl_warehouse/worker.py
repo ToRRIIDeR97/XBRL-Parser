@@ -345,6 +345,7 @@ def build_handlers(
                         ciks=[filing.cik for filing in filings],
                         as_of=filed_to,
                         data_api_base=services.get("data_api_base", "https://data.sec.gov"),
+                        max_age_days=(settings or Settings()).company_refresh_days,
                     )
             for filing in filings:
                 await services["control"].enqueue_job(

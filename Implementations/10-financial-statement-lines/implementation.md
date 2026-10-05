@@ -168,5 +168,5 @@ independently authored.
   completed jobs without those silver checkpoints still replay. `doctor` expects the view.
 - Revision: shares `CURRENT_EXTRACTION_REVISION = 3`.
 - Gates: compileall, ruff, format, mypy, unit (380 passed, 1 skipped), scan_stubs (0),
-  integration (35 passed; an occasional transient ClickHouse failure on rerun-free
-  passes), plan tests 01–10 (12/10/8/10/8/12/10/22/8/7 passed).
+  integration (35 passed; the local ClickHouse container occasionally fails one insert
+  with a transient out-of-memory error that passes on rerun), plan tests 01–10 (12/10/8/10/8/12/10/22/8/7 passed).

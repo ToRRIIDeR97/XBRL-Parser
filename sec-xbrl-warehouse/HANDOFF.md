@@ -10,7 +10,9 @@ transform changes (extraction revision 3, selection policy 2): re-extract the 42
 `SELECT count() FROM xbrl.v_xbrl_facts_latest WHERE value_text = '(ixTransformValueError)'`
 returns 0. Revision 3 also fixes fact `taxonomy_version` (it was `2001` for every fact). Then run
 `mapping import-metrics`, `mapping approve-seeds` (dry run first), `mapping remap`, and
-`worker run --job-type map_canonical`, and confirm AAPL canonical facts. Use the per-revision diagnostics query in INGESTION_RUNBOOK.md to confirm
+`worker run --job-type map_canonical`, and confirm AAPL canonical facts. Run `db upgrade-clickhouse --yes` for the new `accepted_at` and
+filing-context columns, then check AAPL operating cash flow FY2016-FY2025 in
+`GET /v1/series/320193?metrics=operating_cash_flow` (four quarters sum to FY). Use the per-revision diagnostics query in INGESTION_RUNBOOK.md to confirm
 which issues belong to the live revision. Before that, run
 `xbrl-warehouse taxonomy sync` (50 pinned FASB and SEC sources; `taxonomy status` must
 show no `uncovered` rows), set

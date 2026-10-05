@@ -237,3 +237,93 @@ def test_statement_lines_are_replay_safe_and_latest_revision_only(
         {"accession": bundle.filing.accession},
     )
     assert {row["statement_kind"] for row in roles} == {"balance_sheet"}
+
+
+def test_series_rebuild_versions_priority_and_company_mirror(
+    warehouse: ClickHouseWarehouse,
+) -> None:
+    from datetime import UTC, datetime
+
+    from sec_xbrl_warehouse.domain.models import Company
+    from sec_xbrl_warehouse.query.series import rebuild_metric_series
+    from sec_xbrl_warehouse.query.service import QueryService
+
+    cik = 555555
+
+    def canonical(accession, accepted, value, concept, raw):
+        return CanonicalFact(
+            canonical_fact_id=(raw + "c" * 64)[:64],
+            raw_fact_id=(raw + "r" * 64)[:64],
+            accession=accession,
+            cik=cik,
+            filed_date=accepted.date(),
+            accepted_at=accepted,
+            form="10-K",
+            canonical_metric="revenue",
+            normalized_value_decimal=Decimal(value),
+            normalized_unit="USD",
+            period_kind="duration",
+            period_start=date(2024, 1, 1),
+            period_end=date(2024, 12, 31),
+            dimensions_json="[]",
+            mapping_id=UUID(int=9),
+            mapping_version=1,
+            mapping_confidence=1.0,
+            mapping_explanation="integration",
+            extraction_revision=1,
+            concept_namespace="http://fasb.org/us-gaap/2024",
+            concept_qname=concept,
+            fiscal_year=2024,
+            fiscal_period="FY",
+            report_date=date(2024, 12, 31),
+        )
+
+    warehouse.insert_canonical_facts(
+        [
+            canonical(
+                "0000555555-25-000001",
+                datetime(2025, 2, 1, tzinfo=UTC),
+                100,
+                "us-gaap:Revenues",
+                "a",
+            ),
+            canonical(
+                "0000555555-25-000001",
+                datetime(2025, 2, 1, tzinfo=UTC),
+                90,
+                "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                "b",
+            ),
+            canonical(
+                "0000555555-26-000001",
+                datetime(2026, 2, 1, tzinfo=UTC),
+                105,
+                "us-gaap:Revenues",
+                "c",
+            ),
+        ]
+    )
+    priorities = {
+        ("us-gaap", "RevenueFromContractWithCustomerExcludingAssessedTax"): 1,
+        ("us-gaap", "Revenues"): 2,
+    }
+    rebuild_metric_series(warehouse, cik, priorities=priorities)
+    rebuild_metric_series(warehouse, cik, priorities=priorities)  # replay is idempotent
+    service = QueryService(warehouse)
+
+    def annual(**kwargs):
+        rows = service.metric_series(cik=cik, metrics=["revenue"], **kwargs)
+        return [
+            (Decimal(str(row["value"])), row["concept_qname"], row["fiscal_year"]) for row in rows
+        ]
+
+    assert annual() == [(Decimal(105), "us-gaap:Revenues", 2024)]
+    assert annual(as_of=datetime(2025, 6, 1, tzinfo=UTC)) == [
+        (Decimal(90), "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax", 2024)
+    ]
+    assert annual(view="as_reported")[0][0] == Decimal(90)
+    assert annual(as_of=datetime(2025, 1, 1, tzinfo=UTC)) == []
+
+    warehouse.upsert_company_mirror(Company(cik=cik, name="Mirror Co", tickers=("mir",)))
+    assert service.cik_for_ticker("MIR") == cik
+    assert service.cik_for_ticker("NONE") is None

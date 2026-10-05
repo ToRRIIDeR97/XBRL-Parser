@@ -211,3 +211,39 @@ def test_filing_summary_validates_accession_and_uses_known_bounds():
     sql, parameters = warehouse.queries[-1]
     assert "AND cik = %(cik)s" in sql
     assert parameters["filed_date"] == date(2026, 1, 2)
+
+
+def test_series_routes_validate_and_resolve_tickers():
+    class SeriesWarehouse(Warehouse):
+        def query(self, sql, parameters=None):
+            self.queries.append((sql, parameters))
+            if "FROM companies" in sql:
+                return [{"cik": 320193}] if parameters["ticker"] == "AAPL" else []
+            return [{"metric": "revenue", "period_type": "annual", "value": 1}]
+
+    warehouse = SeriesWarehouse()
+    app = create_app()
+    app.dependency_overrides[get_query_service] = lambda: QueryService(warehouse)
+    client = TestClient(app, raise_server_exceptions=False)
+    for path in [
+        "/v1/series/320193",
+        "/v1/series/320193?metrics=Revenue",
+        "/v1/series/320193?metrics=revenue&view=restated",
+        "/v1/series/320193?metrics=revenue&period_type=weekly",
+        "/v1/series?ticker=AA%20PL&metrics=revenue",
+    ]:
+        assert client.get(path).status_code == 422, path
+    assert not warehouse.queries
+    response = client.get(
+        "/v1/series/320193?metrics=revenue,net_income&view=as_reported"
+        "&as_of=2025-01-01T00:00:00Z&period_type=annual"
+    )
+    assert response.status_code == 200
+    sql, parameters = warehouse.queries[-1]
+    assert "metric_series" in sql and "known_from <= %(as_of)s" in sql
+    assert parameters["metrics"] == ["net_income", "revenue"]
+    assert parameters["view"] == "as_reported" and parameters["period_types"] == ["annual"]
+    response = client.get("/v1/series?ticker=aapl&metrics=revenue")
+    assert response.status_code == 200 and response.json()["cik"] == 320193
+    assert client.get("/v1/series?ticker=MSFT&metrics=revenue").status_code == 404
+    client.close()

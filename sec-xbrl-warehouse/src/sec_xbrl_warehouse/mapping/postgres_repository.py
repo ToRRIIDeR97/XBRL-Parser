@@ -105,7 +105,8 @@ class PostgresMappingRepository:
     async def seed_metrics(self, metrics: Sequence[CanonicalMetric]) -> int:
         async with self.sessions.begin() as session:
             for metric in metrics:
-                values = metric.model_dump()
+                # `additive` is series configuration read from the YAML, not stored.
+                values = metric.model_dump(exclude={"additive"})
                 statement = pg_insert(CanonicalMetricRow).values(**values)
                 await session.execute(
                     statement.on_conflict_do_update(

@@ -240,6 +240,12 @@ class CanonicalMapper:
             mapping_confidence=mapping.confidence,
             mapping_explanation=decision.explanation,
             extraction_revision=extraction_revision,
+            accepted_at=filing.accepted_at,
+            concept_namespace=fact.concept_namespace,
+            concept_qname=fact.concept_qname,
+            fiscal_year=filing.fiscal_year,
+            fiscal_period=filing.fiscal_period,
+            report_date=filing.report_date,
         )
 
     async def map_batch(

@@ -1,5 +1,7 @@
 # Canonical metric catalogue. Formula metrics (statement: derived) are computed from
-# other metrics and never have concept candidates.
+# other metrics and never have concept candidates. `additive: false` marks averages,
+# per-share values, and share counts: series keep their reported quarters, years, and
+# instants but never difference or sum them (no YTD quarters, Q4 = FY - 9M, or TTM).
 version: 2
 metrics:
 - code: revenue
@@ -55,26 +57,31 @@ metrics:
   statement: income_statement
   period_type: duration
   unit_family: monetary_per_share
+  additive: false
 - code: diluted_eps
   name: Diluted EPS
   statement: income_statement
   period_type: duration
   unit_family: monetary_per_share
+  additive: false
 - code: basic_shares
   name: Basic Weighted-Average Shares
   statement: income_statement
   period_type: duration
   unit_family: shares
+  additive: false
 - code: diluted_shares
   name: Diluted Weighted-Average Shares
   statement: income_statement
   period_type: duration
   unit_family: shares
+  additive: false
 - code: shares_outstanding
   name: Common Shares Outstanding
   statement: balance_sheet
   period_type: instant
   unit_family: shares
+  additive: false
   description: Common shares outstanding at the balance sheet or cover date.
 - code: operating_cash_flow
   name: Cash Flow from Operations

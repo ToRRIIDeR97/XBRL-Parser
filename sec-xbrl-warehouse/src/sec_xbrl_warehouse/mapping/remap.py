@@ -15,6 +15,7 @@ from sec_xbrl_warehouse.domain.ports import ObjectStore
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle
+from sec_xbrl_warehouse.normalization.fiscal_focus import derive_fiscal_focus
 
 
 class RemapControl(Protocol):
@@ -80,4 +81,7 @@ async def load_published_extraction(
         bundle = await asyncio.to_thread(read_bundle, path, settings.extraction_max_bytes)
     if bundle.filing.accession != accession or bundle.extraction_revision != revision:
         raise XbrlExtractionError("Saved extraction belongs to a different filing or revision")
-    return bundle
+    # The saved extraction keeps discovery metadata; derive the dei fiscal fields
+    # as ingestion does, so canonical facts carry them.
+    enriched, _ = derive_fiscal_focus(bundle)
+    return bundle.model_copy(update={"filing": enriched})

@@ -312,6 +312,7 @@ def test_build_handlers_wires_incremental_mapping_and_discovery(tmp_path) -> Non
         "extraction_revision": 3,
         "mapped": 0,
         "unmapped": 0,
+        "series": {"status": "skipped"},  # the fake warehouse can't store series
     }
     assert mapper.received == ((), _filing(), 3)
     with pytest.raises(Exception, match="No saved extraction"):
@@ -672,3 +673,43 @@ def test_alert_rule_watches_egress_deferrals() -> None:
     rule = next(rule for rule in rules if rule["alert"] == "XbrlSecEgressDeferrals")
     assert 'state="deferred"' in rule["expr"] and "[15m]" in rule["expr"]
     assert rule["for"] == "15m" and "30 minutes" in rule["annotations"]["summary"]
+
+
+def test_series_rebuild_runs_after_ingest_and_failures_do_not_fail_the_job() -> None:
+    calls: list[int] = []
+
+    class _Ingestor:
+        async def ingest(self, filing, *, extraction_revision, job_id):
+            return {"status": "complete", "accession": filing.accession}
+
+    class _Mapper:
+        def __init__(self) -> None:
+            self.metrics: dict = {}
+            self.candidate_priorities = {("us-gaap", "Revenues"): 2}
+
+    class _Warehouse:
+        fail = False
+
+        def insert_metric_series(self, table):
+            return table.num_rows
+
+        def command(self, sql, parameters=None):
+            return None
+
+        def query(self, sql, parameters=None):
+            calls.append(parameters["cik"])
+            if self.fail:
+                raise RuntimeError("clickhouse down")
+            return []
+
+    warehouse = _Warehouse()
+    handlers = build_handlers(
+        services={"ingestor": _Ingestor(), "mapper": _Mapper(), "warehouse": warehouse}
+    )
+    job = _job(JobType.INGEST_FILING, {"filing": _filing().model_dump(mode="json")})
+    result = asyncio.run(handlers[JobType.INGEST_FILING](job))
+    assert result["series"] == {"status": "rebuilt", "rows": 0}
+    assert calls == [_filing().cik]
+    warehouse.fail = True
+    result = asyncio.run(handlers[JobType.INGEST_FILING](job))
+    assert result["series"]["status"] == "failed" and "clickhouse down" in result["series"]["error"]

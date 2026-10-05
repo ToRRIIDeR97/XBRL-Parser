@@ -253,6 +253,65 @@ Contains:
 - dimensional scope;
 - source and extraction revision.
 
+### Acceptance time and filing context
+
+`xbrl_facts.accepted_at` and `canonical_facts.accepted_at` hold the SEC acceptance
+time from the filing reference (`FilingRef.accepted_at`, from the submissions JSON).
+`canonical_facts` also carries the filing's dei `fiscal_year`, `fiscal_period`, and
+`report_date`, and the raw fact's `concept_namespace`/`concept_qname`. These columns
+are filled by re-extraction at revision 3 (no backfill of older rows); existing tables
+gain them as NULL through `xbrl-warehouse db upgrade-clickhouse --yes`. Daily-index
+discovery doesn't supply acceptance times, so series fall back to midnight UTC of the
+filing date for those filings.
+
+### `metric_series`
+
+Standardized series rebuilt per company from `canonical_facts` by
+`normalization/series.py` and `query/series.py` (derived; fully rebuildable).
+
+- **Inputs.** The company's consolidated canonical facts (`dimensions_json = '[]'`)
+  from each filing's latest published extraction revision.
+- **Selection per (metric, period), before any derivation.** Within one filing the
+  lowest seed `priority` wins (`config/concept_seed.yml`; unseeded concepts rank last);
+  across filings `latest` takes the newest acceptance and `as_reported` the oldest; an
+  as-of cutoff drops observations accepted after it first.
+- **Periods.** Durations of 80-100 days are quarters, 170-190 six months, 260-285 nine
+  months, 350-380 a year (52/53-week calendars fit). Discrete quarters are reported
+  3-month values, else differences of consecutive year-to-date values sharing a
+  `period_start` (`ytd_difference`); Q4 = year - nine months
+  (`annual_minus_nine_months`). Only when the year has no nine-month value, Q4 =
+  year - (Q1 + Q2 + Q3) (`annual_minus_quarters`): Q1 starts on the year's start, Q1-Q3
+  are contiguous discrete quarters, and Q4 starts the day after Q3 ends.
+  TTM (`ttm_sum`) sums four contiguous discrete quarters.
+  Instants are `instant` points; there is no TTM for them. A derived point needs every
+  input and one unit.
+- **Labels.** `fiscal_year`/`fiscal_quarter` come from the filing whose `report_date`
+  equals the point's period end (FY maps to quarter 4).
+- **Formulas.** Formula metrics from `canonical_metrics.yml` (`free_cash_flow`) are
+  computed per period when every operand exists (`formula`).
+- **Lineage.** Each point records `concept_qname`, `source_accessions`, and
+  `available_at` (the newest acceptance among its inputs).
+- **Storage.** `as_reported` rows once, with `known_from = available_at`. `latest`
+  rows are versions: the series is rebuilt as of each filing's acceptance time and a
+  row is written whenever a point changes (`known_from` = that time). A query takes the
+  newest `built_at` for the company and, per point, the newest version with
+  `known_from <= as_of`.
+- **Rebuilds.** The worker rebuilds a company after a completed `ingest_filing` or
+  `map_canonical` (a failure is reported in the job result, not retried);
+  `xbrl-warehouse series rebuild --cik <cik>` rebuilds on demand. The table is a
+  `ReplacingMergeTree(built_at)`, so merges replace older builds' rows without a delete
+  mutation per rebuild; readers only use the newest build.
+- **Non-additive metrics.** Metrics with `additive: false` in `canonical_metrics.yml`
+  (weighted-average shares, shares outstanding, basic and diluted EPS) keep their
+  reported quarters, years, and instants only: no year-to-date quarters, Q4 = FY - 9M,
+  or TTM, because differences and sums of averages or per-share values are
+  meaningless. `dividends_per_share` stays additive (per-share dividends do sum). The
+  flag is read from the YAML; it isn't stored in PostgreSQL `canonical_metrics`.
+
+`companies` in ClickHouse mirrors PostgreSQL company rows (name, tickers, exchanges,
+SIC, fiscal year end) for read-only ticker lookups by the API; the newest mirrored
+holder of a ticker wins.
+
 ## Row hashing
 
 Every silver/raw warehouse row should have a deterministic hash over normalized field serialization. Hashing excludes ingest timestamps but includes all source-controlled values. This supports replay verification and source-revision comparison.

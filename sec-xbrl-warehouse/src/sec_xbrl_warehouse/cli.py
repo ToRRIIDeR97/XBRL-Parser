@@ -56,6 +56,7 @@ mapping_app = typer.Typer(help="Canonical metric and mapping review workflows.")
 taxonomy_app = typer.Typer(help="Pinned local taxonomy packages for Arelle.")
 company_app = typer.Typer(help="Companies from SEC submissions data.")
 jobs_app = typer.Typer(help="Inspect and recover PostgreSQL queue jobs.")
+series_app = typer.Typer(help="Standardized metric series.")
 app.add_typer(db_app, name="db")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(backfill_app, name="backfill")
@@ -66,6 +67,7 @@ app.add_typer(mapping_app, name="mapping")
 app.add_typer(taxonomy_app, name="taxonomy")
 app.add_typer(company_app, name="company")
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(series_app, name="series")
 console = Console()
 
 
@@ -808,3 +810,33 @@ async def _jobs_retry(job_id: str) -> None:
     finally:
         await control.close()
     console.print(f"Job {job.id} ({job.job_type.value}) is {job.state.value}")
+
+
+@series_app.command("rebuild")
+def series_rebuild(cik: list[int] = typer.Option(..., "--cik", min=0, help="Repeatable.")) -> None:
+    """Rebuild companies' metric series from their canonical facts (no SEC access)."""
+    from sec_xbrl_warehouse.query.series import (
+        formulas_from_metrics,
+        non_additive_from_metrics,
+        rebuild_metric_series,
+    )
+
+    settings = get_settings()
+    mapper = CanonicalMapper.load_rules(
+        settings.config_dir / "canonical_metrics.yml",
+        settings.config_dir / "concept_seed.yml",
+        None,  # type: ignore[arg-type]
+    )
+    warehouse = ClickHouseWarehouse(settings)
+    try:
+        for company in cik:
+            written = rebuild_metric_series(
+                warehouse,
+                company,
+                formulas=formulas_from_metrics(mapper.metrics),
+                non_additive=non_additive_from_metrics(mapper.metrics),
+                priorities=mapper.candidate_priorities,
+            )
+            console.print(f"CIK {company}: {written} series rows")
+    finally:
+        warehouse.close()

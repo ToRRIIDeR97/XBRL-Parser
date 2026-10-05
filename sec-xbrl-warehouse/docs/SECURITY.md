@@ -122,6 +122,12 @@ bounded object restores. The full gates are listed in the root `AGENTS.md`.
 
 ## Before public exposure
 
+Grant the API's ClickHouse reader (`xbrl_api`) `SELECT` on the tables and views added
+by the statement and series work: `metric_series`, `companies`, `xbrl_roles`,
+`xbrl_statement_lines`, and `v_statement_lines_latest` (in addition to the existing
+latest views). The API reads them only through bounded `QueryService` queries.
+
+
 Production authentication, a dedicated bounded ClickHouse reader, TLS, managed
 secrets, synced taxonomy packages with offline parsing, private service networks, a pinned and scanned release image, and a completed
 backup restore drill. The remaining limits are tracked in `HANDOFF.md` and

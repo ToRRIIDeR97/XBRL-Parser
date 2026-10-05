@@ -19,6 +19,7 @@ from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
     MappingReviewRow,
 )
 from sec_xbrl_warehouse.mapping.canonical_mapper import ReviewRequest
+from sec_xbrl_warehouse.mapping.namespaces import namespace_family
 
 
 class PostgresMappingRepository:
@@ -45,12 +46,17 @@ class PostgresMappingRepository:
         cik: int,
         filed_date: date,
     ) -> Sequence[ConceptMapping]:
-        """Return approved mappings valid on the filed date, most specific first.
+        """Return the most specific approved mappings valid on the filed date.
 
-        Specificity order: exact CIK match, then taxonomy-version match, then
-        global namespace match. Within equal specificity, the highest mapping
-        version wins (append-only history means the latest is authoritative).
+        A mapping's `namespace` is either an exact namespace URI or a family token
+        (`us-gaap`, `ifrs-full`, `dei`, `srt`) that matches every standard
+        namespace URI of that family; extension namespaces never match a family.
+        Specificity order: CIK, then taxonomy version, then exact namespace URI,
+        then family. Within equal specificity, the highest mapping version wins
+        (append-only history means the latest is authoritative).
         """
+        family = namespace_family(namespace)
+        namespaces = [namespace] if family is None else [namespace, family]
         async with self.sessions() as session:
             rows = (
                 await session.execute(
@@ -60,7 +66,7 @@ class PostgresMappingRepository:
                         ConceptMappingRow.metric_id == CanonicalMetricRow.id,
                     )
                     .where(
-                        ConceptMappingRow.namespace == namespace,
+                        ConceptMappingRow.namespace.in_(namespaces),
                         ConceptMappingRow.concept_name == concept_name,
                         ConceptMappingRow.status == "approved",
                         ConceptMappingRow.cik.is_(None) | (ConceptMappingRow.cik == cik),
@@ -78,16 +84,22 @@ class PostgresMappingRepository:
 
         latest: dict[tuple[object, ...], tuple[ConceptMappingRow, str]] = {}
         for row, metric_code in rows:
-            key = (metric_code, row.cik, row.taxonomy_version)
+            key = (metric_code, row.namespace, row.cik, row.taxonomy_version)
             if key not in latest or latest[key][0].mapping_version < row.mapping_version:
                 latest[key] = (row, metric_code)
-        best = max(
-            (row.cik is not None, row.taxonomy_version is not None) for row, _ in latest.values()
-        )
+
+        def specificity(row: ConceptMappingRow) -> tuple[bool, bool, bool]:
+            return (
+                row.cik is not None,
+                row.taxonomy_version is not None,
+                row.namespace == namespace,
+            )
+
+        best = max(specificity(row) for row, _ in latest.values())
         return tuple(
             _to_concept_mapping(row, metric_code)
             for row, metric_code in latest.values()
-            if (row.cik is not None, row.taxonomy_version is not None) == best
+            if specificity(row) == best
         )
 
     async def seed_metrics(self, metrics: Sequence[CanonicalMetric]) -> int:
@@ -116,6 +128,68 @@ class PostgresMappingRepository:
         valid_from: date | None = None,
         valid_to: date | None = None,
     ) -> ConceptMapping:
+        """Approve a mapping; repeating an identical approval returns the existing version."""
+        mapping, _ = await self.approve_mapping_once(
+            metric=metric,
+            namespace=namespace,
+            concept_name=concept_name,
+            explanation=explanation,
+            created_by=created_by,
+            taxonomy_version=taxonomy_version,
+            cik=cik,
+            valid_from=valid_from,
+            valid_to=valid_to,
+        )
+        return mapping
+
+    async def find_approved_mapping(
+        self,
+        *,
+        metric: str,
+        namespace: str,
+        concept_name: str,
+        taxonomy_version: str | None = None,
+        cik: int | None = None,
+    ) -> ConceptMapping | None:
+        """The latest version of this mapping if it is approved, else None."""
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ConceptMappingRow)
+                .join(CanonicalMetricRow, ConceptMappingRow.metric_id == CanonicalMetricRow.id)
+                .where(
+                    CanonicalMetricRow.code == metric,
+                    ConceptMappingRow.namespace == namespace,
+                    ConceptMappingRow.concept_name == concept_name,
+                    ConceptMappingRow.cik.is_not_distinct_from(cik),
+                    ConceptMappingRow.taxonomy_version.is_not_distinct_from(taxonomy_version),
+                )
+                .order_by(ConceptMappingRow.mapping_version.desc())
+                .limit(1)
+            )
+        if row is None or row.status != "approved":
+            return None
+        return _to_concept_mapping(row, metric)
+
+    async def approve_mapping_once(
+        self,
+        *,
+        metric: str,
+        namespace: str,
+        concept_name: str,
+        explanation: str,
+        created_by: str,
+        taxonomy_version: str | None = None,
+        cik: int | None = None,
+        valid_from: date | None = None,
+        valid_to: date | None = None,
+    ) -> tuple[ConceptMapping, bool]:
+        """Return `(mapping, created)`.
+
+        Mappings are append-only and versioned. If the latest version for this
+        metric, namespace, concept, taxonomy version, and CIK is already approved
+        with the same validity window, rationale, and reviewer, it is returned with
+        `created=False`. A different reviewer or rationale records a new version.
+        """
         if not all(
             (
                 metric.strip(),
@@ -140,18 +214,28 @@ class PostgresMappingRepository:
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                 {"key": f"mapping:{metric}:{namespace}:{concept_name}:{taxonomy_version}:{cik}"},
             )
-            version = (
-                await session.scalar(
-                    select(func.max(ConceptMappingRow.mapping_version)).where(
-                        ConceptMappingRow.metric_id == metric_id,
-                        ConceptMappingRow.namespace == namespace,
-                        ConceptMappingRow.concept_name == concept_name,
-                        ConceptMappingRow.cik == cik,
-                        ConceptMappingRow.taxonomy_version == taxonomy_version,
-                    )
+            current = await session.scalar(
+                select(ConceptMappingRow)
+                .where(
+                    ConceptMappingRow.metric_id == metric_id,
+                    ConceptMappingRow.namespace == namespace,
+                    ConceptMappingRow.concept_name == concept_name,
+                    ConceptMappingRow.cik.is_not_distinct_from(cik),
+                    ConceptMappingRow.taxonomy_version.is_not_distinct_from(taxonomy_version),
                 )
-                or 0
-            ) + 1
+                .order_by(ConceptMappingRow.mapping_version.desc())
+                .limit(1)
+            )
+            if (
+                current is not None
+                and current.status == "approved"
+                and current.valid_from == valid_from
+                and current.valid_to == valid_to
+                and current.rationale == explanation
+                and current.created_by == created_by
+            ):
+                return _to_concept_mapping(current, metric), False
+            version = (current.mapping_version if current is not None else 0) + 1
             row = ConceptMappingRow(
                 metric_id=metric_id,
                 namespace=namespace,
@@ -168,7 +252,7 @@ class PostgresMappingRepository:
             )
             session.add(row)
             await session.flush()
-            return _to_concept_mapping(row, metric)
+            return _to_concept_mapping(row, metric), True
 
     async def list_reviews(self, limit: int = 100, offset: int = 0) -> list[dict[str, object]]:
         """Open reviews, one per concept, with cumulative evidence."""
@@ -206,9 +290,10 @@ class PostgresMappingRepository:
             if row is None:
                 raise KeyError(review_id)
             evidence = row.evidence
-            if (
-                evidence.get("namespace") != mapping.namespace
-                or evidence.get("concept_name") != mapping.concept_name
+            namespace = str(evidence.get("namespace") or "")
+            # A family mapping (`us-gaap`) resolves reviews of any standard year namespace.
+            if mapping.namespace not in {namespace, namespace_family(namespace)} or (
+                evidence.get("concept_name") != mapping.concept_name
             ):
                 raise ValueError("The approved mapping does not match the review concept")
             await session.execute(

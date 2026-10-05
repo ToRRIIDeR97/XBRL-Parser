@@ -1,69 +1,252 @@
-version: 1
+# Canonical metric catalogue. Formula metrics (statement: derived) are computed from
+# other metrics and never have concept candidates.
+version: 2
 metrics:
-  - code: revenue
-    name: Revenue
-    statement: income_statement
-    period_type: duration
-    unit_family: monetary
-    description: Consolidated top-line revenue as reported by the entity.
-  - code: gross_profit
-    name: Gross Profit
-    statement: income_statement
-    period_type: duration
-    unit_family: monetary
-  - code: operating_income
-    name: Operating Income
-    statement: income_statement
-    period_type: duration
-    unit_family: monetary
-  - code: net_income
-    name: Net Income
-    statement: income_statement
-    period_type: duration
-    unit_family: monetary
-  - code: diluted_eps
-    name: Diluted EPS
-    statement: income_statement
-    period_type: duration
-    unit_family: monetary_per_share
-  - code: total_assets
-    name: Total Assets
-    statement: balance_sheet
-    period_type: instant
-    unit_family: monetary
-  - code: total_liabilities
-    name: Total Liabilities
-    statement: balance_sheet
-    period_type: instant
-    unit_family: monetary
-  - code: stockholders_equity
-    name: Stockholders' Equity
-    statement: balance_sheet
-    period_type: instant
-    unit_family: monetary
-  - code: cash_and_equivalents
-    name: Cash and Cash Equivalents
-    statement: balance_sheet
-    period_type: instant
-    unit_family: monetary
-  - code: operating_cash_flow
-    name: Cash Flow from Operations
-    statement: cash_flow
-    period_type: duration
-    unit_family: monetary
-  - code: capital_expenditures
-    name: Capital Expenditures
-    statement: cash_flow
-    period_type: duration
-    unit_family: monetary
-  - code: free_cash_flow
-    name: Free Cash Flow
-    statement: derived
-    period_type: duration
-    unit_family: monetary
-    formula: operating_cash_flow - capital_expenditures
-  - code: diluted_shares
-    name: Diluted Weighted-Average Shares
-    statement: income_statement
-    period_type: duration
-    unit_family: shares
+- code: revenue
+  name: Revenue
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+  description: Consolidated top-line revenue as reported by the entity.
+- code: cost_of_revenue
+  name: Cost of Revenue
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+  description: Cost of goods and services sold.
+- code: gross_profit
+  name: Gross Profit
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+- code: research_and_development
+  name: Research and Development Expense
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+- code: selling_general_administrative
+  name: Selling, General and Administrative Expense
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+- code: operating_income
+  name: Operating Income
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+- code: interest_expense
+  name: Interest Expense
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+- code: income_tax_expense
+  name: Income Tax Expense
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+  description: Total income tax expense (benefit).
+- code: net_income
+  name: Net Income
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+- code: basic_eps
+  name: Basic EPS
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary_per_share
+- code: diluted_eps
+  name: Diluted EPS
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary_per_share
+- code: basic_shares
+  name: Basic Weighted-Average Shares
+  statement: income_statement
+  period_type: duration
+  unit_family: shares
+- code: diluted_shares
+  name: Diluted Weighted-Average Shares
+  statement: income_statement
+  period_type: duration
+  unit_family: shares
+- code: shares_outstanding
+  name: Common Shares Outstanding
+  statement: balance_sheet
+  period_type: instant
+  unit_family: shares
+  description: Common shares outstanding at the balance sheet or cover date.
+- code: operating_cash_flow
+  name: Cash Flow from Operations
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+- code: capital_expenditures
+  name: Capital Expenditures
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+  description: Payments to acquire property, plant, and equipment.
+- code: depreciation_amortization
+  name: Depreciation and Amortization
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+- code: share_based_compensation
+  name: Share-Based Compensation
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+- code: share_repurchases
+  name: Share Repurchases
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+  description: Payments to repurchase common stock.
+- code: dividends_paid
+  name: Dividends Paid
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+- code: acquisitions
+  name: Acquisitions, Net of Cash Acquired
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+- code: debt_issued
+  name: Proceeds from Debt Issuance
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+- code: debt_repaid
+  name: Repayments of Debt
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+- code: income_taxes_paid
+  name: Income Taxes Paid
+  statement: cash_flow
+  period_type: duration
+  unit_family: monetary
+- code: cash_and_equivalents
+  name: Cash and Cash Equivalents
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: short_term_investments
+  name: Short-Term Investments
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+  description: Current marketable securities and short-term investments.
+- code: accounts_receivable
+  name: Accounts Receivable
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: inventory
+  name: Inventory
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: total_current_assets
+  name: Total Current Assets
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: goodwill
+  name: Goodwill
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: total_assets
+  name: Total Assets
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: accounts_payable
+  name: Accounts Payable
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: deferred_revenue
+  name: Deferred Revenue (Current)
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+  description: Current contract liabilities and deferred revenue.
+- code: total_current_liabilities
+  name: Total Current Liabilities
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: current_debt
+  name: Current Debt
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+  description: Current portion of long-term debt and other current borrowings.
+- code: long_term_debt
+  name: Long-Term Debt (Noncurrent)
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: operating_lease_liabilities
+  name: Operating Lease Liabilities
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+  description: Total operating lease liabilities (current and noncurrent).
+- code: total_liabilities
+  name: Total Liabilities
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: stockholders_equity
+  name: Stockholders' Equity
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+- code: dividends_per_share
+  name: Dividends per Share
+  statement: equity
+  period_type: duration
+  unit_family: monetary_per_share
+  description: Dividends declared per common share.
+- code: net_interest_income
+  name: Net Interest Income
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+  description: Banks and lenders.
+- code: deposits
+  name: Deposits
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+  description: Banks and lenders.
+- code: loans_net
+  name: Loans, Net
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+  description: 'Banks and lenders: loans and leases net of allowance.'
+- code: allowance_for_credit_losses
+  name: Allowance for Credit Losses
+  statement: balance_sheet
+  period_type: instant
+  unit_family: monetary
+  description: Banks and lenders.
+- code: provision_for_credit_losses
+  name: Provision for Credit Losses
+  statement: income_statement
+  period_type: duration
+  unit_family: monetary
+  description: Banks and lenders.
+- code: free_cash_flow
+  name: Free Cash Flow
+  statement: derived
+  period_type: duration
+  unit_family: monetary
+  formula: operating_cash_flow - capital_expenditures
+  description: Derived; computed in plan 11, never mapped from a concept.

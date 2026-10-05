@@ -14,6 +14,7 @@ import yaml
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact, CanonicalMetric, ConceptMapping
 from sec_xbrl_warehouse.domain.models import FilingRef
 from sec_xbrl_warehouse.domain.xbrl import XbrlFact
+from sec_xbrl_warehouse.mapping.namespaces import FAMILY_TOKENS, namespace_family
 from sec_xbrl_warehouse.normalization.dimensions import dimensions_to_json
 from sec_xbrl_warehouse.normalization.facts import (
     MONETARY_MEASURES,
@@ -82,10 +83,13 @@ class CanonicalMapper:
         metrics: dict[str, CanonicalMetric],
         candidate_rules: dict[tuple[str, str], tuple[str, ...]],
         repository: MappingRepository,
+        candidate_priorities: dict[tuple[str, str], int] | None = None,
     ) -> None:
         self.metrics = metrics
         self.candidate_rules = candidate_rules
         self.repository = repository
+        # (namespace family, concept) -> priority within its metric and family (1 first).
+        self.candidate_priorities = candidate_priorities or {}
 
     @classmethod
     def load_rules(
@@ -103,17 +107,28 @@ class CanonicalMapper:
             if metric.code in metrics:
                 raise ValueError(f"Duplicate canonical metric code: {metric.code}")
             metrics[metric.code] = metric
+        for metric in metrics.values():
+            if metric.formula and metric.statement != "derived":
+                raise ValueError(f"Formula metric must use statement 'derived': {metric.code}")
         candidates: dict[tuple[str, str], list[str]] = {}
+        priorities: dict[tuple[str, str], int] = {}
         for item in seed_payload.get("mappings", []):
             code = str(item["canonical_metric"])
             if code not in metrics:
                 raise ValueError(f"Seed mapping references unknown metric: {code}")
+            if metrics[code].formula:
+                raise ValueError(f"Formula metric cannot have concept candidates: {code}")
             key = (str(item.get("namespace_hint") or ""), str(item["concept"]))
+            if key[0] not in FAMILY_TOKENS:
+                raise ValueError(f"Seed namespace hint must be one of {sorted(FAMILY_TOKENS)}")
             candidates.setdefault(key, []).append(code)
+            if "priority" in item:
+                priorities[key] = int(item["priority"])
         return cls(
             metrics=metrics,
             candidate_rules={key: tuple(value) for key, value in candidates.items()},
             repository=repository,
+            candidate_priorities=priorities,
         )
 
     async def map_fact(self, fact: XbrlFact, filing: FilingRef) -> MappingDecision:
@@ -334,11 +349,7 @@ class CanonicalMapper:
 
 
 def _namespace_hint(namespace: str) -> str:
-    lowered = namespace.lower()
-    for value in ("us-gaap", "ifrs-full", "dei", "srt"):
-        if value in lowered:
-            return value
-    return "extension"
+    return namespace_family(namespace) or "extension"
 
 
 def _incompatibility(metric: CanonicalMetric, fact: XbrlFact) -> str | None:

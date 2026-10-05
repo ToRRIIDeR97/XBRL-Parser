@@ -26,7 +26,7 @@ def _metric() -> CanonicalMetric:
 def _mapping(metric: str = "Revenue", *, version: int = 1, approved: bool = True) -> ConceptMapping:
     return ConceptMapping(
         id=UUID(f"00000000-0000-0000-0000-00000000000{version}"),
-        namespace="http://fasb.org/us-gaap",
+        namespace="http://fasb.org/us-gaap/2025",
         concept_name="Revenues",
         canonical_metric=metric,
         mapping_type="exact",
@@ -40,7 +40,7 @@ def _mapping(metric: str = "Revenue", *, version: int = 1, approved: bool = True
 def _fact() -> XbrlFact:
     return XbrlFact(
         fact_id="f1",
-        concept_namespace="http://fasb.org/us-gaap",
+        concept_namespace="http://fasb.org/us-gaap/2025",
         concept_name="Revenues",
         concept_qname="us-gaap:Revenues",
         taxonomy_version="2025",

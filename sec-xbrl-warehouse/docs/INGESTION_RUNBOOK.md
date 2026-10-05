@@ -61,6 +61,19 @@ ORDER BY 1 DESC, occurrences DESC;
 
 Rows with a NULL `extraction_revision` predate the revision tag.
 
+### Canonical facts after approving mappings
+
+```bash
+xbrl-warehouse mapping import-metrics
+xbrl-warehouse mapping approve-seeds --reviewer <name> --rationale <text> --dry-run
+xbrl-warehouse mapping approve-seeds --reviewer <name> --rationale <text>
+xbrl-warehouse mapping remap --epoch <date>
+xbrl-warehouse worker run --job-type map_canonical
+```
+
+`map_canonical` needs the saved extraction of a completed `ingest_filing` job for that
+revision; filings without one fail with "No saved extraction" and need re-ingestion.
+
 ## Recovery
 
 ### Download interrupted

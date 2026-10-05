@@ -572,7 +572,11 @@ class ArelleExtractor:
                     concept_namespace=str(getattr(fact_qname, "namespaceURI", "") or ""),
                     concept_name=str(getattr(fact_qname, "localName", "") or ""),
                     concept_qname=str(fact_qname),
-                    taxonomy_version=_taxonomy_version(str(concept.namespaceURI), model_xbrl),
+                    # The concept's own namespace. `concept.namespaceURI` is the
+                    # namespace of its xs:element declaration (XML Schema, "2001").
+                    taxonomy_version=_taxonomy_version(
+                        str(getattr(fact_qname, "namespaceURI", "") or ""), model_xbrl
+                    ),
                     context_id=str(fact.contextID or ""),
                     context_hash=context.context_hash if context else "",
                     unit=unit,

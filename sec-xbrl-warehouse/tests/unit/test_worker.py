@@ -201,7 +201,14 @@ def _filing() -> FilingRef:
     )
 
 
-def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
+def test_build_handlers_wires_incremental_mapping_and_discovery(tmp_path) -> None:
+    from hashlib import sha256
+
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.domain.xbrl import XbrlDocumentMetadata, XbrlExtractionBundle
+    from sec_xbrl_warehouse.infrastructure.storage.object_store import LocalObjectStore
+    from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import write_json
+
     class _Ingestor:
         async def ingest(self, filing, *, extraction_revision, job_id):
             return {"accession": filing.accession, "revision": extraction_revision}
@@ -224,6 +231,31 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
             self.received = (filed_from, filed_to, forms)
             return (_filing(),)
 
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data")
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    bundle = XbrlExtractionBundle(
+        filing=_filing(),
+        metadata=XbrlDocumentMetadata(
+            entrypoint="f.htm",
+            document_type="inline",
+            taxonomy_namespaces=(),
+            source_documents=("f.htm",),
+            software_name="arelle",
+            software_version="test",
+        ),
+        contexts=(),
+        concepts=(),
+        facts=(),
+        relationships=(),
+        footnotes=(),
+        validation_issues=(),
+        extraction_revision=3,
+    )
+    extraction = tmp_path / "extraction.json"
+    write_json(bundle, extraction, 1_000_000)
+    checksum = sha256(extraction.read_bytes()).hexdigest()
+    store.put_file(extraction, "silver/extraction.json")
+
     class _Control:
         def __init__(self):
             self.jobs = []
@@ -231,19 +263,26 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
         async def enqueue_job(self, **kwargs):
             self.jobs.append(kwargs)
 
+        async def extraction_checkpoint(self, accession, revision):
+            if (accession, revision) == (_filing().accession, 3):
+                return {"object_key": "silver/extraction.json", "sha256": checksum}
+            return None
+
     mapper = _Mapper()
     warehouse = _Warehouse()
     discovery = _Discovery()
     control = _Control()
     handlers = build_handlers(
+        settings=settings,
         services={
+            "object_store": store,
             "ingestor": _Ingestor(),
             "mapper": mapper,
             "warehouse": warehouse,
             "discovery": discovery,
             "forms": ["10-K"],
             "control": control,
-        }
+        },
     )
     filing_payload = _filing().model_dump(mode="json")
 
@@ -259,12 +298,31 @@ def test_build_handlers_wires_incremental_mapping_and_discovery() -> None:
         )
     )
     assert reconciled == {"accession": _filing().accession}
+    # map_canonical loads facts from the saved extraction, not from the payload.
     mapped = asyncio.run(
         handlers[JobType.MAP_CANONICAL](
-            _job(JobType.MAP_CANONICAL, {"filing": filing_payload, "facts": []})
+            _job(
+                JobType.MAP_CANONICAL,
+                {"accession": _filing().accession, "extraction_revision": 3},
+            )
         )
     )
-    assert mapped == {"mapped": 0, "unmapped": 0}
+    assert mapped == {
+        "accession": _filing().accession,
+        "extraction_revision": 3,
+        "mapped": 0,
+        "unmapped": 0,
+    }
+    assert mapper.received == ((), _filing(), 3)
+    with pytest.raises(Exception, match="No saved extraction"):
+        asyncio.run(
+            handlers[JobType.MAP_CANONICAL](
+                _job(
+                    JobType.MAP_CANONICAL,
+                    {"accession": _filing().accession, "extraction_revision": 2},
+                )
+            )
+        )
     discovered = asyncio.run(
         handlers[JobType.DISCOVER_FILINGS](
             _job(

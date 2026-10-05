@@ -160,3 +160,26 @@ its own PostgreSQL database and runs `alembic upgrade head`. Without
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-1/AC-2: 46 metrics (45 reported + `free_cash_flow` formula) and 109 seed
+  candidates with `priority` (us-gaap for every reported metric; ifrs-full for 17
+  core metrics; dei `EntityCommonStockSharesOutstanding`). `load_rules` rejects
+  unknown hints, candidates on formula metrics, and formula metrics not marked
+  `derived`; priorities are exposed as `CanonicalMapper.candidate_priorities`.
+  Concept choices were checked against AAPL's non-dimensional us-gaap facts.
+- AC-3: `mapping/namespaces.py` (strict standard-URI families). Repository matches
+  `namespace IN (uri, family)`; specificity CIK > taxonomy version > exact URI > family.
+  `resolve_review` accepts a family mapping for a standard-year review.
+- AC-4: `mapping/seed_approval.py` + `mapping approve-seeds`. `approve_mapping_once`
+  is idempotent when scope, validity, reviewer and rationale match (fixes a bug: with
+  NULL cik the old version lookup never matched, so re-approval wrote duplicate v1 rows).
+- AC-5: `mapping/remap.py` + `mapping remap`; `map_canonical` payload is
+  `{accession, extraction_revision}` and the worker loads the checksum-verified saved
+  extraction found via the completed `ingest_filing` job's `extract` checkpoint.
+- Pre-existing bug fixed: fact `taxonomy_version` was read from `concept.namespaceURI`,
+  the XML Schema namespace of the element declaration (`2001`); now from the fact QName
+  namespace. Regression assertion in `tests/unit/test_arelle_adapter.py` (fails on old code).
+- Gates: compileall, ruff, format, mypy, unit (329 passed, 1 skipped), scan_stubs (0),
+  integration (27 passed), plan tests 01–06 (12/10/8/10/8/12 passed).

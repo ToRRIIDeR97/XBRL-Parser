@@ -279,6 +279,66 @@ class PostgresControlRepository:
                 raise RuntimeError("PostgreSQL did not return a job ID")
             return job_id
 
+    async def enqueue_job_if_absent(
+        self,
+        *,
+        job_type: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        priority: int = 100,
+        max_attempts: int = 5,
+    ) -> UUID | None:
+        """Insert a pending job; return None if the idempotency key already exists."""
+        statement = (
+            pg_insert(IngestionJobRow)
+            .values(
+                job_type=JobType(job_type).value,
+                state=JobState.PENDING.value,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                priority=priority,
+                max_attempts=max_attempts,
+            )
+            .on_conflict_do_nothing(index_elements=[IngestionJobRow.idempotency_key])
+            .returning(IngestionJobRow.id)
+        )
+        async with self.sessions.begin() as session:
+            job_id: UUID | None = await session.scalar(statement)
+            return job_id
+
+    async def published_filing_revisions(
+        self, accessions: Sequence[str] | None = None
+    ) -> list[tuple[str, int]]:
+        """`(accession, latest_extraction_revision)` for filings with a published extraction."""
+        statement = (
+            select(FilingRow.accession, FilingRow.latest_extraction_revision)
+            .where(FilingRow.latest_extraction_revision > 0)
+            .order_by(FilingRow.accession)
+        )
+        if accessions is not None:
+            statement = statement.where(FilingRow.accession.in_(list(accessions)))
+        async with self.sessions() as session:
+            return [(str(row[0]), int(row[1])) for row in (await session.execute(statement)).all()]
+
+    async def extraction_checkpoint(self, accession: str, revision: int) -> dict[str, Any] | None:
+        """The saved extraction (`object_key`, `sha256`) of a completed filing ingestion."""
+        statement = (
+            select(JobCheckpointRow.payload)
+            .join(IngestionJobRow, IngestionJobRow.id == JobCheckpointRow.job_id)
+            .where(
+                IngestionJobRow.job_type == JobType.INGEST_FILING.value,
+                IngestionJobRow.state == JobState.COMPLETE.value,
+                IngestionJobRow.payload["filing"]["accession"].astext == accession,
+                IngestionJobRow.payload["extraction_revision"].astext == str(revision),
+                JobCheckpointRow.stage == "extract",
+            )
+            .order_by(IngestionJobRow.updated_at.desc())
+            .limit(1)
+        )
+        async with self.sessions() as session:
+            payload = await session.scalar(statement)
+        return dict(payload) if payload else None
+
     async def claim_job(
         self,
         worker_id: str,

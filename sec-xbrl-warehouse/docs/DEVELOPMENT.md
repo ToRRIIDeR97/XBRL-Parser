@@ -48,4 +48,6 @@ make scan-stubs
 
 ## Definition of a completed ingestion change
 
-An ingestion change is complete only when its contract tests pass, failure/retry behavior is covered, and the relevant runbook is updated. Preserve the 70% repository branch-coverage floor and add a focused regression check for every changed trust boundary.
+An ingestion change is complete only when its contract tests pass, failure/retry behavior is covered, and the relevant runbook is updated. Preserve the 70% repository branch-coverage floor and add a focused regression check for every changed trust boundary. Never point tests at an application database; the integration fixtures create and remove their own databases and bucket.
+
+`python scripts/generate_project_tree.py` writes a git-ignored `PROJECT_TREE.txt` when you want a full file listing.

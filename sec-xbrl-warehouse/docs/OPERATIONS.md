@@ -226,7 +226,7 @@ the total wall time with the 43-minute serial baseline (2 October 2026).
 
 1. Start with one worker and one recent artifact while measuring RSS, temporary disk, object throughput, ClickHouse insert latency, and SEC throttle time.
 2. Set `XBRL_ARROW_BATCH_ROWS` so one batch plus conversion overhead fits comfortably inside the worker memory limit; 50,000 is only a starting point.
-3. Reserve space for bronze bytes, silver Parquet, ClickHouse data/merges, and one preserving schema copy before a backfill.
+3. Before a backfill, reserve space for bronze bytes, silver Parquet, ClickHouse data/merges (plus replication overhead), one preserving schema copy, and the temporary directory; check open-file limits.
 4. Increase workers one at a time. Stop when SEC throttling, PostgreSQL claims, object throughput, Arelle memory, or ClickHouse latency becomes the bottleneck.
 5. Keep the aggregate SEC request ceiling at or below policy. The limiter is process-local; the SEC egress lock lets only one process sharing this control database send SEC traffic, so extra worker replicas can only run non-SEC jobs.
 

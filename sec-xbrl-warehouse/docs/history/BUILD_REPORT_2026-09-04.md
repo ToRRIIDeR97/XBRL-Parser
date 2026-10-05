@@ -40,4 +40,4 @@ Database tests create uniquely named databases, migrate them, and remove them af
 - The real-filing corpus, 2016-to-current backfill, 100-filing independent reconciliation sample, and target-environment restore drill remain production acceptance work.
 - The local Compose monitoring profile is not a substitute for production TLS, API authentication, managed secrets, replicated objects, pinned image digests, or alert routing.
 
-See `HANDOFF.md` and `docs/IMPLEMENTATION_ORDER.md` for the operating sequence and status boundary.
+See `../../HANDOFF.md` and `IMPLEMENTATION_STATUS_2026-09-04.md` for the operating sequence and status boundary.

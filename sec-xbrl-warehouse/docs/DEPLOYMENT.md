@@ -1,10 +1,9 @@
-> September 8 remediation: before adopting the changed Compose configuration, read
-> [the deployment prerequisites](HARDENING_REMEDIATION_2026-09-08.md#deployment-prerequisites).
-> The API no longer receives writer credentials or the shared data volume. Use an
-> operator/worker image with an explicit CLI command for privileged bootstrap.
-> Current ingestion is paused; do not deploy or resume it from these examples.
-
 # Deployment Guide
+
+The API runs with reader identities only: provision its PostgreSQL and ClickHouse logins
+and the ClickHouse settings profile described in [SECURITY.md](SECURITY.md) before
+starting the `api` service. Run migrations and other privileged CLI commands through the
+`worker` service, never `api`.
 
 ## Local development
 

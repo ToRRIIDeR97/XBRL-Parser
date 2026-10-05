@@ -1,6 +1,6 @@
 **Implementation plan and completion record — 7 September 2026**
 
-This change implements the nine findings in the [audit](</Users/japardinathaniel/Documents/GitHub/XBRL Parser for SEC/sec-xbrl-warehouse/docs/PERFORMANCE_SECURITY_AUDIT_2026-09-07.md>). It preserves Arelle semantics, immutable raw objects, extraction revisions, and source-to-canonical lineage.
+This change implements the nine findings in the [audit](PERFORMANCE_SECURITY_AUDIT_2026-09-07.md). It preserves Arelle semantics, immutable raw objects, extraction revisions, and source-to-canonical lineage.
 
 | Step | Implementation | Status |
 | --- | --- | --- |
@@ -39,7 +39,7 @@ Provision the reader with SELECT-only grants on the warehouse. Configure its Cli
 
 The API uses these limits on its own connection; backfill and worker connections retain their ingestion settings. Existing local development can use its current database identity with request-level read-only protection. Dedicated production accounts and external TLS certificates were not provisioned on the running services.
 
-All tunable limits are documented in [.env.example](</Users/japardinathaniel/Documents/GitHub/XBRL Parser for SEC/sec-xbrl-warehouse/.env.example>). Defaults allow 32 GiB bulk downloads, 64 MiB buffered HTTP responses, 128 GiB total ZIP expansion, a 200:1 compression ratio, and 10,000 ZIP members. Filing packages are capped at 1,000 files and 512 MiB. A row/record too large for the configured batch budget fails with diagnostics; no source fact is silently dropped. Adjust these values after measuring the intended corpus.
+All tunable limits are documented in [.env.example](../../.env.example). Defaults allow 32 GiB bulk downloads, 64 MiB buffered HTTP responses, 128 GiB total ZIP expansion, a 200:1 compression ratio, and 10,000 ZIP members. Filing packages are capped at 1,000 files and 512 MiB. A row/record too large for the configured batch budget fails with diagnostics; no source fact is silently dropped. Adjust these values after measuring the intended corpus.
 
 Arelle still needs a complete model for one filing. The model now lives in a separate process and is released before the parent loads the typed result. Serialization no longer creates whole-bundle Python dictionaries, JSON strings, and encoded copies. The parent still holds the typed bundle, bounded by the serialized extraction limit; this is not a constant-memory streaming XBRL parser.
 

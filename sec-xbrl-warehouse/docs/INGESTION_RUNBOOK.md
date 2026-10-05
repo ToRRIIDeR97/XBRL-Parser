@@ -113,11 +113,9 @@ discovered (a fresh idempotency key), which refetches its submissions and compan
 
 ## Recovery
 
-### Dead jobs
-
-List them with `xbrl-warehouse jobs list --state dead`, fix the cause recorded in
-`last_error`, then `xbrl-warehouse jobs retry <job-id>`. The job keeps its idempotency
-key and checkpoints, so it resumes from the last completed stage.
+Dead jobs, retries, and restore drills are in [OPERATIONS.md](OPERATIONS.md#recovery).
+A retried job keeps its idempotency key and checkpoints, so it resumes from the last
+completed stage. The cases below are specific to ingestion.
 
 ### Download interrupted
 
@@ -144,19 +142,5 @@ key and checkpoints, so it resumes from the last completed stage.
 - Add a migration/parser update and regression fixture.
 - Requeue the same artifact revision after code/schema deployment.
 
-## Backup and rebuild
-
-- PostgreSQL: regular logical or physical backups; it contains operational state and mapping decisions.
-- MinIO/object store: versioned replication or filesystem backup; it is the immutable rebuild source.
-- ClickHouse: back up for faster recovery, but design so it can be rebuilt from silver Parquet plus PostgreSQL metadata.
-
-## Capacity guardrails
-
-Before a large backfill, check:
-
-- free object-store disk;
-- free ClickHouse disk and expected replication overhead;
-- temporary directory capacity;
-- open-file limits;
-- network egress and SEC request rate;
-- batch memory under the selected Arrow block size.
+Backups: [BACKUP_RESTORE.md](BACKUP_RESTORE.md). Capacity checks before a large
+backfill: [OPERATIONS.md](OPERATIONS.md#capacity-tuning).

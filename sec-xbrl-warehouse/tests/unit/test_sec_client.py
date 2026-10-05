@@ -278,3 +278,34 @@ async def test_long_retry_after_defers_without_sleep(monkeypatch):
             await http.get_text("https://www.sec.gov/test")
         assert (error.value.retry_at - before).total_seconds() >= 999999999
         assert is_retryable_exception(error.value)
+
+
+async def test_concurrent_requests_acquire_the_egress_lock_once() -> None:
+    import asyncio
+
+    import httpx
+
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.infrastructure.http.sec_client import SecHttpClient
+
+    class _Lock:
+        acquired = 0
+        released = 0
+
+        async def acquire(self) -> None:
+            await asyncio.sleep(0.01)
+            self.acquired += 1
+
+        async def release(self) -> None:
+            self.released += 1
+
+    lock = _Lock()
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    settings = Settings(env="test", sec_max_requests_per_second=10)
+    async with SecHttpClient(
+        settings, httpx.AsyncClient(transport=transport), egress_lock=lock
+    ) as http:
+        await asyncio.gather(
+            *[http.get_json(f"https://data.sec.gov/submissions/CIK{i:010d}.json") for i in range(5)]
+        )
+    assert (lock.acquired, lock.released) == (1, 1)

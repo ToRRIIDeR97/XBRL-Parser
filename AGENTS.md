@@ -17,8 +17,9 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 - Before changing application code, read `sec-xbrl-warehouse/AGENTS.md` (the data and
   validation contract), `HANDOFF.md`, `docs/ARCHITECTURE.md`, and `docs/DATA_MODEL.md`.
 - Check `HANDOFF.md` for live ingestion state before starting a worker, enqueueing
-  jobs, or running discovery. Run only one SEC-active process at a time; the SEC rate
-  limiter is process-local.
+  jobs, or running discovery. Only one process can send SEC traffic at a time: the
+  SEC rate limiter is process-local, so a PostgreSQL advisory lock (`SecEgressLock`)
+  makes a second SEC-active process fail fast with `SecEgressBusyError`.
 - `worker run --job-type <type>` (repeatable) claims only those job types and leaves
   other queued jobs untouched, e.g. `--job-type ingest_filing` while bulk loads are held.
 - Retain Arelle semantics, immutable raw artifacts, reversible canonical mappings,

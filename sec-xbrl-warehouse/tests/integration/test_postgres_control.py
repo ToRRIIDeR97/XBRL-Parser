@@ -565,3 +565,31 @@ async def test_ticker_move_removes_matching_exchange(postgres_settings: Settings
         assert stale == {555001}
     finally:
         await repo.close()
+
+
+async def test_deferred_failure_returns_job_without_spending_an_attempt(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        job_id = await repo.enqueue_job(
+            job_type="reconcile_filing",
+            idempotency_key=f"defer-{uuid4()}",
+            payload={},
+            priority=-200,
+            max_attempts=1,
+        )
+        job = await repo.claim_job("w-defer", 900, [JobType.RECONCILE_FILING])
+        assert job is not None and job.id == job_id and job.attempts == 1
+        await repo.fail_job(
+            job.id,
+            "another process holds the SEC egress lock",
+            retryable=True,
+            defer_seconds=0,
+            worker_id="w-defer",
+            attempt=job.attempts,
+        )
+        again = await repo.claim_job("w-defer", 900, [JobType.RECONCILE_FILING])
+        assert again is not None and again.id == job_id and again.attempts == 1
+    finally:
+        await repo.close()

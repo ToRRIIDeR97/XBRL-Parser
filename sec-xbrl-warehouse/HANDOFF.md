@@ -104,6 +104,7 @@ Only approved, versioned mappings produce canonical facts. Raw facts and their s
 ## Upgrade and recovery
 
 - Run `doctor` before migrations or workers.
+- Only one process can send SEC traffic at a time; a second one fails fast on the SEC egress lock (docs/SEC_ACCESS.md).
 - Inspect and revive dead jobs with `xbrl-warehouse jobs list --state dead` and `jobs retry <id>`.
 - Review `docs/BACKUP_RESTORE.md`, take backups, and verify free space.
 - Apply Alembic, then `xbrl-warehouse db init-clickhouse` for compatible DDL.

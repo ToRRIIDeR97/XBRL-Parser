@@ -50,7 +50,8 @@ A small deployment can retain the same service topology on one protected host, b
 - object replication and PostgreSQL backups;
 - CPU/memory limits, log rotation, and alerts;
 - a scheduler that only enqueues idempotent jobs;
-- separate SEC egress rate limiting across all worker replicas;
+- one SEC-active worker (the SEC egress lock enforces this per control database; extra
+  replicas run non-SEC jobs only);
 - pinned taxonomy packages installed with `taxonomy sync`, and `XBRL_ARELLE_OFFLINE=true`.
 
 Before starting workers on a production host, run `xbrl-warehouse taxonomy sync`

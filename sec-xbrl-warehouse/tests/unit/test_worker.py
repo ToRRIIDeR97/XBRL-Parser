@@ -594,3 +594,33 @@ def test_snapshot_on_loop_cancels_on_timeout() -> None:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(2)
         loop.close()
+
+
+def test_busy_egress_lock_defers_job_without_spending_an_attempt() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
+    from sec_xbrl_warehouse.worker import Worker
+
+    class _Control:
+        async def heartbeat_job(self, *args, **kwargs):
+            return None
+
+        async def fail_job(self, job_id, error, retryable, **kwargs):
+            self.captured = (error, retryable, kwargs)
+
+    async def handler(job):
+        raise SecEgressBusyError("another process holds the SEC egress lock")
+
+    control = _Control()
+    settings = Settings(
+        env="test", sec_egress_busy_retry_seconds=45, worker_lock_timeout_seconds=60
+    )
+    asyncio.run(
+        Worker(settings, control, {JobType.INGEST_FILING: handler})._execute(
+            _job(JobType.INGEST_FILING)
+        )
+    )
+    error, retryable, options = control.captured
+    assert "egress lock" in error and retryable
+    assert options["defer_seconds"] == 45
+    assert is_retryable_exception(SecEgressBusyError("busy"))

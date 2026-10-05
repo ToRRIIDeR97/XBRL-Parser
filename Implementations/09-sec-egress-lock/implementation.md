@@ -104,3 +104,21 @@ doesn't exist.
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-1: `infrastructure/http/egress_lock.py`: `SecEgressLock` holds
+  `pg_try_advisory_lock(hashtextextended('xbrl:sec-egress', 0))` on a dedicated asyncpg
+  connection; `acquire` (no-op when held, `SecEgressBusyError` when taken), `release`,
+  `abandon` (terminate without unlocking). `SecEgressBusyError(SecAccessError)`.
+- AC-2/4/5: `SecHttpClient(egress_lock=...)` acquires once (guarded against concurrent
+  first requests) after URL validation and the identity check, in `_request` and
+  `download`; releases in `__aexit__` only if acquired.
+- Wiring: worker runtime client, `catalog sync`, `taxonomy sync`. The ingestor calls
+  `ensure_sec_egress` before online Arelle extraction. The worker defers a job that
+  raises `SecEgressBusyError` (`fail_job(defer_seconds=XBRL_SEC_EGRESS_BUSY_RETRY_SECONDS)`,
+  attempt not spent); the classifier also treats it as retryable.
+- Gates: compileall, ruff, format, mypy, unit (365 passed, 1 skipped), scan_stubs (0),
+  integration (32 passed), plan tests 01–09 (12/10/8/10/8/12/10/22/8 passed).
+- Docs: SEC_ACCESS.md (enforced rule), OPERATIONS.md, SECURITY.md, DEPLOYMENT.md,
+  HANDOFF.md, root AGENTS.md.

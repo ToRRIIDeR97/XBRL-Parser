@@ -102,6 +102,9 @@ Silver is the rebuild source for ClickHouse and protects against database corrup
 - Raw SEC bulk tables.
 - Full-fidelity XBRL facts, contexts, concepts, and relationships.
 - Canonical facts with explicit mapping lineage.
+- Primary statements as presented (`xbrl_roles`, `xbrl_statement_lines`,
+  `v_statement_lines_latest`), derived from roles, presentation arcs, and facts and
+  published with the same extraction revision marker.
 - Query-optimized denormalization such as CIK, filing date, form, and period fields on facts.
 
 ### PostgreSQL control plane

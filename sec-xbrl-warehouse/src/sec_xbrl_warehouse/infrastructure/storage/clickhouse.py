@@ -4,6 +4,7 @@ import re
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,11 @@ from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     xbrl_warehouse_schema,
 )
 from sec_xbrl_warehouse.infrastructure.storage.hashing import stable_json_hash
+from sec_xbrl_warehouse.normalization.statements import (
+    StatementLine,
+    build_statement_lines,
+    classify_roles,
+)
 from sec_xbrl_warehouse.observability.metrics import ROWS_WRITTEN
 
 _SEC_TABLE_NAMES: dict[SecTable, str] = {
@@ -373,9 +379,13 @@ class ClickHouseWarehouse:
         return self._insert_arrow(target, arrow_table)
 
     def insert_xbrl_bundle(self, bundle: XbrlExtractionBundle) -> dict[str, int]:
-        """Persist all entities from one Arelle extraction at lineage level."""
+        """Persist all entities from one Arelle extraction at lineage level.
+
+        Includes the derived `roles` and `statement_lines` (primary statements as
+        presented), so they publish with the same revision marker.
+        """
         counts: dict[str, int] = {}
-        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+        for entity in XBRL_ENTITIES:
             counts[entity] = sum(
                 self._insert_arrow(f"xbrl_{entity}", table)
                 for table in iter_xbrl_tables(
@@ -412,8 +422,12 @@ class ClickHouseWarehouse:
         return written
 
     def publish_xbrl_bundle(self, bundle: XbrlExtractionBundle, counts: dict[str, int]) -> None:
-        """Verify all raw entities before exposing this immutable revision to readers."""
-        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+        """Verify all raw entities before exposing this immutable revision to readers.
+
+        Entities missing from `counts` (written before roles and statement lines
+        existed) are not checked.
+        """
+        for entity in (entity for entity in XBRL_ENTITIES if entity in counts):
             result = self.query(
                 f"SELECT count() AS count FROM xbrl_{entity} FINAL WHERE accession = %(accession)s AND extraction_revision = %(revision)s",
                 {"accession": bundle.filing.accession, "revision": bundle.extraction_revision},
@@ -502,6 +516,8 @@ def iter_xbrl_tables(
         "facts": facts_table,
         "relationships": relationships_table,
         "footnotes": footnotes_table,
+        "roles": roles_table,
+        "statement_lines": _statement_lines_builder(bundle),
     }[entity]
 
     def bounded(table: pa.Table) -> Iterator[pa.Table]:
@@ -516,17 +532,117 @@ def iter_xbrl_tables(
 
     records: list[Any] = []
     size = 0
-    for record in getattr(bundle, entity):
-        record_size = len(record.model_dump_json().encode("utf-8")) + 512
+    for record in xbrl_entity_records(bundle, entity):
+        record_size = _record_size(record)
         if record_size > batch_bytes:
             raise WarehouseWriteError(f"Single {entity} record exceeds Arrow byte budget")
         if records and (len(records) >= batch_rows or size + record_size > batch_bytes):
-            yield from bounded(build(bundle.model_copy(update={entity: tuple(records)})))
+            yield from bounded(_build_chunk(build, bundle, entity, records))
             records, size = [], 0
         records.append(record)
         size += record_size
     if records:
-        yield from bounded(build(bundle.model_copy(update={entity: tuple(records)})))
+        yield from bounded(_build_chunk(build, bundle, entity, records))
+
+
+XBRL_ENTITIES = (
+    "contexts",
+    "concepts",
+    "facts",
+    "relationships",
+    "footnotes",
+    "roles",
+    "statement_lines",
+)
+# Entities derived from the bundle rather than stored on it.
+DERIVED_XBRL_ENTITIES = frozenset({"statement_lines"})
+
+
+def xbrl_entity_records(bundle: XbrlExtractionBundle, entity: str) -> Sequence[Any]:
+    """The records one entity table holds for a bundle."""
+    if entity == "statement_lines":
+        return build_statement_lines(bundle)
+    return tuple(getattr(bundle, entity))
+
+
+def _record_size(record: Any) -> int:
+    if isinstance(record, StatementLine):
+        return len(_json(asdict(record)).encode("utf-8")) + 512
+    return len(record.model_dump_json().encode("utf-8")) + 512
+
+
+def _build_chunk(
+    build: Any, bundle: XbrlExtractionBundle, entity: str, records: list[Any]
+) -> pa.Table:
+    if entity in DERIVED_XBRL_ENTITIES:
+        return build(records)
+    return build(bundle.model_copy(update={entity: tuple(records)}))
+
+
+def roles_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    kinds = classify_roles(bundle) if bundle.roles else {}
+    rows = [
+        {
+            "accession": bundle.filing.accession,
+            "role_uri": role.role_uri,
+            "definition": role.definition,
+            "used_on": list(role.used_on),
+            "sort_code": role.sort_code,
+            "category": role.category,
+            "statement_kind": kinds[role.role_uri].value if role.role_uri in kinds else None,
+            "extraction_revision": bundle.extraction_revision,
+            "_row_hash": stable_json_hash(
+                {"accession": bundle.filing.accession, "role": role.model_dump(mode="json")}
+            ),
+            "_ingested_at": bundle.metadata.extracted_at,
+        }
+        for role in bundle.roles
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("roles"))
+
+
+def _statement_lines_builder(bundle: XbrlExtractionBundle) -> Any:
+    def build(lines: list[StatementLine]) -> pa.Table:
+        return statement_lines_table(bundle, lines)
+
+    return build
+
+
+def statement_lines_table(
+    bundle: XbrlExtractionBundle, lines: Sequence[StatementLine] | None = None
+) -> pa.Table:
+    """One row per line; each line's values are parallel arrays (one entry per period)."""
+    selected = build_statement_lines(bundle) if lines is None else lines
+    rows = [
+        {
+            "accession": line.accession,
+            "cik": bundle.filing.cik,
+            "form": bundle.filing.form,
+            "filed_date": bundle.filing.filed_date,
+            "role_uri": line.role_uri,
+            "statement_kind": line.statement_kind.value,
+            "line_number": line.line_number,
+            "depth": line.depth,
+            "concept_qname": line.concept_qname,
+            "parent_concept_qname": line.parent_concept_qname,
+            "label": line.label,
+            "preferred_label_role": line.preferred_label_role,
+            "is_abstract": int(line.is_abstract),
+            "is_total": int(line.is_total),
+            "value_fact_ids": [value.fact_id for value in line.values],
+            "value_period_starts": [value.period_start for value in line.values],
+            "value_period_ends": [value.period_end for value in line.values],
+            "value_period_instants": [value.period_instant for value in line.values],
+            "value_decimals": [value.value_decimal for value in line.values],
+            "extraction_revision": bundle.extraction_revision,
+            "_row_hash": stable_json_hash(
+                {"line": asdict(line), "revision": bundle.extraction_revision}
+            ),
+            "_ingested_at": bundle.metadata.extracted_at,
+        }
+        for line in selected
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("statement_lines"))
 
 
 def contexts_table(bundle: XbrlExtractionBundle) -> pa.Table:

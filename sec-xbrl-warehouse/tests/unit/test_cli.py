@@ -77,6 +77,7 @@ class _Warehouse:
                 "v_sec_text_latest",
                 "v_xbrl_facts_latest",
                 "v_canonical_facts_latest",
+                "v_statement_lines_latest",
             )
         ]
 

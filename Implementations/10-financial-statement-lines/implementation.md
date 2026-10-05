@@ -150,3 +150,23 @@ All 7 tests fail:
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-1: `XbrlRole` and `XbrlExtractionBundle.roles = ()`; the adapter reads
+  `modelXbrl.roleTypes` for roles declared locally or used by the filing's arcs
+  (standard-taxonomy roles the filing doesn't use are left out). `role_sort_code` and
+  `role_category` parse the SEC definition convention.
+- AC-2/AC-3: `normalization/statements.py` (`StatementKind`, `statement_roles`,
+  `classify_roles`, `build_statement_lines`, `StatementLine`, `StatementValue`). URI
+  fallback requires an anchor concept and skips details/tables/policies/parenthetical
+  roles; the walk skips arcs that revisit a concept on the current path.
+- AC-4: DDL `025_statement_tables.sql` (`xbrl_roles`; `xbrl_statement_lines` with one
+  row per line and parallel value arrays) and `v_statement_lines_latest`. Roles and
+  statement lines are new entities in `XBRL_ENTITIES`, written to silver and ClickHouse
+  inside the existing checkpointed flow and verified by `publish_xbrl_bundle`; older
+  completed jobs without those silver checkpoints still replay. `doctor` expects the view.
+- Revision: shares `CURRENT_EXTRACTION_REVISION = 3`.
+- Gates: compileall, ruff, format, mypy, unit (380 passed, 1 skipped), scan_stubs (0),
+  integration (35 passed; an occasional transient ClickHouse failure on rerun-free
+  passes), plan tests 01–10 (12/10/8/10/8/12/10/22/8/7 passed).

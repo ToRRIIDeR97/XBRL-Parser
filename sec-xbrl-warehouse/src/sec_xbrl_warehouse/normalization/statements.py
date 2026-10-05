@@ -192,9 +192,7 @@ def build_statement_lines(bundle: XbrlExtractionBundle) -> tuple[StatementLine, 
     lines: list[StatementLine] = []
     for statement in statement_roles(bundle):
         children = trees[statement.role_uri]
-        number = 0
-        for depth, qname, parent, preferred in _walk(children):
-            number += 1
+        for number, (depth, qname, parent, preferred) in enumerate(_walk(children), start=1):
             concept = concepts.get(qname)
             lines.append(
                 StatementLine(
@@ -252,7 +250,11 @@ def _tree_concepts(children: dict[str, list[_Arc]]) -> set[str]:
 def _walk(
     children: dict[str, list[_Arc]],
 ) -> Iterable[tuple[int, str, str | None, str | None]]:
-    """Pre-order (depth, qname, parent, preferred label); roots sorted by qname."""
+    """Pre-order (depth, qname, parent, preferred label); roots sorted by qname.
+
+    An arc that would revisit a concept on the current path is skipped, so
+    cyclic presentation arcs terminate.
+    """
     targets = {child for arcs in children.values() for _, child, _ in arcs}
     roots = sorted(parent for parent in children if parent not in targets)
 
@@ -264,8 +266,19 @@ def _walk(
             if child not in path:  # guard against cyclic presentation arcs
                 yield from visit(child, depth + 1, qname, child_preferred, path | {child})
 
+    visited: set[str] = set()
+
+    def walk_from(root: str) -> Iterable[tuple[int, str, str | None, str | None]]:
+        for item in visit(root, 0, None, None, frozenset({root})):
+            visited.add(item[1])
+            yield item
+
     for root in roots:
-        yield from visit(root, 0, None, None, frozenset({root}))
+        yield from walk_from(root)
+    # A fully cyclic tree has no root; start from its unvisited parents, sorted.
+    for parent in sorted(children):
+        if parent not in visited:
+            yield from walk_from(parent)
 
 
 def _values_by_concept(facts: Iterable[XbrlFact]) -> dict[str, tuple[StatementValue, ...]]:

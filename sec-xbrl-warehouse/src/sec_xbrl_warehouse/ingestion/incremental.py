@@ -26,7 +26,9 @@ from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
 from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
+    XBRL_ENTITIES,
     iter_xbrl_tables,
+    xbrl_entity_records,
 )
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha256_file
 from sec_xbrl_warehouse.infrastructure.storage.parquet import verify_checkpoint_objects
@@ -42,6 +44,9 @@ from sec_xbrl_warehouse.observability.metrics import (
 from sec_xbrl_warehouse.validation.filing_reconciliation import reconcile_filing_rows
 from sec_xbrl_warehouse.validation.issue_grouping import group_issues
 from sec_xbrl_warehouse.validation.xbrl_validation import reject_configured_issues
+
+# Silver entities older completed jobs may lack.
+_ENTITIES_ADDED_LATER = frozenset({"roles", "statement_lines"})
 
 
 class IncrementalFilingIngestor:
@@ -82,9 +87,11 @@ class IncrementalFilingIngestor:
         completed = await self._checkpoint(job_id, "complete")
         if completed is not None and self.object_store is not None:
             self.settings.ensure_directories()
-            for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+            for entity in XBRL_ENTITIES:
                 checkpoint = await self._checkpoint(job_id, f"silver:{entity}")
                 if checkpoint is None:
+                    if entity in _ENTITIES_ADDED_LATER:
+                        continue  # completed before roles and statement lines existed
                     raise XbrlExtractionError("Completed filing has no silver checkpoint")
                 await asyncio.to_thread(
                     verify_checkpoint_objects, checkpoint, self.object_store, self.settings
@@ -274,7 +281,7 @@ class IncrementalFilingIngestor:
     async def _persist_bundle(
         self, bundle: XbrlExtractionBundle, job_id: UUID | None = None
     ) -> dict[str, int]:
-        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+        for entity in XBRL_ENTITIES:
             checkpoint = await self._checkpoint(job_id, f"silver:{entity}")
             if checkpoint is not None and self.object_store is not None:
                 await asyncio.to_thread(
@@ -291,7 +298,7 @@ class IncrementalFilingIngestor:
                 destination_prefix=prefix,
                 partition_values={},
             )
-            count = len(getattr(bundle, entity))
+            count = len(xbrl_entity_records(bundle, entity))
             ROWS_WRITTEN.labels(storage="parquet", table=entity).inc(count)
             await self._save(
                 job_id,

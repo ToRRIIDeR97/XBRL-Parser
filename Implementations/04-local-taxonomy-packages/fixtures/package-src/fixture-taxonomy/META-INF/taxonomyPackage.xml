@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tp:taxonomyPackage xmlns:tp="http://xbrl.org/2016/taxonomy-package" xml:lang="en">
+  <tp:identifier>https://xbrl.fasb.org/fixture-taxonomy/2025</tp:identifier>
+  <tp:name>Fixture taxonomy 2025</tp:name>
+  <tp:version>2025</tp:version>
+  <tp:publisher>Test fixture</tp:publisher>
+  <tp:publicationDate>2025-01-01</tp:publicationDate>
+  <tp:entryPoints>
+    <tp:entryPoint>
+      <tp:name>Fixture base</tp:name>
+      <tp:entryPointDocument href="https://xbrl.fasb.org/fixture-taxonomy/2025/base.xsd"/>
+    </tp:entryPoint>
+  </tp:entryPoints>
+</tp:taxonomyPackage>

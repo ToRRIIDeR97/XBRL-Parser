@@ -292,8 +292,70 @@ async def test_upsert_filing_and_validation_issues(postgres_settings: Settings) 
             message="test message",
             accession=accession,
             line=12,
+            extraction_revision=3,
         )
         await repo.record_validation_issues([issue])
+        from sqlalchemy import select
+
+        from sec_xbrl_warehouse.infrastructure.storage.postgres_models import ValidationIssueRow
+
+        async with repo.sessions() as session:
+            revisions = (
+                await session.scalars(
+                    select(ValidationIssueRow.extraction_revision).where(
+                        ValidationIssueRow.accession == accession
+                    )
+                )
+            ).all()
+        assert revisions == [3]
+    finally:
+        await repo.close()
+
+
+async def test_discovery_upsert_keeps_stored_fiscal_fields_over_nulls(
+    postgres_settings: Settings,
+) -> None:
+    from sqlalchemy import select
+
+    from sec_xbrl_warehouse.infrastructure.storage.postgres_models import FilingRow
+
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        accession = "0000000001-26-000002"
+        enriched = _filing(accession).model_copy(
+            update={
+                "fiscal_year": 2025,
+                "fiscal_period": "FY",
+                "report_date": datetime(2025, 12, 31).date(),
+            }
+        )
+        await repo.upsert_filing(enriched)
+        await repo.upsert_filing(
+            _filing(accession).model_copy(update={"form": "10-K/A"}), keep_derived=True
+        )
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert (row.fiscal_year, row.fiscal_period, row.report_date) == (
+            2025,
+            "FY",
+            datetime(2025, 12, 31).date(),
+        )
+        assert row.form == "10-K/A"
+        await repo.upsert_filing(enriched.model_copy(update={"fiscal_period": "Q4"}))
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert row.fiscal_period == "Q4"
+        # A later extraction that derives NULL (conflicting dei values) clears it.
+        await repo.upsert_filing(enriched.model_copy(update={"fiscal_year": None}))
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert row.fiscal_year is None
     finally:
         await repo.close()
 
@@ -319,5 +381,72 @@ async def test_deferred_retry_preserves_server_deadline_and_fence(postgres_setti
                 text("SELECT available_at FROM ingestion_jobs WHERE id = :id"), {"id": job.id}
             )
         assert saved >= deadline
+    finally:
+        await repo.close()
+
+
+async def test_extraction_checkpoint_finds_completed_ingest(postgres_settings: Settings) -> None:
+    from sec_xbrl_warehouse.infrastructure.storage.postgres import checkpoint_lease
+
+    repo = PostgresControlRepository(postgres_settings)
+    accession = "0000000001-26-000777"
+    try:
+        await repo.enqueue_job(
+            job_type="ingest_filing",
+            idempotency_key=f"filing:{accession}:3",
+            priority=0,
+            payload={"filing": {"accession": accession}, "extraction_revision": 3},
+        )
+        job = await repo.claim_job("remap-worker", 900, [JobType.INGEST_FILING])
+        assert job is not None and job.payload["filing"]["accession"] == accession
+        pointer = {"object_key": "silver/x.json", "sha256": "a" * 64}
+        with checkpoint_lease(job):
+            await repo.save_checkpoint(job.id, "extract", pointer)
+        assert await repo.extraction_checkpoint(accession, 3) is None  # not complete yet
+        await repo.complete_job(
+            job.id, {"status": "complete"}, worker_id="remap-worker", attempt=job.attempts
+        )
+        assert await repo.extraction_checkpoint(accession, 3) == pointer
+        assert await repo.extraction_checkpoint(accession, 2) is None
+        assert await repo.enqueue_job_if_absent(
+            job_type="map_canonical", idempotency_key="remap-x", payload={}
+        )
+        assert (
+            await repo.enqueue_job_if_absent(
+                job_type="map_canonical", idempotency_key="remap-x", payload={}
+            )
+            is None
+        )
+    finally:
+        await repo.close()
+
+
+async def test_company_round_trips_every_field(postgres_settings: Settings) -> None:
+    from datetime import date
+
+    from sec_xbrl_warehouse.domain.models import Company, FormerName
+
+    company = Company(
+        cik=987654,
+        name="Round Trip Corp",
+        entity_type="operating",
+        sic=3571,
+        sic_description="Electronic Computers",
+        tickers=("RTC", "RTC-W"),
+        exchanges=("Nasdaq", "Nasdaq"),
+        fiscal_year_end="0630",
+        state_of_incorporation="DE",
+        filer_category="Large accelerated filer",
+        former_names=(FormerName(name="OLD RTC", valid_from=date(2001, 1, 2), valid_to=None),),
+        source_checksum="c" * 64,
+        fetched_at=datetime(2026, 10, 5, 12, 0, tzinfo=UTC),
+    )
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.upsert_company(company)
+        assert await repo.get_company(987654) == company
+        assert await repo.find_company_by_ticker("rtc-w") == company
+        assert await repo.known_company_ciks([987654, 1]) == {987654}
+        assert await repo.known_company_ciks([]) == set()
     finally:
         await repo.close()

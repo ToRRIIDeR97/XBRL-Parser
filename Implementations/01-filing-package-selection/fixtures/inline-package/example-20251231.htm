@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+      xmlns:ixt="http://www.xbrl.org/inlineXBRL/transformation/2020-02-12"
+      xmlns:xbrli="http://www.xbrl.org/2003/instance"
+      xmlns:link="http://www.xbrl.org/2003/linkbase"
+      xmlns:xlink="http://www.w3.org/1999/xlink"
+      xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+      xmlns:ex="http://example.com/2026">
+<head><title>Example Corp 10-K</title></head>
+<body>
+<div style="display:none">
+<ix:header>
+  <ix:references><link:schemaRef xlink:type="simple" xlink:href="example-20251231.xsd"/></ix:references>
+  <ix:resources>
+    <xbrli:context id="FY2025">
+      <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier></xbrli:entity>
+      <xbrli:period><xbrli:startDate>2025-01-01</xbrli:startDate><xbrli:endDate>2025-12-31</xbrli:endDate></xbrli:period>
+    </xbrli:context>
+    <xbrli:unit id="USD"><xbrli:measure>iso4217:USD</xbrli:measure></xbrli:unit>
+  </ix:resources>
+</ix:header>
+</div>
+<p>Company: <ix:nonNumeric name="ex:CompanyName" contextRef="FY2025">Example Corp</ix:nonNumeric></p>
+<p>Revenue: <ix:nonFraction name="ex:Revenue" contextRef="FY2025" unitRef="USD" decimals="-6" scale="6" format="ixt:num-dot-decimal">1,234</ix:nonFraction> million</p>
+</body>
+</html>

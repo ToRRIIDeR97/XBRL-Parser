@@ -86,6 +86,32 @@ class FilingRef(DomainModel):
     is_inline_xbrl: bool | None = None
 
 
+class FormerName(DomainModel):
+    name: str
+    valid_from: date | None = None
+    valid_to: date | None = None
+
+
+class Company(DomainModel):
+    """Issuer metadata from the SEC submissions JSON (no contact data is kept)."""
+
+    cik: int = Field(ge=0)
+    name: str
+    entity_type: str | None = None
+    sic: int | None = None
+    sic_description: str | None = None
+    tickers: tuple[str, ...] = ()
+    exchanges: tuple[str, ...] = ()
+    fiscal_year_end: str | None = Field(
+        default=None, pattern=r"^(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$"
+    )
+    state_of_incorporation: str | None = None
+    filer_category: str | None = None
+    former_names: tuple[FormerName, ...] = ()
+    source_checksum: str | None = None
+    fetched_at: datetime | None = None
+
+
 class PackageMember(DomainModel):
     name: str
     source_url: str
@@ -94,6 +120,9 @@ class PackageMember(DomainModel):
     checksum_sha256: str | None = None
     is_primary_document: bool = False
     is_xbrl_entrypoint: bool = False
+    # Listed archive (`<accession>-xbrl.zip`) this member was expanded from;
+    # None for files fetched directly from the filing directory.
+    source_archive: str | None = None
 
 
 class FilingPackageManifest(DomainModel):
@@ -136,6 +165,8 @@ class ValidationIssue(DomainModel):
     line: int | None = None
     column: int | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+    # Filing extraction revision that produced the issue; None for bulk loads.
+    extraction_revision: int | None = None
 
 
 class JobRecord(DomainModel):

@@ -11,6 +11,7 @@ import httpx
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import JobType
 from sec_xbrl_warehouse.domain.models import JobRecord
+from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.exceptions import (
     ArtifactIntegrityError,
     DiskReserveError,
@@ -42,7 +43,10 @@ async def runtime_services(
     from sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter import ArelleExtractor
     from sec_xbrl_warehouse.ingestion.bulk_downloader import BulkArtifactDownloader
     from sec_xbrl_warehouse.ingestion.bulk_loader import BulkArtifactLoader
-    from sec_xbrl_warehouse.ingestion.filing_discovery import SecDailyIndexDiscovery
+    from sec_xbrl_warehouse.ingestion.filing_discovery import (
+        SecDailyIndexDiscovery,
+        SecSubmissionsDiscovery,
+    )
     from sec_xbrl_warehouse.ingestion.filing_downloader import FilingPackageDownloader
     from sec_xbrl_warehouse.ingestion.incremental import IncrementalFilingIngestor
     from sec_xbrl_warehouse.ingestion.orchestrator import IngestionOrchestrator
@@ -76,11 +80,15 @@ async def runtime_services(
             yield {
                 "control": control,
                 "warehouse": warehouse,
+                "object_store": store,
                 "mapper": mapper,
                 "forms": sources["default_forms"],
                 "discovery": SecDailyIndexDiscovery(
                     http, sources["daily_index_base"], sources["archive_base"], object_store=store
                 ),
+                "submissions": SecSubmissionsDiscovery(http, sources["data_api_base"]),
+                "http": http,
+                "data_api_base": sources["data_api_base"],
                 "orchestrator": IngestionOrchestrator(
                     control,
                     downloader=BulkArtifactDownloader(settings, http, store),
@@ -282,44 +290,80 @@ def build_handlers(
     if mapper is not None:
 
         async def _map_canonical(job: JobRecord) -> dict[str, Any] | None:
-            from sec_xbrl_warehouse.domain.models import FilingRef
-            from sec_xbrl_warehouse.domain.xbrl import XbrlFact
+            from sec_xbrl_warehouse.mapping.remap import load_published_extraction
 
-            filing = FilingRef.model_validate(job.payload["filing"])
-            payload_facts = job.payload.get("facts", [])
-            facts = (XbrlFact.model_validate(item) for item in payload_facts)
+            accession = str(job.payload["accession"])
+            revision = int(job.payload["extraction_revision"])
+            run_settings = settings or Settings()
+            bundle = await load_published_extraction(
+                services["control"], services["object_store"], run_settings, accession, revision
+            )
             mapped = 0
             async for canonical in mapper.map_batches(
-                facts,
-                filing,
-                extraction_revision=int(job.payload.get("extraction_revision", 1)),
-                batch_bytes=(settings or Settings()).arrow_batch_bytes,
+                bundle.facts,
+                bundle.filing,
+                extraction_revision=revision,
+                batch_bytes=run_settings.arrow_batch_bytes,
             ):
                 await asyncio.to_thread(services["warehouse"].insert_canonical_facts, canonical)
                 mapped += len(canonical)
-            return {"mapped": mapped, "unmapped": len(payload_facts) - mapped}
+            return {
+                "accession": accession,
+                "extraction_revision": revision,
+                "mapped": mapped,
+                "unmapped": len(bundle.facts) - mapped,
+            }
 
         handlers[JobType.MAP_CANONICAL] = _map_canonical
     if services.get("discovery") is not None:
 
         async def _discover(job: JobRecord) -> dict[str, Any] | None:
-            from datetime import date
 
-            filings = await services["discovery"].discover_range(
-                date.fromisoformat(job.payload["filed_from"]),
-                date.fromisoformat(job.payload["filed_to"]),
-                job.payload.get("forms", services["forms"]),
-            )
+            from sec_xbrl_warehouse.ingestion.filing_discovery import enrich_companies
+
+            forms = job.payload.get("forms", services["forms"])
+            filed_from = _payload_date(job.payload.get("filed_from"))
+            filed_to = _payload_date(job.payload.get("filed_to"))
+            result: dict[str, Any] = {}
+            if job.payload.get("cik") is not None:
+                # One issuer from its submissions JSON: the same request yields the company.
+                company, filings = await services["submissions"].discover_with_company(
+                    int(job.payload["cik"]), forms=forms, filed_from=filed_from, filed_to=filed_to
+                )
+                await services["control"].upsert_company(company)
+                result["companies_stored"] = 1
+            else:
+                if filed_from is None or filed_to is None:
+                    raise ValueError("Daily-index discovery needs filed_from and filed_to")
+                filings = await services["discovery"].discover_range(filed_from, filed_to, forms)
+                if services.get("http") is not None:
+                    # Daily indexes carry no company data: fetch submissions once per new CIK.
+                    result["companies_stored"] = await enrich_companies(
+                        services["control"],
+                        services["http"],
+                        ciks=[filing.cik for filing in filings],
+                        as_of=filed_to,
+                        data_api_base=services.get("data_api_base", "https://data.sec.gov"),
+                    )
             for filing in filings:
                 await services["control"].enqueue_job(
                     job_type=JobType.INGEST_FILING.value,
-                    idempotency_key=f"filing:{filing.accession}:1",
-                    payload={"filing": filing.model_dump(mode="json"), "extraction_revision": 1},
+                    idempotency_key=f"filing:{filing.accession}:{CURRENT_EXTRACTION_REVISION}",
+                    payload={
+                        "filing": filing.model_dump(mode="json"),
+                        "extraction_revision": CURRENT_EXTRACTION_REVISION,
+                    },
                 )
-            return {"filings_enqueued": len(filings)}
+            return {"filings_enqueued": len(filings), **result}
 
         handlers[JobType.DISCOVER_FILINGS] = _discover
     return handlers
+
+
+def _payload_date(value: Any) -> Any:
+    from datetime import date
+
+    return date.fromisoformat(str(value)) if value else None
 
 
 def is_retryable_exception(exc: Exception) -> bool:

@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from collections.abc import Iterable, Sequence
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sec_xbrl_warehouse.domain.models import FilingRef
+from sec_xbrl_warehouse.domain.models import Company, FilingRef, FormerName
 from sec_xbrl_warehouse.domain.ports import ObjectStore
 from sec_xbrl_warehouse.exceptions import SecAccessError
 from sec_xbrl_warehouse.infrastructure.http.sec_client import (
     SecHttpClient,
     build_archive_directory_url,
 )
-from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes
+from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, stable_json_hash
 
 
 class SecSubmissionsDiscovery:
@@ -50,8 +50,28 @@ class SecSubmissionsDiscovery:
         include_older_files: bool = True,
     ) -> tuple[FilingRef, ...]:
         """Fetch and filter current and date-relevant archived submissions for one CIK."""
+        _, filings = await self.discover_with_company(
+            cik,
+            forms=forms,
+            filed_from=filed_from,
+            filed_to=filed_to,
+            include_older_files=include_older_files,
+        )
+        return filings
+
+    async def discover_with_company(
+        self,
+        cik: int,
+        *,
+        forms: Sequence[str],
+        filed_from: date | None = None,
+        filed_to: date | None = None,
+        include_older_files: bool = True,
+    ) -> tuple[Company, tuple[FilingRef, ...]]:
+        """`discover`, plus the company parsed from the same submissions document."""
         url = f"{self.data_api_base}/submissions/CIK{cik:010d}.json"
         payload = await self.http.get_json(url)
+        company = parse_company(payload, fetched_at=datetime.now(UTC))
         company_name = str(payload.get("name") or f"CIK {cik}")
         results = list(
             parse_submissions_recent(
@@ -96,9 +116,102 @@ class SecSubmissionsDiscovery:
                     )
                 )
         unique = {item.accession: item for item in results}
-        return tuple(
+        return company, tuple(
             sorted(unique.values(), key=lambda filing: (filing.filed_date, filing.accession))
         )
+
+
+def parse_company(payload: dict[str, Any], *, fetched_at: datetime | None = None) -> Company:
+    """Map a submissions JSON document to `Company`.
+
+    Missing or malformed optional fields become `None` or empty tuples. Contact
+    data (EIN, phone, addresses) is not kept.
+    """
+    cik = int(str(payload.get("cik") or "").strip())
+    return Company(
+        cik=cik,
+        name=str(payload.get("name") or f"CIK {cik}").strip(),
+        entity_type=_optional_text(payload.get("entityType")),
+        sic=_optional_int(payload.get("sic")),
+        sic_description=_optional_text(payload.get("sicDescription")),
+        tickers=_text_tuple(payload.get("tickers")),
+        exchanges=_text_tuple(payload.get("exchanges")),
+        fiscal_year_end=_fiscal_year_end(payload.get("fiscalYearEnd")),
+        state_of_incorporation=_optional_text(payload.get("stateOfIncorporation")),
+        filer_category=_optional_text(payload.get("category")),
+        former_names=tuple(
+            FormerName(
+                name=str(item["name"]).strip(),
+                valid_from=_timestamp_date(item.get("from")),
+                valid_to=_timestamp_date(item.get("to")),
+            )
+            for item in payload.get("formerNames") or ()
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ),
+        source_checksum=stable_json_hash(payload),
+        fetched_at=fetched_at,
+    )
+
+
+async def enrich_companies(
+    control: Any,
+    http: Any,
+    *,
+    ciks: Iterable[int],
+    as_of: date,
+    data_api_base: str = "https://data.sec.gov",
+) -> int:
+    """Fetch submissions for CIKs without a company row and store them; return the count.
+
+    The input is deduplicated and CIKs `known_company_ciks` returns are skipped,
+    so each discovery run costs at most one rate-limited request per new CIK.
+    `as_of` is the discovery date that triggered enrichment; `fetched_at` records
+    the request time.
+    """
+    wanted = sorted({int(cik) for cik in ciks})
+    if not wanted:
+        return 0
+    known = set(await control.known_company_ciks(wanted))
+    stored = 0
+    for cik in wanted:  # as_of is informational; fetched_at records the request time
+        if cik in known:
+            continue
+        payload = await http.get_json(f"{data_api_base.rstrip('/')}/submissions/CIK{cik:010d}.json")
+        await control.upsert_company(parse_company(payload, fetched_at=datetime.now(UTC)))
+        stored += 1
+    return stored
+
+
+def _optional_text(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _text_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item).strip() for item in value if item is not None and str(item).strip())
+
+
+def _fiscal_year_end(value: Any) -> str | None:
+    text = _optional_text(value)
+    if text is None or len(text) != 4 or not text.isdigit():
+        return None
+    try:
+        date(2000, int(text[:2]), int(text[2:]))  # leap year, so 0229 is valid
+    except ValueError:
+        return None
+    return text
+
+
+def _timestamp_date(value: Any) -> date | None:
+    text = _optional_text(value)
+    if text is None:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        return _optional_date(text[:10])
 
 
 class SecDailyIndexDiscovery:

@@ -142,16 +142,20 @@ class PostgresMappingRepository:
         )
         return mapping
 
-    async def find_approved_mapping(
+    async def identical_approval_exists(
         self,
         *,
         metric: str,
         namespace: str,
         concept_name: str,
+        explanation: str,
+        created_by: str,
         taxonomy_version: str | None = None,
         cik: int | None = None,
-    ) -> ConceptMapping | None:
-        """The latest version of this mapping if it is approved, else None."""
+        valid_from: date | None = None,
+        valid_to: date | None = None,
+    ) -> bool:
+        """Whether `approve_mapping_once` with these arguments would return `created=False`."""
         async with self.sessions() as session:
             row = await session.scalar(
                 select(ConceptMappingRow)
@@ -166,9 +170,13 @@ class PostgresMappingRepository:
                 .order_by(ConceptMappingRow.mapping_version.desc())
                 .limit(1)
             )
-        if row is None or row.status != "approved":
-            return None
-        return _to_concept_mapping(row, metric)
+        return _is_identical_approval(
+            row,
+            explanation=explanation,
+            created_by=created_by,
+            valid_from=valid_from,
+            valid_to=valid_to,
+        )
 
     async def approve_mapping_once(
         self,
@@ -226,14 +234,14 @@ class PostgresMappingRepository:
                 .order_by(ConceptMappingRow.mapping_version.desc())
                 .limit(1)
             )
-            if (
-                current is not None
-                and current.status == "approved"
-                and current.valid_from == valid_from
-                and current.valid_to == valid_to
-                and current.rationale == explanation
-                and current.created_by == created_by
+            if _is_identical_approval(
+                current,
+                explanation=explanation,
+                created_by=created_by,
+                valid_from=valid_from,
+                valid_to=valid_to,
             ):
+                assert current is not None
                 return _to_concept_mapping(current, metric), False
             version = (current.mapping_version if current is not None else 0) + 1
             row = ConceptMappingRow(
@@ -450,6 +458,24 @@ def _evidence_samples(evidence: dict[str, object], fact_id: str) -> list[str]:
     if isinstance(value, list) and value:
         return [str(item) for item in value]
     return [fact_id]
+
+
+def _is_identical_approval(
+    row: ConceptMappingRow | None,
+    *,
+    explanation: str,
+    created_by: str,
+    valid_from: date | None,
+    valid_to: date | None,
+) -> bool:
+    return (
+        row is not None
+        and row.status == "approved"
+        and row.valid_from == valid_from
+        and row.valid_to == valid_to
+        and row.rationale == explanation
+        and row.created_by == created_by
+    )
 
 
 def _to_concept_mapping(row: ConceptMappingRow, metric_code: str) -> ConceptMapping:

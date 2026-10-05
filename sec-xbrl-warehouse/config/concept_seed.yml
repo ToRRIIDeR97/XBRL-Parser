@@ -442,6 +442,6 @@ mappings:
   canonical_metric: provision_for_credit_losses
   priority: 2
 - namespace_hint: us-gaap
-  concept: FinancingReceivableCreditLossExpenseReversal
+  concept: FinancingReceivableExcludingAccruedInterestCreditLossExpenseReversal
   canonical_metric: provision_for_credit_losses
   priority: 3

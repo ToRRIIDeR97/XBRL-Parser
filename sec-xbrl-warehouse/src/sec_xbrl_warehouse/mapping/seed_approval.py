@@ -16,8 +16,10 @@ class SeedApproval:
     namespace: str
     concept_name: str
     created: bool
-    # True when an identical family mapping was already approved before this run.
+    # True when an identical approval (same reviewer and rationale) already existed.
     already_approved: bool = False
+    # Dry runs: True when the real run would create a new mapping version.
+    would_create: bool = False
 
 
 class SeedApprovalRepository(Protocol):
@@ -31,9 +33,15 @@ class SeedApprovalRepository(Protocol):
         created_by: str,
     ) -> tuple[ConceptMapping, bool]: ...
 
-    async def find_approved_mapping(
-        self, *, metric: str, namespace: str, concept_name: str
-    ) -> ConceptMapping | None: ...
+    async def identical_approval_exists(
+        self,
+        *,
+        metric: str,
+        namespace: str,
+        concept_name: str,
+        explanation: str,
+        created_by: str,
+    ) -> bool: ...
 
 
 async def approve_seed_candidates(
@@ -49,8 +57,9 @@ async def approve_seed_candidates(
 
     Seeds stay candidates until a person runs this with a reviewer and a
     rationale; both are recorded on every mapping. Already-approved mappings
-    aren't versioned again (`created=False`). `dry_run` reports what would be
-    created and writes nothing. `metrics` limits the run to those codes.
+    aren't versioned again (`created=False`). `dry_run` writes nothing and sets
+    `would_create` on each item a real run with the same reviewer and rationale
+    would create. `metrics` limits the run to those codes.
     """
     if not reviewer.strip() or not rationale.strip():
         raise ValueError("A reviewer and a rationale are required to approve seeds")
@@ -75,12 +84,21 @@ async def approve_seed_candidates(
     results: list[SeedApproval] = []
     for metric, family, concept in selected:
         if dry_run:
-            existing = await repository.find_approved_mapping(
-                metric=metric, namespace=family, concept_name=concept
+            exists = await repository.identical_approval_exists(
+                metric=metric,
+                namespace=family,
+                concept_name=concept,
+                explanation=rationale,
+                created_by=reviewer,
             )
             results.append(
                 SeedApproval(
-                    metric, family, concept, created=False, already_approved=existing is not None
+                    metric,
+                    family,
+                    concept,
+                    created=False,
+                    already_approved=exists,
+                    would_create=not exists,
                 )
             )
             continue

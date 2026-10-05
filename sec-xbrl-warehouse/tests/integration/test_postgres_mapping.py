@@ -176,6 +176,10 @@ async def test_approval_is_idempotent_and_family_mappings_resolve_reviews(
             **{**arguments, "explanation": "re-reviewed"}
         )
         assert created_new and reviewed.version == 2
+        assert not await repository.identical_approval_exists(**arguments)
+        assert await repository.identical_approval_exists(
+            **{**arguments, "explanation": "re-reviewed"}
+        )
         found = await repository.approved_mappings_for_concept(
             "http://fasb.org/us-gaap/2018-01-31",
             "NetIncomeLossIdempotent",

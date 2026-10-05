@@ -165,6 +165,56 @@ row: the first occurrence's message, line, and column, plus `details.occurrences
 and up to five `details.samples` (line, column, message, details). Fatal issues are never
 grouped. The reject decision still uses every individual issue.
 
+### `xbrl_roles`
+
+One row per extended link role the filing declares or uses: `role_uri`,
+`definition` (for example `100000 - Statement - Consolidated Balance Sheets`),
+`used_on`, `sort_code` (leading digits), `category` (`statement`, `disclosure`,
+`document`, or `other`, from the SEC "<code> - <Category> - <Title>" convention), and
+`statement_kind` when the role is a primary statement.
+
+### `xbrl_statement_lines` and `v_statement_lines_latest`
+
+Primary financial statements as the filer presented them, derived by
+`normalization/statements.py` from roles, presentation arcs, and facts (rebuildable
+from silver; raw relationships and facts are unchanged).
+
+- **Classification.** A role is a primary statement when its definition's category is
+  `statement` and its title isn't a parenthetical; the title gives the kind
+  (`balance_sheet`, `income_statement`, `comprehensive_income`, `cash_flow`, `equity`).
+  Without a definition (older extractions) the role URI's last segment decides, the URI
+  must not name details/tables/policies/parenthetical, and the role must contain an
+  anchor concept (for example `Assets`, `NetCashProvidedByUsedInOperatingActivities`).
+  Several roles of one kind are all kept. A combined "Statements of Operations and
+  Comprehensive Income" (operations/income/earnings named outside "comprehensive
+  income", plus income-statement anchors such as `Revenues`, `NetIncomeLoss`, or EPS)
+  is an `income_statement`; a comprehensive-income-only title stays
+  `comprehensive_income`.
+- **Lines.** One row per line: a pre-order walk of the role's parent-child arcs by
+  `order` (`line_number` from 1 per role, `depth` 0 at the root). `label` uses the
+  arc's preferred label role, else the standard label; `is_total` marks the total
+  label role. A concept presented on two statements appears on both. Rows have no
+  inherent order: always `ORDER BY role_uri, line_number`.
+- **Line roles.** `line_role` marks hypercube scaffolding: `table`, `axis`, `domain`,
+  `member` (from the concept's substitution group and type, else its name), or
+  `concept` for reported line items.
+- **Values.** Parallel arrays `value_fact_ids`, `value_period_starts`,
+  `value_period_ends`, `value_period_instants`, `value_decimals`: one entry per
+  period, from the concept's non-dimensional, first-ordinal facts, latest period
+  first. Lines without facts have empty arrays. `value_concept_qnames` names each
+  value's concept. A `member` line (for example Products or Services under the
+  product/service axis) gets the facts of the role's line item concepts whose only
+  dimension is that member on the nearest enclosing axis, one per concept and period.
+  Other dimensional cells (equity components, multi-axis tables) are not populated.
+- `v_statement_lines_latest` shows only each accession's latest published revision.
+
+```sql
+SELECT line_number, depth, label, is_total, value_period_instants, value_decimals
+FROM xbrl.v_statement_lines_latest
+WHERE accession = '0000320193-25-000079' AND statement_kind = 'balance_sheet'
+ORDER BY role_uri, line_number;
+```
+
 ## Canonical layer
 
 ### `canonical_metrics` in PostgreSQL

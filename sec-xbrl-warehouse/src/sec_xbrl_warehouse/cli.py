@@ -170,6 +170,7 @@ def doctor(skip_sec_identity: bool = False) -> None:
             "v_sec_text_latest",
             "v_xbrl_facts_latest",
             "v_canonical_facts_latest",
+            "v_statement_lines_latest",
         }
         missing = sorted(expected - current)
         drift = warehouse.schema_drift(ddl)

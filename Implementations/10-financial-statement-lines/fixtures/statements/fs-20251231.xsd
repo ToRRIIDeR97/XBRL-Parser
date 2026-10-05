@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema" xmlns:xbrli="http://www.xbrl.org/2003/instance" xmlns:link="http://www.xbrl.org/2003/linkbase" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fs="http://example.com/fs/2025" targetNamespace="http://example.com/fs/2025" elementFormDefault="qualified">
+  <annotation><appinfo>
+    <link:linkbaseRef xlink:type="simple" xlink:href="fs-20251231_pre.xml" xlink:role="http://www.xbrl.org/2003/role/presentationLinkbaseRef" xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
+    <link:linkbaseRef xlink:type="simple" xlink:href="fs-20251231_lab.xml" xlink:role="http://www.xbrl.org/2003/role/labelLinkbaseRef" xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
+    <link:roleType roleURI="http://example.com/role/BalanceSheet" id="BalanceSheet"><link:definition>100000 - Statement - Consolidated Balance Sheets</link:definition><link:usedOn>link:presentationLink</link:usedOn></link:roleType>
+    <link:roleType roleURI="http://example.com/role/BalanceSheetParenthetical" id="BalanceSheetParenthetical"><link:definition>100100 - Statement - Consolidated Balance Sheets (Parenthetical)</link:definition><link:usedOn>link:presentationLink</link:usedOn></link:roleType>
+    <link:roleType roleURI="http://example.com/role/IncomeStatement" id="IncomeStatement"><link:definition>200000 - Statement - Consolidated Statements of Operations</link:definition><link:usedOn>link:presentationLink</link:usedOn></link:roleType>
+    <link:roleType roleURI="http://example.com/role/CashFlow" id="CashFlow"><link:definition>300000 - Statement - Consolidated Statements of Cash Flows</link:definition><link:usedOn>link:presentationLink</link:usedOn></link:roleType>
+    <link:roleType roleURI="http://example.com/role/RevenueDetails" id="RevenueDetails"><link:definition>900000 - Disclosure - Revenue (Details)</link:definition><link:usedOn>link:presentationLink</link:usedOn></link:roleType>
+  </appinfo></annotation>
+  <import namespace="http://www.xbrl.org/2003/instance" schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <element name="BalanceSheetAbstract" id="fs_BalanceSheetAbstract" type="xbrli:stringItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" abstract="true" nillable="true"/>
+  <element name="AssetsAbstract" id="fs_AssetsAbstract" type="xbrli:stringItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" abstract="true" nillable="true"/>
+  <element name="CashAndCashEquivalentsAtCarryingValue" id="fs_CashAndCashEquivalentsAtCarryingValue" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" xbrli:balance="debit" nillable="true"/>
+  <element name="AccountsReceivableNetCurrent" id="fs_AccountsReceivableNetCurrent" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" xbrli:balance="debit" nillable="true"/>
+  <element name="AssetsCurrent" id="fs_AssetsCurrent" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" xbrli:balance="debit" nillable="true"/>
+  <element name="PropertyPlantAndEquipmentNet" id="fs_PropertyPlantAndEquipmentNet" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" xbrli:balance="debit" nillable="true"/>
+  <element name="Assets" id="fs_Assets" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" xbrli:balance="debit" nillable="true"/>
+  <element name="LiabilitiesAndEquityAbstract" id="fs_LiabilitiesAndEquityAbstract" type="xbrli:stringItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" abstract="true" nillable="true"/>
+  <element name="Liabilities" id="fs_Liabilities" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" xbrli:balance="credit" nillable="true"/>
+  <element name="StockholdersEquity" id="fs_StockholdersEquity" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" xbrli:balance="credit" nillable="true"/>
+  <element name="LiabilitiesAndStockholdersEquity" id="fs_LiabilitiesAndStockholdersEquity" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" xbrli:balance="credit" nillable="true"/>
+  <element name="CommonStockSharesAuthorized" id="fs_CommonStockSharesAuthorized" type="xbrli:sharesItemType" substitutionGroup="xbrli:item" xbrli:periodType="instant" nillable="true"/>
+  <element name="IncomeStatementAbstract" id="fs_IncomeStatementAbstract" type="xbrli:stringItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" abstract="true" nillable="true"/>
+  <element name="Revenues" id="fs_Revenues" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" xbrli:balance="credit" nillable="true"/>
+  <element name="CostOfRevenue" id="fs_CostOfRevenue" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" xbrli:balance="debit" nillable="true"/>
+  <element name="GrossProfit" id="fs_GrossProfit" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" xbrli:balance="credit" nillable="true"/>
+  <element name="NetIncomeLoss" id="fs_NetIncomeLoss" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" xbrli:balance="credit" nillable="true"/>
+  <element name="EarningsPerShareDiluted" id="fs_EarningsPerShareDiluted" type="xbrli:decimalItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="CashFlowAbstract" id="fs_CashFlowAbstract" type="xbrli:stringItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" abstract="true" nillable="true"/>
+  <element name="NetCashProvidedByUsedInOperatingActivities" id="fs_NetCashProvidedByUsedInOperatingActivities" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" xbrli:balance="debit" nillable="true"/>
+  <element name="PaymentsToAcquirePropertyPlantAndEquipment" id="fs_PaymentsToAcquirePropertyPlantAndEquipment" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" xbrli:balance="credit" nillable="true"/>
+  <element name="RevenueDetailsAbstract" id="fs_RevenueDetailsAbstract" type="xbrli:stringItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" abstract="true" nillable="true"/>
+  <element name="RevenueFromProducts" id="fs_RevenueFromProducts" type="xbrli:monetaryItemType" substitutionGroup="xbrli:item" xbrli:periodType="duration" xbrli:balance="credit" nillable="true"/>
+</schema>

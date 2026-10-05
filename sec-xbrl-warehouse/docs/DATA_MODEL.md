@@ -152,8 +152,8 @@ document), and `fetched_at`. EIN, phone, and addresses are not stored.
 - Ticker lookups are case-insensitive.
 - Rows come from `filing discover --cik` (the same submissions request as the
   filings) and, for daily-index discovery, from one submissions request per CIK not
-  yet stored or fetched more than `XBRL_COMPANY_REFRESH_DAYS` (default 30) days before
-  the discovery date. `--cik` discoveries always refresh the row.
+  yet stored or fetched more than `XBRL_COMPANY_REFRESH_DAYS` (default 30) days ago
+  (wall-clock time, so backfills of old dates refresh too). `--cik` discoveries always refresh the row.
 
 ## Validation issues
 

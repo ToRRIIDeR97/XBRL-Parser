@@ -338,13 +338,18 @@ class ClickHouseWarehouse:
         self.client.command(definitions["taxonomy_concepts"][0])
         self.client.command(definitions["xbrl_concept_labels"][0])
         db = self.database
+        # Unnest each extraction's own documents once into a small set. Joining
+        # `metadata_json` (about 1 MB per extraction: it embeds Arelle's validation
+        # log) onto every label arc made this upgrade exceed 4 GiB on 43 filings.
+        own_documents = (
+            f"SELECT accession, extraction_revision, arrayJoin(JSONExtract("
+            f"metadata_json, 'source_documents', 'Array(String)')) FROM {db}.xbrl_extractions"
+        )
         own = (
             f"(accession, extraction_revision, concept_qname) IN ("
-            f"SELECT r.accession, r.extraction_revision, r.from_qname "
-            f"FROM {db}.xbrl_relationships AS r INNER JOIN {db}.xbrl_extractions AS e "
-            f"ON e.accession = r.accession AND e.extraction_revision = r.extraction_revision "
-            f"WHERE r.network_type = 'label' AND has(JSONExtract(e.metadata_json, "
-            f"'source_documents', 'Array(String)'), r.source_document))"
+            f"SELECT accession, extraction_revision, from_qname "
+            f"FROM {db}.xbrl_relationships WHERE network_type = 'label' "
+            f"AND (accession, extraction_revision, source_document) IN ({own_documents}))"
         )
         shared = (
             f"NOT ({own}) AND (accession, extraction_revision) IN "

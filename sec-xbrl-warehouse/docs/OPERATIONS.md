@@ -223,6 +223,33 @@ the total wall time with the 43-minute serial baseline (2 October 2026).
 
 Before a preserving ClickHouse upgrade, `doctor` must pass and free ClickHouse space must exceed 110% of the affected table bytes. The upgrade command refuses insufficient capacity and retains named backup tables.
 
+### ClickHouse memory
+
+ClickHouse caps its total memory at 0.9 × the container limit (3.6 GiB with the
+default `CLICKHOUSE_MEMORY_LIMIT=4g`). Every query, background merge and cache counts
+against that one cap, and when it's reached ClickHouse stops whichever query it picks
+(`MEMORY_LIMIT_EXCEEDED`, code 241), often an unrelated small one.
+`docker/clickhouse/config.d/xbrl-memory.xml`, mounted by Compose, keeps the server
+inside its limit:
+
+- `system.metric_log` and `system.query_metric_log` are off. They have about a
+  thousand columns, and each background merge of `metric_log` took 3.1 GiB for about
+  a second, killing whatever query ran at that moment. The warehouse exports its own
+  Prometheus metrics instead.
+- Other system logs expire (trace and processor logs after 3 days, text and
+  asynchronous-metric logs after 7, query and part logs after 14).
+- Caches are capped at 128–256 MiB each; the defaults (5–8 GiB) exceed the container.
+
+When a container that predates this file is recreated, ClickHouse keeps the old log
+tables as `system.<log>_0` without expiry, and the old `metric_log` and
+`query_metric_log` still merge. Detach them (`DETACH TABLE system.metric_log
+PERMANENTLY`, same for `query_metric_log`); the `_0` tables can be dropped when their
+history is no longer needed.
+
+To diagnose a code-241 failure, check what else held memory at that second:
+`system.text_log` lines from `MemoryTracker` ("Background process (mutate/merge) peak
+memory usage") and `system.query_log` `memory_usage` for queries in the same minute.
+
 ## Production boundary
 
 The Compose profile binds dashboards and the API to localhost, but production still needs authentication, TLS, managed secrets, network policy, backup monitoring, object replication/lifecycle rules, pinned image digests, and routed alerts.

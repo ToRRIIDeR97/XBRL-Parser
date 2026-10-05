@@ -596,3 +596,80 @@ def test_filer_labels_never_leak_to_another_filing(clickhouse_settings: Settings
         warehouse.close()
         admin.client.command(f"DROP DATABASE IF EXISTS {database} SYNC")
         admin.close()
+
+
+def test_upgrade_label_provenance_stays_bounded_with_large_metadata(
+    clickhouse_settings: Settings,
+) -> None:
+    """Real `metadata_json` embeds Arelle's validation log (about 1 MB per extraction).
+
+    The label-provenance check once joined that string onto every label arc and needed
+    over 4 GiB to upgrade 43 AAPL filings. It must stay small however large the
+    metadata and however many label arcs there are.
+    """
+    admin = ClickHouseWarehouse(clickhouse_settings)
+    database = f"xbrl_test_slim_{uuid4().hex[:12]}"
+    assert database.startswith("xbrl_test_")
+    admin.client.command(f"CREATE DATABASE {database}")
+    warehouse = ClickHouseWarehouse(
+        clickhouse_settings.model_copy(update={"clickhouse_database": database})
+    )
+    try:
+        warehouse.apply_ddl(OLD_DDL)
+        bundle = _bundle()
+        label = next(
+            r for r in bundle.relationships if r.relationship_type == RelationshipType.LABEL
+        )
+        arcs = tuple(
+            label.model_copy(update={"relationship_id": _h(f"label-arc-{index}")})
+            for index in range(2_000)
+        )
+        heavy = bundle.model_copy(
+            update={
+                "relationships": bundle.relationships + arcs,
+                "metadata": bundle.metadata.model_copy(
+                    update={"provenance": {"validation_log": "x" * 2_000_000}}
+                ),
+            }
+        )
+        for table_name, table in (
+            ("xbrl_contexts", contexts_table(heavy)),
+            ("xbrl_concepts", silver_concepts_table(heavy)),
+            ("xbrl_facts", silver_facts_table(heavy)),
+            ("xbrl_relationships", relationships_table(heavy)),
+            ("xbrl_footnotes", footnotes_table(heavy)),
+        ):
+            _insert_old(warehouse, table_name, table)
+        warehouse.client.insert(
+            f"{database}.xbrl_extractions",
+            [[ACCESSION, 1, "{}", heavy.metadata.model_dump_json(), datetime.now(UTC)]],
+            column_names=[
+                "accession",
+                "extraction_revision",
+                "entity_counts_json",
+                "metadata_json",
+                "completed_at",
+            ],
+        )
+
+        warehouse.upgrade_ddl(Path("sql/clickhouse"))
+
+        assert warehouse.query("SELECT concept_qname FROM xbrl_concept_labels") == [
+            {"concept_qname": "us-gaap:Revenues"}
+        ]
+        warehouse.client.command("SYSTEM FLUSH LOGS")
+        peaks = warehouse.query(
+            "SELECT max(memory_usage) AS peak FROM system.query_log "
+            "WHERE type = 'QueryFinish' AND current_database = %(db)s "
+            "AND (query LIKE %(taxonomy)s OR query LIKE %(labels)s)",
+            {
+                "db": database,
+                "taxonomy": f"INSERT INTO {database}.taxonomy_concepts%",
+                "labels": f"INSERT INTO {database}.xbrl_concept_labels%",
+            },
+        )
+        assert 0 < int(peaks[0]["peak"]) < 256 * 1024**2
+    finally:
+        warehouse.close()
+        admin.client.command(f"DROP DATABASE IF EXISTS {database} SYNC")
+        admin.close()

@@ -42,6 +42,7 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
+      - ./docker/clickhouse/config.d/xbrl-memory.xml:/etc/clickhouse-server/config.d/xbrl-memory.xml:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
       interval: 5s

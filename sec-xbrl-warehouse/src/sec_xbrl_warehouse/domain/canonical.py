@@ -20,6 +20,9 @@ class CanonicalMetric(CanonicalModel):
     unit_family: str
     description: str | None = None
     formula: str | None = None
+    # False for averages, per-share values, and point counts: series never derive
+    # quarters by year-to-date difference, Q4 = FY - 9M, or TTM sums from them.
+    additive: bool = True
 
 
 class ConceptMapping(CanonicalModel):

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -38,6 +38,11 @@ YEAR_DAYS = range(350, 381)
 DEFAULT_FORMULAS: Mapping[str, str] = {
     "free_cash_flow": "operating_cash_flow - capital_expenditures",
 }
+# Non-additive metrics from config/canonical_metrics.yml (`additive: false`):
+# averages, per-share values, and share counts are never differenced or summed.
+DEFAULT_NON_ADDITIVE: frozenset[str] = frozenset(
+    {"basic_eps", "diluted_eps", "basic_shares", "diluted_shares", "shares_outstanding"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,8 +103,14 @@ def build_series(
     view: View = "latest",
     as_of: datetime | None = None,
     formulas: Mapping[str, str] | None = None,
+    non_additive: Collection[str] | None = None,
 ) -> list[SeriesPoint]:
-    """Build discrete quarter, annual, TTM, and instant points for every metric."""
+    """Build discrete quarter, annual, TTM, and instant points for every metric.
+
+    Metrics in `non_additive` (default `DEFAULT_NON_ADDITIVE`) keep only reported
+    quarters, years, and instants: no year-to-date differences, Q4 = FY - 9M, or TTM.
+    """
+    excluded = frozenset(non_additive if non_additive is not None else DEFAULT_NON_ADDITIVE)
     if view not in ("latest", "as_reported"):
         raise ValueError(f"Unknown series view: {view}")
     cutoff = _utc(as_of) if as_of is not None else None
@@ -115,7 +126,9 @@ def build_series(
 
     points: list[SeriesPoint] = []
     for metric, items in sorted(by_metric.items()):
-        points.extend(_metric_points(metric, _select(items, view), labels))
+        points.extend(
+            _metric_points(metric, _select(items, view), labels, additive=metric not in excluded)
+        )
     points.extend(_formula_points(points, formulas if formulas is not None else DEFAULT_FORMULAS))
     return sorted(
         points,
@@ -177,6 +190,8 @@ def _metric_points(
     metric: str,
     selected: Mapping[tuple[date | None, date], MetricObservation],
     labels: Mapping[date, tuple[int | None, str | None]],
+    *,
+    additive: bool = True,
 ) -> list[SeriesPoint]:
     cik = next(iter(selected.values())).cik if selected else 0
     values = {period: _from_observation(item) for period, item in selected.items()}
@@ -194,6 +209,11 @@ def _metric_points(
             quarters[end] = value
         elif days in YEAR_DAYS:
             points.append(_point(cik, metric, "annual", value, labels))
+
+    if not additive:
+        for quarter in sorted(quarters.values(), key=lambda value: value.end):
+            points.append(_point(cik, metric, "quarter", quarter, labels, quarter_from_label=True))
+        return points
 
     # Year-to-date differences: consecutive cumulative values sharing a start date.
     by_start: dict[date, list[_Value]] = defaultdict(list)

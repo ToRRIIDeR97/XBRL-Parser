@@ -182,3 +182,17 @@ independently authored.
   `series rebuild --cik`.
 - Gates: compileall, ruff, format, mypy, unit (390 passed, 1 skipped), scan_stubs (0),
   integration (36 passed), plan tests 01–11 (12/10/8/10/8/12/10/22/8/7/13 passed).
+
+### Follow-up (verifier, 5 October 2026)
+
+- Non-additive metrics: `CanonicalMetric.additive` (YAML `additive: false` on
+  basic/diluted shares, shares outstanding, basic/diluted EPS; `dividends_per_share`
+  stays additive). For them `build_series(non_additive=...)` keeps reported quarters,
+  years, and instants only (no YTD differences, Q4 = FY - 9M, or TTM). The worker and
+  `series rebuild` pass the catalogue's set; `DEFAULT_NON_ADDITIVE` mirrors it. TTM EPS
+  is not derived. The flag isn't stored in PostgreSQL `canonical_metrics`.
+- `metric_series` is a `ReplacingMergeTree(built_at)` keyed by point and `known_from`;
+  rebuilds no longer issue a delete mutation; readers still use the newest build.
+- SECURITY.md lists the new tables/views the API reader needs `SELECT` on.
+- The verifier's probes (synthetic and real AAPL, temp databases) were rerun against
+  this tree: no derived shares/EPS points; OCF quarters sum to FY; rebuild idempotent.

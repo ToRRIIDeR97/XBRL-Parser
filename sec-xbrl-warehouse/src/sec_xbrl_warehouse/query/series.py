@@ -14,7 +14,7 @@ The table is derived and fully rebuildable from `canonical_facts`.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
@@ -39,8 +39,6 @@ class SeriesWarehouse(Protocol):
     def query(self, sql: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]: ...
 
     def insert_metric_series(self, table: Any) -> int: ...
-
-    def command(self, sql: str, parameters: dict[str, Any] | None = None) -> Any: ...
 
 
 _OBSERVATIONS_SQL = """
@@ -117,17 +115,27 @@ def load_observations(
 
 
 def series_versions(
-    observations: list[MetricObservation], formulas: Mapping[str, str] | None = None
+    observations: list[MetricObservation],
+    formulas: Mapping[str, str] | None = None,
+    non_additive: Collection[str] | None = None,
 ) -> list[tuple[str, datetime, SeriesPoint]]:
     """`(view, known_from, point)` rows for both views (see the module docstring)."""
     rows: list[tuple[str, datetime, SeriesPoint]] = [
         ("as_reported", point.available_at or EPOCH, point)
-        for point in build_series(observations, view="as_reported", formulas=formulas)
+        for point in build_series(
+            observations, view="as_reported", formulas=formulas, non_additive=non_additive
+        )
     ]
     cutoffs = sorted({item.accepted_at for item in observations if item.accepted_at is not None})
     current: dict[tuple[str, str, date | None, date], tuple[Any, ...]] = {}
     for cutoff in cutoffs:
-        for point in build_series(observations, view="latest", as_of=cutoff, formulas=formulas):
+        for point in build_series(
+            observations,
+            view="latest",
+            as_of=cutoff,
+            formulas=formulas,
+            non_additive=non_additive,
+        ):
             key = (point.metric, point.period_type, point.period_start, point.period_end)
             signature = (
                 point.value,
@@ -151,29 +159,26 @@ def rebuild_metric_series(
     *,
     formulas: Mapping[str, str] | None = None,
     priorities: Mapping[tuple[str, str], int] | None = None,
+    non_additive: Collection[str] | None = None,
     built_at: datetime | None = None,
 ) -> int:
     """Rebuild one company's `metric_series` rows; returns the number written.
 
-    Older builds for the company are deleted asynchronously; readers always use
-    the newest `built_at`, so a rebuild is idempotent and atomic for them.
+    Readers always use the company's newest `built_at`, so a rebuild is
+    idempotent and atomic for them; `ReplacingMergeTree(built_at)` merges replace
+    older builds' rows, so no delete mutation is issued.
     """
     observations = load_observations(warehouse, cik, priorities)
     build = _aware(built_at) or datetime.now(UTC)
     rows = [
         _row(view, known_from, point, build)
         for view, known_from, point in series_versions(
-            observations, formulas if formulas is not None else DEFAULT_FORMULAS
+            observations,
+            formulas if formulas is not None else DEFAULT_FORMULAS,
+            non_additive,
         )
     ]
-    written = warehouse.insert_metric_series(
-        pa.Table.from_pylist(rows, schema=metric_series_schema())
-    )
-    warehouse.command(
-        "ALTER TABLE metric_series DELETE WHERE cik = %(cik)s AND built_at < %(built_at)s",
-        {"cik": cik, "built_at": build},
-    )
-    return written
+    return warehouse.insert_metric_series(pa.Table.from_pylist(rows, schema=metric_series_schema()))
 
 
 def metric_series_schema() -> pa.Schema:
@@ -228,6 +233,13 @@ def _aware(value: datetime | None) -> datetime | None:
 
 def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
+
+
+def non_additive_from_metrics(metrics: Mapping[str, Any]) -> frozenset[str]:
+    """Metric codes marked `additive: false` in a `CanonicalMapper.metrics` mapping."""
+    return frozenset(
+        code for code, metric in metrics.items() if not getattr(metric, "additive", True)
+    )
 
 
 def formulas_from_metrics(metrics: Mapping[str, Any]) -> dict[str, str]:

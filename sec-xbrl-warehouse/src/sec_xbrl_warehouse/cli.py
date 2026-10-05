@@ -815,7 +815,11 @@ async def _jobs_retry(job_id: str) -> None:
 @series_app.command("rebuild")
 def series_rebuild(cik: list[int] = typer.Option(..., "--cik", min=0, help="Repeatable.")) -> None:
     """Rebuild companies' metric series from their canonical facts (no SEC access)."""
-    from sec_xbrl_warehouse.query.series import formulas_from_metrics, rebuild_metric_series
+    from sec_xbrl_warehouse.query.series import (
+        formulas_from_metrics,
+        non_additive_from_metrics,
+        rebuild_metric_series,
+    )
 
     settings = get_settings()
     mapper = CanonicalMapper.load_rules(
@@ -830,6 +834,7 @@ def series_rebuild(cik: list[int] = typer.Option(..., "--cik", min=0, help="Repe
                 warehouse,
                 company,
                 formulas=formulas_from_metrics(mapper.metrics),
+                non_additive=non_additive_from_metrics(mapper.metrics),
                 priorities=mapper.candidate_priorities,
             )
             console.print(f"CIK {company}: {written} series rows")

@@ -112,3 +112,64 @@ def test_versions_record_restatements_with_their_known_from_time() -> None:
         ("latest", datetime(2025, 2, 1, tzinfo=UTC), D(100)),
         ("latest", datetime(2026, 2, 1, tzinfo=UTC), D(105)),
     ]
+
+
+def _apple_shares_and_eps():
+    s = "2024-09-29"
+    rows = []
+    for metric, values in (
+        ("diluted_shares", (15_150_865, 15_106_000, 15_056_133, 15_004_697)),
+        ("diluted_eps", ("2.40", "4.05", "5.62", "6.08")),
+        ("revenue", (124_300, 219_659, 313_695, 416_161)),
+    ):
+        for (end, accession, accepted, fp), value in zip(
+            (
+                ("2024-12-28", "q1", "2025-01-31T06:00:00", "Q1"),
+                ("2025-03-29", "q2", "2025-05-02T06:00:00", "Q2"),
+                ("2025-06-28", "q3", "2025-08-01T06:00:00", "Q3"),
+                ("2025-09-27", "fy", "2025-10-31T06:00:00", "FY"),
+            ),
+            values,
+            strict=True,
+        ):
+            rows.append(_obs(metric, s, end, value, accession, accepted, 2025, fp, end))
+    return rows
+
+
+def test_non_additive_metrics_are_never_differenced_or_summed() -> None:
+    points = build_series(_apple_shares_and_eps())
+    for metric in ("diluted_shares", "diluted_eps"):
+        mine = [p for p in points if p.metric == metric]
+        assert {p.derivation for p in mine} == {"reported"}
+        assert sorted((p.period_type, p.fiscal_quarter) for p in mine) == [
+            ("annual", None),
+            ("quarter", 1),
+        ]
+        assert all(p.value > 0 for p in mine)
+    revenue = [p for p in points if p.metric == "revenue"]
+    assert {p.derivation for p in revenue} >= {
+        "ytd_difference",
+        "annual_minus_nine_months",
+        "ttm_sum",
+    }
+
+
+def test_catalogue_marks_shares_and_eps_non_additive() -> None:
+    from pathlib import Path
+
+    from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
+    from sec_xbrl_warehouse.normalization.series import DEFAULT_NON_ADDITIVE
+    from sec_xbrl_warehouse.query.series import non_additive_from_metrics
+
+    config = Path(__file__).resolve().parents[2] / "config"
+    mapper = CanonicalMapper.load_rules(
+        config / "canonical_metrics.yml",
+        config / "concept_seed.yml",
+        None,  # type: ignore[arg-type]
+    )
+    flagged = non_additive_from_metrics(mapper.metrics)
+    assert flagged == DEFAULT_NON_ADDITIVE
+    assert "dividends_per_share" not in flagged
+    # An explicit empty set restores additive treatment (callers own the catalogue).
+    points = build_series(_apple_shares_and_eps(), non_additive=())
+    assert any(p.metric == "diluted_shares" and p.derivation == "ttm_sum" for p in points)

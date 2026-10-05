@@ -295,8 +295,15 @@ Standardized series rebuilt per company from `canonical_facts` by
   `known_from <= as_of`.
 - **Rebuilds.** The worker rebuilds a company after a completed `ingest_filing` or
   `map_canonical` (a failure is reported in the job result, not retried);
-  `xbrl-warehouse series rebuild --cik <cik>` rebuilds on demand. Older builds are
-  deleted asynchronously.
+  `xbrl-warehouse series rebuild --cik <cik>` rebuilds on demand. The table is a
+  `ReplacingMergeTree(built_at)`, so merges replace older builds' rows without a delete
+  mutation per rebuild; readers only use the newest build.
+- **Non-additive metrics.** Metrics with `additive: false` in `canonical_metrics.yml`
+  (weighted-average shares, shares outstanding, basic and diluted EPS) keep their
+  reported quarters, years, and instants only: no year-to-date quarters, Q4 = FY - 9M,
+  or TTM, because differences and sums of averages or per-share values are
+  meaningless. `dividends_per_share` stays additive (per-share dividends do sum). The
+  flag is read from the YAML; it isn't stored in PostgreSQL `canonical_metrics`.
 
 `companies` in ClickHouse mirrors PostgreSQL company rows (name, tickers, exchanges,
 SIC, fiscal year end) for read-only ticker lookups by the API; the newest mirrored

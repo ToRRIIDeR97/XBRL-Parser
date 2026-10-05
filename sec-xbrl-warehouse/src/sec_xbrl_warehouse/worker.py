@@ -419,7 +419,11 @@ async def _rebuild_series(services: dict[str, Any], cik: int) -> dict[str, Any]:
     mapper = services.get("mapper")
     if warehouse is None or not hasattr(warehouse, "insert_metric_series"):
         return {"status": "skipped"}
-    from sec_xbrl_warehouse.query.series import formulas_from_metrics, rebuild_metric_series
+    from sec_xbrl_warehouse.query.series import (
+        formulas_from_metrics,
+        non_additive_from_metrics,
+        rebuild_metric_series,
+    )
 
     try:
         written = await asyncio.to_thread(
@@ -427,6 +431,7 @@ async def _rebuild_series(services: dict[str, Any], cik: int) -> dict[str, Any]:
             warehouse,
             cik,
             formulas=formulas_from_metrics(mapper.metrics) if mapper is not None else None,
+            non_additive=non_additive_from_metrics(mapper.metrics) if mapper is not None else None,
             priorities=getattr(mapper, "candidate_priorities", None),
         )
     except Exception as exc:

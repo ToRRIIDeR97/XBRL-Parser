@@ -3,8 +3,10 @@
 
 -- One row per series point version. `view` is latest or as_reported; `known_from`
 -- is when this version became known (as-of queries take the newest version with
--- known_from <= cutoff); each rebuild writes a new `built_at`, and readers use the
--- company's newest build.
+-- known_from <= cutoff). Each rebuild writes a new `built_at`; readers use the
+-- company's newest build, and merges replace older builds' rows with the same key
+-- (no delete mutation per rebuild). Rows of points a newer build no longer has stay
+-- until they are replaced and are never read.
 CREATE TABLE IF NOT EXISTS {{database}}.metric_series
 (
     cik UInt64,
@@ -24,8 +26,8 @@ CREATE TABLE IF NOT EXISTS {{database}}.metric_series
     known_from DateTime64(3, 'UTC'),
     built_at DateTime64(3, 'UTC')
 )
-ENGINE = MergeTree
-ORDER BY (cik, metric, view, period_type, period_end, known_from, built_at)
+ENGINE = ReplacingMergeTree(built_at)
+ORDER BY (cik, metric, view, period_type, period_end, ifNull(period_start, toDate('1970-01-01')), known_from)
 SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.companies

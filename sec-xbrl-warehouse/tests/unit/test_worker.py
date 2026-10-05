@@ -670,4 +670,5 @@ def test_alert_rule_watches_egress_deferrals() -> None:
         for rule in group["rules"]
     ]
     rule = next(rule for rule in rules if rule["alert"] == "XbrlSecEgressDeferrals")
-    assert 'state="deferred"' in rule["expr"] and rule["for"] == "30m"
+    assert 'state="deferred"' in rule["expr"] and "[15m]" in rule["expr"]
+    assert rule["for"] == "15m" and "30 minutes" in rule["annotations"]["summary"]

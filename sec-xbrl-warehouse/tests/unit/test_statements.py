@@ -205,3 +205,104 @@ def test_bundles_written_before_roles_still_load() -> None:
     legacy = bundle.model_dump(mode="json")
     legacy.pop("roles")
     assert XbrlExtractionBundle.model_validate(legacy).roles == ()
+
+
+def test_combined_operations_and_comprehensive_income_is_an_income_statement() -> None:
+    combined = _role(
+        "OCI", "200000 - Statement - Statements of Operations and Comprehensive Income"
+    )
+    ci_only = _role("CI", "300000 - Statement - Statements of Comprehensive Income")
+    relationships = [
+        _arc(combined.role_uri, "Root", "Revenues", 1),
+        _arc(combined.role_uri, "Root", "ComprehensiveIncomeNetOfTax", 2),
+        _arc(ci_only.role_uri, "Root", "NetIncomeLoss", 1),
+        _arc(ci_only.role_uri, "Root", "ComprehensiveIncomeNetOfTax", 2),
+    ]
+    assert classify_roles(_bundle((combined, ci_only), relationships)) == {
+        combined.role_uri: StatementKind.INCOME_STATEMENT,
+        ci_only.role_uri: StatementKind.COMPREHENSIVE_INCOME,
+    }
+
+
+def test_hypercube_lines_are_flagged_and_member_lines_get_dimensional_values() -> None:
+    from sec_xbrl_warehouse.domain.xbrl import DimensionMember
+    from sec_xbrl_warehouse.normalization.statements import LineRole
+
+    role = _role("OPS", "200000 - Statement - Statements of Operations")
+    ns = "http://example.com"
+
+    def concept(name: str, group: str | None = None, datatype: str | None = None) -> XbrlConcept:
+        return XbrlConcept(
+            namespace=ns,
+            name=name,
+            qname=f"ex:{name}",
+            substitution_group_qname=group,
+            datatype_qname=datatype,
+            abstract=group is not None and group != "xbrli:item",
+        )
+
+    concepts = [
+        concept("StatementTable", "xbrldt:hypercubeItem"),
+        concept("ProductOrServiceAxis", "xbrldt:dimensionItem"),
+        concept("ProductOrServiceDomain", "xbrli:item", "dtr-types:domainItemType"),
+        concept("ProductMember", "xbrli:item", "dtr-types:domainItemType"),
+        concept("Revenues", "xbrli:item", "xbrli:monetaryItemType"),
+    ]
+    relationships = [
+        _arc(role.role_uri, "Root", "StatementTable", 1),
+        _arc(role.role_uri, "StatementTable", "ProductOrServiceAxis", 1),
+        _arc(role.role_uri, "ProductOrServiceAxis", "ProductOrServiceDomain", 1),
+        _arc(role.role_uri, "ProductOrServiceDomain", "ProductMember", 1),
+        _arc(role.role_uri, "StatementTable", "LineItems", 2),
+        _arc(role.role_uri, "LineItems", "Revenues", 1),
+    ]
+
+    def revenue(fact_id: str, value: int, dimensions=()) -> XbrlFact:
+        return XbrlFact(
+            fact_id=fact_id,
+            concept_namespace=ns,
+            concept_name="Revenues",
+            concept_qname="ex:Revenues",
+            context_id=fact_id,
+            context_hash="0" * 64,
+            value_kind=FactValueKind.NUMERIC,
+            raw_value=str(value),
+            value_decimal=Decimal(value),
+            period_kind=PeriodKind.DURATION,
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 12, 31),
+            entity_scheme="s",
+            entity_identifier="1",
+            dimensions=dimensions,
+            dimension_hash="1" * 64 if dimensions else "0" * 64,
+            duplicate_set_hash=fact_id,
+            source_document="x.htm",
+        )
+
+    product = DimensionMember(
+        axis_namespace=ns,
+        axis_name="ProductOrServiceAxis",
+        member_namespace=ns,
+        member_name="ProductMember",
+    )
+    other = DimensionMember(
+        axis_namespace=ns, axis_name="SegmentAxis", member_namespace=ns, member_name="East"
+    )
+    facts = [
+        revenue("total", 100),
+        revenue("products", 60, (product,)),
+        revenue("two-dims", 10, (product, other)),
+    ]
+    lines = build_statement_lines(_bundle((role,), relationships, facts=facts, concepts=concepts))
+    roles = {line.concept_qname: line.line_role for line in lines}
+    assert roles["ex:StatementTable"] == LineRole.TABLE
+    assert roles["ex:ProductOrServiceAxis"] == LineRole.AXIS
+    assert roles["ex:ProductOrServiceDomain"] == LineRole.DOMAIN
+    assert roles["ex:ProductMember"] == LineRole.MEMBER
+    assert roles["ex:Revenues"] == LineRole.CONCEPT
+    member = next(line for line in lines if line.concept_qname == "ex:ProductMember")
+    assert [(value.fact_id, value.concept_qname) for value in member.values] == [
+        ("products", "ex:Revenues")
+    ]
+    total = next(line for line in lines if line.concept_qname == "ex:Revenues")
+    assert [value.fact_id for value in total.values] == ["total"]

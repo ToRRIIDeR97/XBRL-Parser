@@ -185,16 +185,27 @@ from silver; raw relationships and facts are unchanged).
   Without a definition (older extractions) the role URI's last segment decides, the URI
   must not name details/tables/policies/parenthetical, and the role must contain an
   anchor concept (for example `Assets`, `NetCashProvidedByUsedInOperatingActivities`).
-  Several roles of one kind are all kept.
+  Several roles of one kind are all kept. A combined "Statements of Operations and
+  Comprehensive Income" (operations/income/earnings named outside "comprehensive
+  income", plus income-statement anchors such as `Revenues`, `NetIncomeLoss`, or EPS)
+  is an `income_statement`; a comprehensive-income-only title stays
+  `comprehensive_income`.
 - **Lines.** One row per line: a pre-order walk of the role's parent-child arcs by
   `order` (`line_number` from 1 per role, `depth` 0 at the root). `label` uses the
   arc's preferred label role, else the standard label; `is_total` marks the total
-  label role. A concept presented on two statements appears on both.
+  label role. A concept presented on two statements appears on both. Rows have no
+  inherent order: always `ORDER BY role_uri, line_number`.
+- **Line roles.** `line_role` marks hypercube scaffolding: `table`, `axis`, `domain`,
+  `member` (from the concept's substitution group and type, else its name), or
+  `concept` for reported line items.
 - **Values.** Parallel arrays `value_fact_ids`, `value_period_starts`,
   `value_period_ends`, `value_period_instants`, `value_decimals`: one entry per
   period, from the concept's non-dimensional, first-ordinal facts, latest period
-  first. Lines without facts have empty arrays. Dimensional statement tables (equity
-  components, segments) are not populated here.
+  first. Lines without facts have empty arrays. `value_concept_qnames` names each
+  value's concept. A `member` line (for example Products or Services under the
+  product/service axis) gets the facts of the role's line item concepts whose only
+  dimension is that member on the nearest enclosing axis, one per concept and period.
+  Other dimensional cells (equity components, multi-axis tables) are not populated.
 - `v_statement_lines_latest` shows only each accession's latest published revision.
 
 ```sql

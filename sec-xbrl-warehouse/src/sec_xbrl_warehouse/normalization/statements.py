@@ -50,6 +50,19 @@ class StatementValue:
     period_end: date | None
     period_instant: date | None
     value_decimal: Decimal | None
+    # The fact's concept: the line's own concept, or for a `member` line the line
+    # item concept reported for that member.
+    concept_qname: str | None = None
+
+
+class LineRole(StrEnum):
+    """What a statement line is: a reported concept or dimensional scaffolding."""
+
+    CONCEPT = "concept"
+    TABLE = "table"
+    AXIS = "axis"
+    DOMAIN = "domain"
+    MEMBER = "member"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +79,7 @@ class StatementLine:
     is_total: bool
     values: tuple[StatementValue, ...] = ()
     parent_concept_qname: str | None = None
+    line_role: LineRole = LineRole.CONCEPT
 
 
 # Keyword order matters: "comprehensive income" before "income", and so on.
@@ -158,6 +172,10 @@ def statement_roles(bundle: XbrlExtractionBundle) -> list[StatementRole]:
         if role is not None and role.definition:
             kind = _kind_from_definition(role)
             source = "definition"
+            if kind == StatementKind.COMPREHENSIVE_INCOME and _combined_income_statement(
+                role, local_names
+            ):
+                kind = StatementKind.INCOME_STATEMENT
         else:
             kind = _kind_from_uri(role_uri)
             source = "role_uri"
@@ -185,15 +203,45 @@ def build_statement_lines(bundle: XbrlExtractionBundle) -> tuple[StatementLine, 
     `order`; `line_number` starts at 1 per role and `depth` at 0 for a root.
     Labels use the arc's preferred label role, else the standard label. Values
     are the concept's non-dimensional, first-ordinal facts, one per period.
+
+    Hypercube scaffolding is flagged by `line_role` (table, axis, domain,
+    member). A `member` line's values are the facts of the role's line item
+    concepts whose only dimension is that member on the nearest enclosing axis;
+    each value records its concept.
     """
     trees = _presentation_children(bundle)
     concepts = {concept.qname: concept for concept in bundle.concepts}
     values = _values_by_concept(bundle.facts)
+    member_facts = _single_dimension_facts(bundle.facts)
     lines: list[StatementLine] = []
     for statement in statement_roles(bundle):
         children = trees[statement.role_uri]
+        line_concepts = {
+            qname
+            for qname in _tree_concepts(children)
+            if _line_role(concepts.get(qname), qname) == LineRole.CONCEPT
+        }
+        ancestors: list[tuple[int, str, LineRole]] = []
         for number, (depth, qname, parent, preferred) in enumerate(_walk(children), start=1):
             concept = concepts.get(qname)
+            role = _line_role(concept, qname)
+            del ancestors[depth:]
+            line_values = values.get(qname, ())
+            if role == LineRole.MEMBER:
+                axis = next(
+                    (item[1] for item in reversed(ancestors) if item[2] == LineRole.AXIS), None
+                )
+                line_values = (
+                    _member_values(
+                        member_facts,
+                        _qname_key(concepts.get(axis), axis),
+                        _qname_key(concept, qname),
+                        line_concepts,
+                    )
+                    if axis is not None
+                    else ()
+                )
+            ancestors.append((depth, qname, role))
             lines.append(
                 StatementLine(
                     accession=bundle.filing.accession,
@@ -210,8 +258,9 @@ def build_statement_lines(bundle: XbrlExtractionBundle) -> tuple[StatementLine, 
                         else _local_name(qname).endswith("Abstract")
                     ),
                     is_total=preferred == TOTAL_LABEL_ROLE,
-                    values=values.get(qname, ()),
+                    values=line_values,
                     parent_concept_qname=parent,
+                    line_role=role,
                 )
             )
     return tuple(lines)
@@ -297,21 +346,112 @@ def _values_by_concept(facts: Iterable[XbrlFact]) -> dict[str, tuple[StatementVa
                 period_end=fact.period_end,
                 period_instant=fact.period_instant,
                 value_decimal=fact.value_decimal,
+                concept_qname=fact.concept_qname,
             ),
         )
-    return {
-        qname: tuple(
-            sorted(
-                periods.values(),
-                key=lambda value: (
-                    value.period_instant or value.period_end or date.min,
-                    value.period_start or date.min,
-                ),
-                reverse=True,
-            )
+    return {qname: _latest_first(periods.values()) for qname, periods in by_concept.items()}
+
+
+def _latest_first(values: Iterable[StatementValue]) -> tuple[StatementValue, ...]:
+    return tuple(
+        sorted(
+            values,
+            key=lambda value: (
+                value.period_instant or value.period_end or date.min,
+                value.period_start or date.min,
+                value.concept_qname or "",
+            ),
+            reverse=True,
         )
-        for qname, periods in by_concept.items()
-    }
+    )
+
+
+_MemberKey = tuple[tuple[str, str], tuple[str, str]]  # ((axis ns, name), (member ns, name))
+
+
+def _single_dimension_facts(facts: Iterable[XbrlFact]) -> dict[_MemberKey, list[XbrlFact]]:
+    """First-ordinal facts whose only dimension is one explicit axis/member pair."""
+    result: dict[_MemberKey, list[XbrlFact]] = defaultdict(list)
+    for fact in facts:
+        if len(fact.dimensions) != 1 or fact.duplicate_ordinal != 1:
+            continue
+        (dimension,) = fact.dimensions
+        if dimension.member_name is None:
+            continue  # typed dimensions have no member concept on the statement
+        key = (
+            (dimension.axis_namespace, dimension.axis_name),
+            (dimension.member_namespace or "", dimension.member_name),
+        )
+        result[key].append(fact)
+    return result
+
+
+def _member_values(
+    member_facts: dict[_MemberKey, list[XbrlFact]],
+    axis: tuple[str, str],
+    member: tuple[str, str],
+    line_concepts: set[str],
+) -> tuple[StatementValue, ...]:
+    selected: dict[tuple[str, date | None, date | None, date | None], StatementValue] = {}
+    for key, facts in member_facts.items():
+        if not (_same_concept(key[0], axis) and _same_concept(key[1], member)):
+            continue
+        for fact in facts:
+            if fact.concept_qname not in line_concepts:
+                continue
+            period = (fact.concept_qname, fact.period_start, fact.period_end, fact.period_instant)
+            selected.setdefault(
+                period,
+                StatementValue(
+                    fact_id=fact.fact_id,
+                    period_start=fact.period_start,
+                    period_end=fact.period_end,
+                    period_instant=fact.period_instant,
+                    value_decimal=fact.value_decimal,
+                    concept_qname=fact.concept_qname,
+                ),
+            )
+    return _latest_first(selected.values())
+
+
+def _qname_key(concept: XbrlConcept | None, qname: str) -> tuple[str, str]:
+    """(namespace, local name); the namespace is "" when the concept isn't in the bundle."""
+    if concept is not None:
+        return (concept.namespace, concept.name)
+    return ("", _local_name(qname))
+
+
+def _same_concept(left: tuple[str, str], right: tuple[str, str]) -> bool:
+    if left[1] != right[1]:
+        return False
+    return not left[0] or not right[0] or left[0] == right[0]
+
+
+_HYPERCUBE_GROUPS = ("hypercubeitem",)
+_DIMENSION_GROUPS = ("dimensionitem",)
+
+
+def _line_role(concept: XbrlConcept | None, qname: str) -> LineRole:
+    """Classify a presented concept by substitution group and type, else by name."""
+    group = (concept.substitution_group_qname or "").lower() if concept is not None else ""
+    datatype = (concept.datatype_qname or "").lower() if concept is not None else ""
+    name = _local_name(qname)
+    if group.endswith(_HYPERCUBE_GROUPS):
+        return LineRole.TABLE
+    if group.endswith(_DIMENSION_GROUPS):
+        return LineRole.AXIS
+    if datatype.endswith("domainitemtype"):
+        return LineRole.DOMAIN if name.endswith("Domain") else LineRole.MEMBER
+    if concept is None or not (group or datatype):
+        for suffix, role in (
+            ("Table", LineRole.TABLE),
+            ("Axis", LineRole.AXIS),
+            ("Domain", LineRole.DOMAIN),
+            ("Member", LineRole.MEMBER),
+        ):
+            if name.endswith(suffix):
+                return role
+    return LineRole.CONCEPT
 
 
 def _label(concept: XbrlConcept | None, preferred: str | None, qname: str) -> str:
@@ -337,6 +477,35 @@ def _kind_from_definition(role: XbrlRole) -> StatementKind | None:
     if "parenthetical" in title.lower():
         return None
     return _kind_from_text(title)
+
+
+_INCOME_TITLE_TOKENS = ("operations", "income", "earnings")
+_INCOME_STATEMENT_ANCHORS = frozenset(
+    {
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "SalesRevenueNet",
+        "NetIncomeLoss",
+        "EarningsPerShareBasic",
+        "EarningsPerShareDiluted",
+        "Revenue",
+        "ProfitLoss",
+    }
+)
+
+
+def _combined_income_statement(role: XbrlRole, local_names: set[str]) -> bool:
+    """A "Statements of Operations and Comprehensive Income" role is an income statement.
+
+    The title must name operations/income/earnings outside "comprehensive income"
+    and the role must hold income-statement anchors; CI-only titles stay CI.
+    """
+    title = (role.definition or "").split(" - ")[-1]
+    compact = re.sub(r"[^a-z]", "", title.lower())
+    remainder = compact.replace("comprehensiveincome", "").replace("comprehensiveloss", "")
+    return any(token in remainder for token in _INCOME_TITLE_TOKENS) and bool(
+        local_names & _INCOME_STATEMENT_ANCHORS
+    )
 
 
 def _kind_from_uri(role_uri: str) -> StatementKind | None:

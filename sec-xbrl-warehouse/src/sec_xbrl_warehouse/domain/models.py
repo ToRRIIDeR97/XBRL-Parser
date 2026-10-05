@@ -139,6 +139,8 @@ class ValidationIssue(DomainModel):
     line: int | None = None
     column: int | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+    # Filing extraction revision that produced the issue; None for bulk loads.
+    extraction_revision: int | None = None
 
 
 class JobRecord(DomainModel):

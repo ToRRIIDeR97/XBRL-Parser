@@ -56,6 +56,24 @@ class MappingDecision:
     evidence: dict[str, object]
 
 
+_MAX_REVIEW_SAMPLES = 5
+
+
+class _ConceptReview:
+    """Unmapped facts of one concept in one filing."""
+
+    def __init__(self, fact: XbrlFact, decision: MappingDecision) -> None:
+        self.fact = fact
+        self.decision = decision
+        self.fact_count = 1
+        self.sample_fact_ids = [fact.fact_id]
+
+    def add(self, fact: XbrlFact) -> None:
+        self.fact_count += 1
+        if len(self.sample_fact_ids) < _MAX_REVIEW_SAMPLES:
+            self.sample_fact_ids.append(fact.fact_id)
+
+
 class CanonicalMapper:
     """Map raw facts without destroying or mutating the as-filed layer."""
 
@@ -239,17 +257,17 @@ class CanonicalMapper:
             raise ValueError("Mapping batch size must be positive")
         approved: dict[tuple[str, str, str | None], Sequence[ConceptMapping]] = {}
         mapped: list[CanonicalFact] = []
-        reviews: list[ReviewRequest] = []
+        # One review request per concept per filing: the first unmapped fact's
+        # decision plus a count and sample fact IDs, sent after the last batch.
+        reviews: dict[tuple[str, str], _ConceptReview] = {}
         count = size = 0
         for fact in facts:
             record_size = len(fact.model_dump_json().encode("utf-8")) + 512
             if record_size > batch_bytes:
                 raise ValueError("Single mapping record exceeds byte budget")
             if count and size + record_size > batch_bytes:
-                if reviews:
-                    await self.repository.create_reviews(filing, reviews)
                 yield tuple(mapped)
-                mapped, reviews, count, size = [], [], 0, 0
+                mapped, count, size = [], 0, 0
             size += record_size
             key = (fact.concept_namespace, fact.concept_name, fact.taxonomy_version)
             if key not in approved:
@@ -258,7 +276,12 @@ class CanonicalMapper:
                 )
             decision = self._decide(fact, approved[key])
             if decision.mapping is None:
-                reviews.append((fact, decision.candidates, self.explain_mapping(decision)))
+                concept = (fact.concept_namespace, fact.concept_name)
+                review = reviews.get(concept)
+                if review is None:
+                    reviews[concept] = _ConceptReview(fact, decision)
+                else:
+                    review.add(fact)
             else:
                 mapped.append(
                     self.to_canonical_fact(
@@ -267,14 +290,24 @@ class CanonicalMapper:
                 )
             count += 1
             if count == batch_rows:
-                if reviews:
-                    await self.repository.create_reviews(filing, reviews)
                 yield tuple(mapped)
-                mapped, reviews, count, size = [], [], 0, 0
+                mapped, count, size = [], 0, 0
         if count:
-            if reviews:
-                await self.repository.create_reviews(filing, reviews)
             yield tuple(mapped)
+        if reviews:
+            requests: list[ReviewRequest] = [
+                (
+                    review.fact,
+                    review.decision.candidates,
+                    {
+                        **self.explain_mapping(review.decision),
+                        "fact_count": review.fact_count,
+                        "sample_fact_ids": review.sample_fact_ids,
+                    },
+                )
+                for review in reviews.values()
+            ]
+            await self.repository.create_reviews(filing, requests)
 
     def explain_mapping(self, decision: MappingDecision) -> dict[str, object]:
         return {

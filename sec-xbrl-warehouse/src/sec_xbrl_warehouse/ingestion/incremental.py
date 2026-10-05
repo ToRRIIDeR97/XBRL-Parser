@@ -37,6 +37,7 @@ from sec_xbrl_warehouse.observability.metrics import (
     VALIDATION_ISSUES,
 )
 from sec_xbrl_warehouse.validation.filing_reconciliation import reconcile_filing_rows
+from sec_xbrl_warehouse.validation.issue_grouping import group_issues
 from sec_xbrl_warehouse.validation.xbrl_validation import reject_configured_issues
 
 
@@ -166,7 +167,13 @@ class IncrementalFilingIngestor:
                 filing = enriched
                 await self.control.upsert_filing(filing)
                 if await self._checkpoint(job_id, "validation") is None:
-                    await self.control.record_validation_issues(bundle.validation_issues)
+                    # Repeated diagnostics are stored once per group; the reject
+                    # decision below still sees every individual issue.
+                    await self.control.record_validation_issues(
+                        group_issues(
+                            bundle.validation_issues, extraction_revision=extraction_revision
+                        )
+                    )
                     for issue in bundle.validation_issues:
                         VALIDATION_ISSUES.labels(
                             source=issue.source, severity=issue.severity.value, code=issue.code
@@ -227,16 +234,19 @@ class IncrementalFilingIngestor:
                 details = {"diagnostic_object_key": key, "extraction_revision": extraction_revision}
             engine_issues = getattr(exc, "validation_issues", ())
             await self.control.record_validation_issues(
-                (
-                    *engine_issues,
-                    ValidationIssue(
-                        source="filing",
-                        code=type(exc).__name__,
-                        severity=Severity.ERROR,
-                        accession=filing.accession,
-                        message=str(exc)[:16000],
-                        details=details,
+                group_issues(
+                    (
+                        *engine_issues,
+                        ValidationIssue(
+                            source="filing",
+                            code=type(exc).__name__,
+                            severity=Severity.ERROR,
+                            accession=filing.accession,
+                            message=str(exc)[:16000],
+                            details=details,
+                        ),
                     ),
+                    extraction_revision=extraction_revision,
                 )
             )
             raise

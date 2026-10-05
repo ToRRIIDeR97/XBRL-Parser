@@ -15,6 +15,7 @@ from sec_xbrl_warehouse.domain.xbrl import XbrlFact
 from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
     CanonicalMetricRow,
     ConceptMappingRow,
+    MappingReviewObservationRow,
     MappingReviewRow,
 )
 from sec_xbrl_warehouse.mapping.canonical_mapper import ReviewRequest
@@ -170,6 +171,7 @@ class PostgresMappingRepository:
             return _to_concept_mapping(row, metric)
 
     async def list_reviews(self, limit: int = 100, offset: int = 0) -> list[dict[str, object]]:
+        """Open reviews, one per concept, with cumulative evidence."""
         if not 1 <= limit <= 10000 or offset < 0:
             raise ValueError("Invalid review pagination")
         async with self.sessions() as session:
@@ -185,9 +187,13 @@ class PostgresMappingRepository:
             return [
                 {
                     "id": str(row.id),
-                    "accession": row.accession,
-                    "fact_id": row.fact_id,
+                    "concept_namespace": row.concept_namespace,
+                    "concept_name": row.concept_name,
                     "concept": row.concept_qname,
+                    "fact_count": row.evidence.get("fact_count"),
+                    "filing_count": row.evidence.get("filing_count"),
+                    "latest_accession": row.evidence.get("latest_accession", row.accession),
+                    "fact_id": row.fact_id,
                     "candidates": row.candidate_metric_codes,
                     "evidence": row.evidence,
                 }
@@ -228,12 +234,39 @@ class PostgresMappingRepository:
     async def create_reviews(
         self, filing: FilingRef, reviews: Sequence[ReviewRequest]
     ) -> dict[str, UUID]:
-        result: dict[str, UUID] = {}
-        for offset in range(0, len(reviews), 500):
-            rows = {
-                fact.fact_id: {
+        """Open or update one review per concept and record this filing's observation.
+
+        A concept with an open review gets its evidence replaced by this filing's
+        decision; per-filing counts live in `mapping_review_observations`, keyed
+        by accession, so replaying a filing doesn't inflate the cumulative
+        `fact_count`/`filing_count`. Returns the review ID for every request's fact.
+        """
+        merged: dict[tuple[str, str], tuple[XbrlFact, Sequence[str], dict[str, object], int]] = {}
+        samples: dict[tuple[str, str], list[str]] = {}
+        fact_concepts: dict[str, tuple[str, str]] = {}
+        for fact, candidates, evidence in reviews:
+            concept = (fact.concept_namespace, fact.concept_name)
+            fact_concepts[fact.fact_id] = concept
+            count = _evidence_count(evidence)
+            fact_samples = _evidence_samples(evidence, fact.fact_id)
+            if concept in merged:
+                first, first_candidates, first_evidence, total = merged[concept]
+                merged[concept] = (first, first_candidates, first_evidence, total + count)
+                samples[concept] = (samples[concept] + fact_samples)[:5]
+            else:
+                merged[concept] = (fact, candidates, evidence, count)
+                samples[concept] = fact_samples[:5]
+
+        review_ids: dict[tuple[str, str], UUID] = {}
+        items = list(merged.items())
+        for offset in range(0, len(items), 500):
+            chunk = items[offset : offset + 500]
+            rows = [
+                {
                     "accession": filing.accession,
                     "fact_id": fact.fact_id,
+                    "concept_namespace": concept[0],
+                    "concept_name": concept[1],
                     "concept_qname": fact.concept_qname,
                     "candidate_metric_codes": list(candidates),
                     "evidence": {
@@ -242,32 +275,96 @@ class PostgresMappingRepository:
                         "concept_name": fact.concept_name,
                         "taxonomy_version": fact.taxonomy_version,
                         "cik": filing.cik,
+                        "latest_accession": filing.accession,
+                        "sample_fact_ids": samples[concept],
                     },
                     "state": "open",
                 }
-                for fact, candidates, evidence in reviews[offset : offset + 500]
-            }
+                for concept, (fact, candidates, evidence, _) in chunk
+            ]
             async with self.sessions.begin() as session:
-                inserted = await session.execute(
-                    pg_insert(MappingReviewRow)
-                    .values(list(rows.values()))
-                    .on_conflict_do_nothing(constraint="uq_mapping_review_fact")
-                    .returning(MappingReviewRow.fact_id, MappingReviewRow.id)
-                )
-                found = {fact_id: review_id for fact_id, review_id in inserted.all()}
-                missing = rows.keys() - found.keys()
-                if missing:
-                    existing = await session.execute(
-                        select(MappingReviewRow.fact_id, MappingReviewRow.id).where(
-                            MappingReviewRow.accession == filing.accession,
-                            MappingReviewRow.fact_id.in_(missing),
-                        )
+                statement = pg_insert(MappingReviewRow).values(rows)
+                upserted = await session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[
+                            MappingReviewRow.concept_namespace,
+                            MappingReviewRow.concept_name,
+                        ],
+                        index_where=MappingReviewRow.state == "open",
+                        set_={
+                            "accession": statement.excluded.accession,
+                            "fact_id": statement.excluded.fact_id,
+                            "concept_qname": statement.excluded.concept_qname,
+                            "candidate_metric_codes": statement.excluded.candidate_metric_codes,
+                            "evidence": statement.excluded.evidence,
+                        },
+                    ).returning(
+                        MappingReviewRow.concept_namespace,
+                        MappingReviewRow.concept_name,
+                        MappingReviewRow.id,
                     )
-                    found.update({fact_id: review_id for fact_id, review_id in existing.all()})
-                if found.keys() != rows.keys():
+                )
+                found = {(namespace, name): rid for namespace, name, rid in upserted.all()}
+                if found.keys() != {concept for concept, _ in chunk}:
                     raise RuntimeError("PostgreSQL did not return all review IDs")
-                result.update(found)
-        return result
+                observation = pg_insert(MappingReviewObservationRow).values(
+                    [
+                        {
+                            "review_id": found[concept],
+                            "accession": filing.accession,
+                            "fact_count": count,
+                            "sample_fact_ids": samples[concept],
+                        }
+                        for concept, (_, _, _, count) in chunk
+                    ]
+                )
+                await session.execute(
+                    observation.on_conflict_do_update(
+                        index_elements=[
+                            MappingReviewObservationRow.review_id,
+                            MappingReviewObservationRow.accession,
+                        ],
+                        set_={
+                            "fact_count": observation.excluded.fact_count,
+                            "sample_fact_ids": observation.excluded.sample_fact_ids,
+                            "observed_at": func.now(),
+                        },
+                    )
+                )
+                await session.execute(
+                    text(
+                        """
+                        UPDATE mapping_reviews AS review
+                        SET evidence = review.evidence || jsonb_build_object(
+                            'fact_count', totals.fact_count,
+                            'filing_count', totals.filing_count
+                        )
+                        FROM (
+                            SELECT review_id, sum(fact_count) AS fact_count,
+                                   count(*) AS filing_count
+                            FROM mapping_review_observations
+                            WHERE review_id = ANY(:ids)
+                            GROUP BY review_id
+                        ) AS totals
+                        WHERE review.id = totals.review_id
+                        """
+                    ),
+                    {"ids": list(found.values())},
+                )
+                review_ids.update(found)
+        return {fact_id: review_ids[concept] for fact_id, concept in fact_concepts.items()}
+
+
+def _evidence_count(evidence: dict[str, object]) -> int:
+    value = evidence.get("fact_count", 1)
+    return value if isinstance(value, int) and value > 0 else 1
+
+
+def _evidence_samples(evidence: dict[str, object], fact_id: str) -> list[str]:
+    value = evidence.get("sample_fact_ids")
+    if isinstance(value, list) and value:
+        return [str(item) for item in value]
+    return [fact_id]
 
 
 def _to_concept_mapping(row: ConceptMappingRow, metric_code: str) -> ConceptMapping:

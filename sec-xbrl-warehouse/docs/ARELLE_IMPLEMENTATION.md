@@ -25,7 +25,7 @@ numeric facts. `_create_controller` always loads the in-repo plugin
 `XbrlExtractionError` if the plugin can't be loaded or any of its transforms is
 missing afterward.
 
-- Registered transforms: `boolballotbox`, `boolfalse`, `booltrue`, `countrynameen`,
+- Registered transforms: `boolballotbox`, `yesnoballotbox`, `countrynameen`,
   `stateprovnameen`, `edgarprovcountryen`, `exchnameen`, `entityfilercategoryen`,
   `numwordsen`, `numinf`, `numneginf`, `numnan`, `duryear`, `durmonth`, `durweek`,
   `durday`, `durhour`, `durwordsen`, `datequarterend`.
@@ -36,8 +36,14 @@ missing afterward.
   is reported as `invalidTransformation`.
 - The fact keeps its displayed text in `raw_value`. Its typed value is `None`; the
   `(ixTransformValueError)` sentinel is never stored.
-- `edgarprovcountryen` covers US states, Canadian provinces, and a reviewed subset of
-  EDGAR country codes. Other names fail with a diagnostic rather than a guessed code.
+- The name tables (states and provinces, countries, EDGAR location codes, exchanges)
+  are data checked against the SEC staff reference plugin, the dei 2024/2025 code
+  lists, and the SEC "EDGAR State and Country Codes" list. A displayed name matches
+  only as a whole, ignoring case, accents, and punctuation. `edgarprovcountryen`
+  covers Canadian provinces, US territories, and countries, not US states, so
+  "Georgia" is the country (`2Q`). `entityfilercategoryen` accepts only the three
+  accelerated-filer categories in dei 2024 and later. `booltrue` and `boolfalse`
+  aren't SEC transforms and are reported as `invalidTransformation`.
 - `metadata.provenance["transform_registries"]` lists every available registry as
   `{"namespace", "version", "source"}`: the standard `ixt` registries from
   `arelle-release` and the `ixt-sec` plugin version.

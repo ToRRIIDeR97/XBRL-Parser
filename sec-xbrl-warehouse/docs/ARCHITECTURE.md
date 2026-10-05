@@ -4,50 +4,30 @@
 
 Build a replayable warehouse that captures both the SEC's historical flattened XBRL data and the full semantics of newly filed XBRL/iXBRL documents.
 
-## System boundaries
+## System overview
 
-```text
-                         SEC public data
-           ┌──────────────────┴──────────────────┐
-           │                                     │
-   FSNDS bulk ZIPs                       EDGAR indexes/APIs
-   SUB/TAG/DIM/...                       filing packages
-           │                                     │
-           ▼                                     ▼
-   Bulk catalog/download                 Filing discovery/download
-           │                                     │
-           └──────────────┬──────────────────────┘
-                          ▼
-                  Immutable bronze storage
-                  ZIPs, package files, manifests
-                          │
-             ┌────────────┴────────────┐
-             │                         │
-             ▼                         ▼
-      Streaming TSV parser       Arelle XBRL adapter
-             │                         │
-             └────────────┬────────────┘
-                          ▼
-                    Typed domain records
-                          │
-             ┌────────────┴────────────┐
-             │                         │
-             ▼                         ▼
-     Silver Parquet archive      ClickHouse raw warehouse
-             │                         │
-             └────────────┬────────────┘
-                          ▼
-               Mapping and normalization layer
-                          │
-                          ▼
-                Canonical ClickHouse facts
-                          │
-                          ▼
-                     Query service/API
+This file is the master architecture document. It holds the UML views listed under
+[UML views](#uml-views) and the [coverage index](#coverage-index). The diagram below is
+the component view; the other views follow the prose sections.
 
-PostgreSQL is the control plane throughout: artifacts, filings, jobs, runs,
-validation issues, mapping versions, review state, and lineage metadata.
-```
+![UML component view: CLI and worker dispatch bulk, filing, and mapping components, which use the SEC client, Arelle, and validation and write PostgreSQL, MinIO/S3, and ClickHouse; the query API reads ClickHouse](diagrams/component-overview.svg)
+
+| Component | Responsibility | Source |
+| --- | --- | --- |
+| CLI | Operator commands: migrations, catalog sync, backfill planning, filing enqueue and discovery, mapping review, taxonomy sync, job recovery. Writes jobs to PostgreSQL; never runs pipeline stages itself, except the SEC catalog and taxonomy syncs. | `cli.py` |
+| Worker | Claims jobs with `FOR UPDATE SKIP LOCKED`, heartbeats leases, dispatches one handler per `JobType`, classifies failures as retry or dead. | `worker.py` |
+| SEC HTTP client | User agent, rate limit, retries with jitter, `Retry-After`, and the PostgreSQL advisory lock `SecEgressLock`, so only one process sends SEC traffic. | `infrastructure/http/` |
+| Bulk backfill | FSNDS catalog, ZIP download to bronze, streaming TSV to Parquet and ClickHouse, reconciliation. | `ingestion/bulk_*.py`, `ingestion/orchestrator.py`, `ingestion/sec_tsv.py` |
+| Filing ingestion | Discovery from daily indexes or submissions JSON, package download (`fetch_filing`), and extraction through publish (`parse_filing`). | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
+| Arelle adapter | Runs Arelle in a child process against pinned taxonomy packages and returns an `XbrlExtractionBundle`. | `infrastructure/xbrl/` |
+| Validation | XBRL issues, filing reconciliation, data quality, schema drift, issue grouping. | `validation/` |
+| Canonical mapping | Applies approved concept mappings to raw facts, remaps published extractions, rebuilds `metric_series`. | `mapping/`, `query/series.py`, `normalization/series.py` |
+| Query API | FastAPI app with bearer auth and a concurrency limit; `QueryService` runs scan-bounded, budgeted SELECTs as the `xbrl_api` reader. | `api/`, `query/service.py` |
+
+Key flows: filings move `discover_filings` → `fetch_filing` → `parse_filing` (see the
+[filing activity](#activity-views) and [sequence](#sequence-views)); bulk periods move
+`download_bulk` → `load_bulk`. PostgreSQL is the control plane throughout. The
+architectural invariants are the hard constraints in [`../AGENTS.md`](../AGENTS.md).
 
 ## Why two ingestion paths
 
@@ -189,6 +169,99 @@ This keeps the local deployment small and avoids Redis/Kafka until throughput ev
 - **Parser failure:** retain package, Arelle logs, software versions, and traceback.
 - **Partial Parquet/ClickHouse write:** stage under a run/revision ID, reconcile, then promote state.
 - **Mapping ambiguity:** leave raw fact unmapped and create a review candidate.
+
+## UML views
+
+Views follow UML 2.5.1 notation in a fixed order. Each SVG lives in
+[`diagrams/`](diagrams/) and is plain, script-free SVG; edit it with any SVG or text
+editor and keep node names consistent across views.
+
+| Family | View | Diagram |
+| --- | --- | --- |
+| Structural | Component | [System overview](#system-overview) |
+| Structural | Deployment | [Docker Compose topology](#deployment-view) |
+| Structural | Class | [Core domain types](#class-view) |
+| Behavioral | Activity | [Filing ingestion, bulk backfill, recovery](#activity-views) |
+| Behavioral | State machine | [Job and bulk artifact lifecycles](#state-machine-views) |
+| Interaction | Sequence | [Filing pipeline, API query](#sequence-views) |
+
+### Deployment view
+
+The local and single-host topology from `docker-compose.yml`. Production additions are
+listed in [DEPLOYMENT.md](DEPLOYMENT.md).
+
+![UML deployment view: worker, worker-parse, and api containers reach postgres, minio, and clickhouse over the default Compose network; prometheus and grafana in the monitoring profile; SEC and taxonomy hosts outside the host](diagrams/deployment-compose.svg)
+
+### Class view
+
+Core Pydantic types from `domain/`. Persisted columns are in [DATA_MODEL.md](DATA_MODEL.md).
+
+![UML class view: FilingRef, FilingPackageManifest, PackageMember, XbrlExtractionBundle and its parts, XbrlFact, CanonicalFact, ConceptMapping, CanonicalMetric, ValidationIssue, SourceArtifactRef, DatasetArtifact, and JobRecord](diagrams/class-domain.svg)
+
+### Activity views
+
+Filing discovery, fetch, and parse:
+
+![UML activity view with three swimlanes: operator enqueues discovery or a filing; SEC-active worker discovers and fetches packages; parse worker extracts, validates, writes silver and ClickHouse, maps, publishes, and rebuilds series](diagrams/activity-filing.svg)
+
+Bulk FSNDS backfill:
+
+![UML activity view: catalog sync, backfill plan and enqueue, download_bulk acquisition, load_bulk validation, loading, reconciliation, and the quarantine or failure exits](diagrams/activity-bulk.svg)
+
+The recovery activity (failed jobs and restore drills) lives with its procedures in
+[OPERATIONS.md](OPERATIONS.md#recovery).
+
+### State machine views
+
+![UML state machine for JobState: pending, running, retry, complete, dead, with claim, complete_job, fail_job, egress deferral, and operator retry transitions](diagrams/state-job.svg)
+
+![UML state machine for ArtifactState: discovered through reconciling inside an in-progress composite, then complete, failed, or quarantined, with retry and re-validate transitions](diagrams/state-artifact.svg)
+
+### Sequence views
+
+![UML sequence view: discover_filings, fetch_filing, and parse_filing messages between the CLI, PostgreSQL, SecEgressLock, workers, SEC EDGAR, MinIO, Arelle, and ClickHouse, with egress-busy and rejected-extraction alternatives](diagrams/sequence-filing.svg)
+
+![UML sequence view of GET /v1/facts: bearer check, concurrency limit, FactQuery validation, budgeted ClickHouse query, and the 401, 503, 422, and 200 replies](diagrams/sequence-api-query.svg)
+
+## Coverage index
+
+Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level folder.
+
+| Subsystem, store, integration, or workflow | Views | Source |
+| --- | --- | --- |
+| CLI | Component; filing and bulk activity | `cli.py` |
+| Worker and job queue | Component; job state machine; filing sequence; recovery activity | `worker.py`; `infrastructure/storage/postgres.py` (`claim_job`, `complete_job`, `fail_job`, `retry_job`) |
+| SEC HTTP client and egress lock | Component; filing sequence; trust boundaries | `infrastructure/http/sec_client.py`, `egress_lock.py`, `rate_limiter.py` |
+| Bulk backfill | Component; bulk activity; artifact state machine | `ingestion/bulk_catalog.py`, `bulk_downloader.py`, `bulk_loader.py`, `orchestrator.py`, `sec_tsv.py` |
+| Filing ingestion | Component; filing activity; filing sequence | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
+| Arelle and taxonomy packages | Component; filing activity and sequence; trust boundaries | `infrastructure/xbrl/arelle_adapter.py`, `taxonomy_packages.py`, `sec_transforms.py`; `config/taxonomy_packages.yml` |
+| Validation | Component; filing and bulk activity | `validation/` |
+| Statements, disclosures, fiscal fields | Class (bundle); filing activity (publish step) | `normalization/statements.py`, `disclosures.py`, `fiscal_focus.py`; `ClickHouseWarehouse.insert_xbrl_bundle` |
+| Canonical mapping and series | Component; class; filing activity and sequence | `mapping/`, `query/series.py`, `normalization/series.py`; `config/canonical_metrics.yml`, `concept_seed.yml` |
+| Query API | Component; API sequence; deployment; trust boundaries | `api/`, `query/service.py` |
+| PostgreSQL | Component; deployment; job and artifact state machines | `infrastructure/storage/postgres.py`, `postgres_models.py`; `migrations/` |
+| MinIO / S3 | Component; deployment; filing and bulk activity | `infrastructure/storage/object_store.py`, `parquet.py`, `extraction_io.py` |
+| ClickHouse | Component; deployment; filing and API sequences | `infrastructure/storage/clickhouse.py`; `sql/clickhouse/`; `docker/clickhouse/` |
+| SEC EDGAR (external) | Component; deployment; filing sequence; trust boundaries | `config/sources.yml` |
+| Taxonomy hosts (external) | Component; deployment; trust boundaries | `config/taxonomy_packages.yml` |
+| Prometheus and Grafana | Component; deployment | `observability/metrics.py`; `ops/` |
+| Workflow: filing ingest | Filing activity; filing sequence | as above |
+| Workflow: bulk backfill | Bulk activity; artifact state machine | as above |
+| Workflow: API query | API sequence | `api/routers/` |
+| Workflow: failed job and restore | Job state machine; [recovery activity](OPERATIONS.md#recovery) | `worker.is_retryable_exception`; BACKUP_RESTORE.md |
+| Workflow: development and merge | [Development workflow](../../AGENTS.md#development-workflow) | root `AGENTS.md` |
+
+### Unresolved boundaries
+
+These were found while mapping the code and are labelled in the diagrams:
+
+- `reconcile_artifact` and `reconcile_filing` have worker handlers, but nothing in
+  `src/` enqueues them. Reconciliation runs inline in `load_artifact` and `parse`.
+- `JobState.failed` and `JobState.cancelled` are never assigned.
+  `ArtifactState.discovered` and `downloading` are allowed but unused, because the bulk
+  downloader stores the ZIP before it creates the artifact row.
+- No CLI command rebuilds ClickHouse from silver Parquet. The recovery docs describe it
+  as the intent.
 
 ## Security
 

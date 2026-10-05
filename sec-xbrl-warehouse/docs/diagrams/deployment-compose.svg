@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1300 760" width="1300" height="760" role="img" aria-labelledby="t d">
+<title id="t">UML deployment view: Docker Compose topology</title>
+<desc id="d">Docker Compose services on one host: application containers built from the warehouse image, pinned storage and monitoring images, their volumes and loopback ports, and external SEC hosts.</desc>
+<defs>
+<marker id="open" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11" fill="none" stroke="#3d444d" stroke-width="1.4"/></marker>
+<marker id="filled" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11 Z" fill="#3d444d"/></marker>
+<marker id="diamond" viewBox="0 0 16 10" refX="1" refY="5" markerWidth="16" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,5 L8,1 L15,5 L8,9 Z" fill="#3d444d"/></marker>
+</defs>
+<style>
+text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #1f2328; }
+.m { fill: #57606a; }
+.halo { paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+</style>
+<rect width="1300" height="760" fill="#ffffff"/>
+<text x="20" y="30" font-size="17" text-anchor="start" font-weight="600">Deployment view · Docker Compose (docker-compose.yml)</text>
+<text x="20" y="50" font-size="11.5" text-anchor="start" class="m">Solid lines are communication paths. Bracketed names are Compose profiles; services without one start by default.</text>
+<path d="M240,90 L254,76 L1074,76 L1074,716 L1060,730 L1060,90 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M1060,90 L1074,76" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="240" y="90" width="820" height="640" rx="0" fill="#fbfcfd" stroke="#3d444d" stroke-width="1.2"/>
+<text x="650.0" y="107" font-size="10.5" text-anchor="middle" class="m">«device»</text>
+<text x="650.0" y="123" font-size="13" text-anchor="middle" font-weight="600">Docker host</text>
+<path d="M270,160 L280,150 L520,150 L520,278 L510,288 L510,160 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M510,160 L520,150" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="270" y="160" width="240" height="128" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>
+<text x="390.0" y="177" font-size="10.5" text-anchor="middle" class="m">«container»</text>
+<text x="390.0" y="193" font-size="13" text-anchor="middle" font-weight="600">worker  [application]</text>
+<text x="390.0" y="209" font-size="11" text-anchor="middle" class="m">artifact: sec-xbrl-warehouse image</text>
+<text x="390.0" y="223" font-size="11" text-anchor="middle" class="m">cmd: worker run</text>
+<text x="390.0" y="237" font-size="11" text-anchor="middle" class="m">env_file .env (writer creds)</text>
+<text x="390.0" y="251" font-size="11" text-anchor="middle" class="m">volume app_data:/app/data</text>
+<text x="390.0" y="265" font-size="11" text-anchor="middle" class="m">SEC-active (fetch, discover, bulk)</text>
+<path d="M540,160 L550,150 L790,150 L790,278 L780,288 L780,160 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M780,160 L790,150" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="540" y="160" width="240" height="128" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>
+<text x="660.0" y="177" font-size="10.5" text-anchor="middle" class="m">«container»</text>
+<text x="660.0" y="193" font-size="13" text-anchor="middle" font-weight="600">worker-parse  [parse]</text>
+<text x="660.0" y="209" font-size="11" text-anchor="middle" class="m">artifact: sec-xbrl-warehouse image</text>
+<text x="660.0" y="223" font-size="11" text-anchor="middle" class="m">cmd: worker run --job-type</text>
+<text x="660.0" y="237" font-size="11" text-anchor="middle" class="m">parse_filing; offline Arelle</text>
+<text x="660.0" y="251" font-size="11" text-anchor="middle" class="m">volume app_data, mem 8g</text>
+<path d="M810,160 L820,150 L1050,150 L1050,278 L1040,288 L1040,160 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M1040,160 L1050,150" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="810" y="160" width="230" height="128" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>
+<text x="925.0" y="177" font-size="10.5" text-anchor="middle" class="m">«container»</text>
+<text x="925.0" y="193" font-size="13" text-anchor="middle" font-weight="600">api  [application]</text>
+<text x="925.0" y="209" font-size="11" text-anchor="middle" class="m">artifact: sec-xbrl-warehouse image</text>
+<text x="925.0" y="223" font-size="11" text-anchor="middle" class="m">cmd: api serve, :8080</text>
+<text x="925.0" y="237" font-size="11" text-anchor="middle" class="m">reader DSNs only; no .env,</text>
+<text x="925.0" y="251" font-size="11" text-anchor="middle" class="m">no app_data volume</text>
+<path d="M270,400 L280,390 L520,390 L520,500 L510,510 L510,400 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M510,400 L520,390" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="270" y="400" width="240" height="110" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>
+<text x="390.0" y="417" font-size="10.5" text-anchor="middle" class="m">«container»</text>
+<text x="390.0" y="433" font-size="13" text-anchor="middle" font-weight="600">postgres</text>
+<text x="390.0" y="449" font-size="11" text-anchor="middle" class="m">pinned digest</text>
+<text x="390.0" y="463" font-size="11" text-anchor="middle" class="m">volume postgres_data</text>
+<text x="390.0" y="477" font-size="11" text-anchor="middle" class="m">127.0.0.1:5432</text>
+<path d="M540,400 L550,390 L790,390 L790,500 L780,510 L780,400 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M780,400 L790,390" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="540" y="400" width="240" height="110" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>
+<text x="660.0" y="417" font-size="10.5" text-anchor="middle" class="m">«container»</text>
+<text x="660.0" y="433" font-size="13" text-anchor="middle" font-weight="600">minio + minio-init</text>
+<text x="660.0" y="449" font-size="11" text-anchor="middle" class="m">volume minio_data</text>
+<text x="660.0" y="463" font-size="11" text-anchor="middle" class="m">127.0.0.1:9002 (API), :9003</text>
+<text x="660.0" y="477" font-size="11" text-anchor="middle" class="m">init: bucket, no anonymous</text>
+<path d="M810,400 L820,390 L1050,390 L1050,500 L1040,510 L1040,400 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M1040,400 L1050,390" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="810" y="400" width="230" height="110" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>
+<text x="925.0" y="417" font-size="10.5" text-anchor="middle" class="m">«container»</text>
+<text x="925.0" y="433" font-size="13" text-anchor="middle" font-weight="600">clickhouse</text>
+<text x="925.0" y="449" font-size="11" text-anchor="middle" class="m">volumes clickhouse_data, _logs</text>
+<text x="925.0" y="463" font-size="11" text-anchor="middle" class="m">127.0.0.1:8123, :9000</text>
+<text x="925.0" y="477" font-size="11" text-anchor="middle" class="m">config.d/xbrl-memory.xml</text>
+<path d="M270,600 L280,590 L520,590 L520,690 L510,700 L510,600 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M510,600 L520,590" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="270" y="600" width="240" height="100" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>
+<text x="390.0" y="617" font-size="10.5" text-anchor="middle" class="m">«container»</text>
+<text x="390.0" y="633" font-size="13" text-anchor="middle" font-weight="600">prometheus  [monitoring]</text>
+<text x="390.0" y="649" font-size="11" text-anchor="middle" class="m">ops/prometheus.yml, alerts.yml</text>
+<text x="390.0" y="663" font-size="11" text-anchor="middle" class="m">127.0.0.1:9090</text>
+<path d="M540,600 L550,590 L790,590 L790,690 L780,700 L780,600 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M780,600 L790,590" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="540" y="600" width="240" height="100" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>
+<text x="660.0" y="617" font-size="10.5" text-anchor="middle" class="m">«container»</text>
+<text x="660.0" y="633" font-size="13" text-anchor="middle" font-weight="600">grafana  [monitoring]</text>
+<text x="660.0" y="649" font-size="11" text-anchor="middle" class="m">xbrl-warehouse dashboard</text>
+<text x="660.0" y="663" font-size="11" text-anchor="middle" class="m">127.0.0.1:3000</text>
+<path d="M810,590 L1028,590 L1040,602 L1040,708 L810,708 Z" fill="#fffbe6" stroke="#3d444d" stroke-width="1.1"/>
+<path d="M1028,590 L1028,602 L1040,602" fill="none" stroke="#3d444d" stroke-width="1.1"/>
+<text x="820" y="608" font-size="10.5" text-anchor="start">api, worker, worker-parse: UID</text>
+<text x="820" y="622.5" font-size="10.5" text-anchor="start">10001, cap_drop ALL,</text>
+<text x="820" y="637.0" font-size="10.5" text-anchor="start">no-new-privileges. The api and</text>
+<text x="820" y="651.5" font-size="10.5" text-anchor="start">worker services are in both the</text>
+<text x="820" y="666.0" font-size="10.5" text-anchor="start">application and monitoring</text>
+<text x="820" y="680.5" font-size="10.5" text-anchor="start">profiles.</text>
+<path d="M20,160 L30,150 L210,150 L210,230 L200,240 L200,160 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M200,160 L210,150" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="20" y="160" width="180" height="80" rx="0" fill="#f0f0f0" stroke="#3d444d" stroke-width="1.2"/>
+<text x="110.0" y="177" font-size="10.5" text-anchor="middle" class="m">«external»</text>
+<text x="110.0" y="193" font-size="13" text-anchor="middle" font-weight="600">SEC EDGAR</text>
+<text x="110.0" y="209" font-size="11" text-anchor="middle" class="m">www.sec.gov, data.sec.gov</text>
+<path d="M20,270 L30,260 L210,260 L210,340 L200,350 L200,270 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M200,270 L210,260" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="20" y="270" width="180" height="80" rx="0" fill="#f0f0f0" stroke="#3d444d" stroke-width="1.2"/>
+<text x="110.0" y="287" font-size="10.5" text-anchor="middle" class="m">«external»</text>
+<text x="110.0" y="303" font-size="13" text-anchor="middle" font-weight="600">Taxonomy hosts</text>
+<text x="110.0" y="319" font-size="11" text-anchor="middle" class="m">xbrl.fasb.org, xbrl.sec.gov</text>
+<path d="M20,470 L30,460 L210,460 L210,556 L200,566 L200,470 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M200,470 L210,460" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="20" y="470" width="180" height="96" rx="0" fill="#f0f0f0" stroke="#3d444d" stroke-width="1.2"/>
+<text x="110.0" y="487" font-size="10.5" text-anchor="middle" class="m">«device»</text>
+<text x="110.0" y="503" font-size="13" text-anchor="middle" font-weight="600">Operator shell</text>
+<text x="110.0" y="519" font-size="11" text-anchor="middle" class="m">docker compose run --rm</text>
+<text x="110.0" y="533" font-size="11" text-anchor="middle" class="m">worker &lt;command&gt;</text>
+<path d="M1110,160 L1120,150 L1290,150 L1290,230 L1280,240 L1280,160 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
+<path d="M1280,160 L1290,150" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="1110" y="160" width="170" height="80" rx="0" fill="#f0f0f0" stroke="#3d444d" stroke-width="1.2"/>
+<text x="1195.0" y="177" font-size="10.5" text-anchor="middle" class="m">«device»</text>
+<text x="1195.0" y="193" font-size="13" text-anchor="middle" font-weight="600">API client</text>
+<text x="1195.0" y="209" font-size="11" text-anchor="middle" class="m">127.0.0.1:8080</text>
+<path d="M200,200 L270,200" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="235" y="193" font-size="11" text-anchor="middle" class="halo">HTTPS</text>
+<path d="M200,310 L270,232" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="226" y="256" font-size="11" text-anchor="middle" class="halo">HTTPS 443</text>
+<path d="M200,518 L252,518 L252,278 L270,278" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="258" y="470" font-size="11" text-anchor="start" class="halo">compose run</text>
+<path d="M1110,200 L1040,200" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="1075" y="193" font-size="11" text-anchor="middle" class="halo">HTTP</text>
+<rect x="270" y="332" width="770" height="34" rx="0" fill="#eef1f4" stroke="#3d444d" stroke-width="1.2"/>
+<text x="655" y="354" font-size="11.5" text-anchor="middle" font-weight="600">«network» default Compose network (service DNS names)</text>
+<path d="M390,288 L390,332" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="396" y="314" font-size="11" text-anchor="start" class="halo">writer DSNs</text>
+<path d="M660,288 L660,332" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="666" y="314" font-size="11" text-anchor="start" class="halo">writer DSNs</text>
+<path d="M925,288 L925,332" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="931" y="314" font-size="11" text-anchor="start" class="halo">xbrl_api readers</text>
+<path d="M390,366 L390,400" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<path d="M660,366 L660,400" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<path d="M925,366 L925,400" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<path d="M510,650 L540,650" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<path d="M510,616 L525,616 L525,366" fill="none" stroke="#3d444d" stroke-width="1.3"/>
+<text x="519" y="560" font-size="11" text-anchor="end" class="halo">scrape :9091, /metrics</text>
+</svg>

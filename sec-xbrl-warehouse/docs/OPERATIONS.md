@@ -10,6 +10,8 @@
 6. worker
 7. API
 
+![UML deployment view of the Compose services: worker, worker-parse, and api containers reach postgres, minio, and clickhouse over the default network; prometheus and grafana in the monitoring profile](diagrams/deployment-compose.svg)
+
 ## Routine checks
 
 - `/health/ready` is green.
@@ -196,6 +198,13 @@ keys locally, one per line. Deleting them is a separate, operator-approved reten
 decision. Completed jobs and `mapping remap` read the checkpoint key their job
 recorded, so before deleting a JSON checkpoint confirm that the latest completed job
 for that accession and revision points at the `.json.zst` key (re-ingest otherwise).
+
+## Recovery
+
+Failed jobs recover through the queue (see [Job queue](#job-queue)); lost or corrupt
+stores recover through an isolated restore (see [BACKUP_RESTORE.md](BACKUP_RESTORE.md)).
+
+![UML activity view of recovery: a failed job is deferred, retried with backoff, or dead-lettered for operator review and jobs retry; a restore drill rebuilds into new databases and bucket, verifies checksums, and reconciles before reclaiming stale jobs](diagrams/activity-recovery.svg)
 
 ## Safe pause
 

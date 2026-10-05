@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" role="img" aria-labelledby="t d">
+<title id="t">UML activity view: recovery procedures</title>
+<desc id="d">Two recovery activities: a failed queue job (deferral, retry with backoff, dead-lettering, operator retry) and a restore drill into isolated databases and bucket.</desc>
+<defs>
+<marker id="open" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11" fill="none" stroke="#3d444d" stroke-width="1.4"/></marker>
+<marker id="filled" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,1 L11,6 L1,11 Z" fill="#3d444d"/></marker>
+<marker id="diamond" viewBox="0 0 16 10" refX="1" refY="5" markerWidth="16" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1,5 L8,1 L15,5 L8,9 Z" fill="#3d444d"/></marker>
+</defs>
+<style>
+text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #1f2328; }
+.m { fill: #57606a; }
+.halo { paint-order: stroke; stroke: #ffffff; stroke-width: 4px; stroke-linejoin: round; }
+</style>
+<rect width="1200" height="800" fill="#ffffff"/>
+<text x="20" y="30" font-size="17" text-anchor="start" font-weight="600">Activity view · recovery</text>
+<text x="20" y="50" font-size="11.5" text-anchor="start" class="m">Sources: OPERATIONS.md (Job queue, Safe pause), BACKUP_RESTORE.md, worker.is_retryable_exception.</text>
+<rect x="20" y="70" width="560" height="700" rx="0" fill="#fafbfc" stroke="#3d444d" stroke-width="1"/>
+<rect x="20" y="70" width="560" height="30" rx="0" fill="#eef1f4" stroke="#3d444d" stroke-width="1"/>
+<text x="300.0" y="90" font-size="12.5" text-anchor="middle" font-weight="600">Failed job (worker + operator)</text>
+<rect x="600" y="70" width="580" height="700" rx="0" fill="#fafbfc" stroke="#3d444d" stroke-width="1"/>
+<rect x="600" y="70" width="580" height="30" rx="0" fill="#eef1f4" stroke="#3d444d" stroke-width="1"/>
+<text x="890.0" y="90" font-size="12.5" text-anchor="middle" font-weight="600">Restore drill (operator)</text>
+<circle cx="300" cy="118" r="8" fill="#3d444d"/>
+<rect x="180" y="140" width="240" height="44" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="300.0" y="166.025" font-size="11.5" text-anchor="middle">Handler raises an exception</text>
+<path d="M300,126 L300,140" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M300,210 L316,226 L300,242 L284,226 Z" fill="#ffffff" stroke="#3d444d" stroke-width="1.3"/>
+<text x="278" y="230" font-size="11" text-anchor="end" font-style="italic" class="m">egress busy?</text>
+<path d="M300,184 L300,210" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="380" y="195" width="190" height="62" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="475.0" y="215.525" font-size="11.5" text-anchor="middle">defer: retry later,</text>
+<text x="475.0" y="230.025" font-size="11.5" text-anchor="middle">attempt not counted;</text>
+<text x="475.0" y="244.525" font-size="11.5" text-anchor="middle">dead after max_defer</text>
+<path d="M316,226 L380,226" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="326" y="220" font-size="11" text-anchor="start" font-style="italic" class="m">[yes]</text>
+<circle cx="475" cy="286" r="9" fill="#ffffff" stroke="#3d444d" stroke-width="1.4"/>
+<path d="M468.7,279.7 L481.3,292.3 M481.3,279.7 L468.7,292.3" stroke="#3d444d" stroke-width="1.4"/>
+<path d="M475,257 L475,277" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M300,324 L316,340 L300,356 L284,340 Z" fill="#ffffff" stroke="#3d444d" stroke-width="1.3"/>
+<text x="278" y="344" font-size="11" text-anchor="end" font-style="italic" class="m">retryable ∧ attempts &lt; max?</text>
+<path d="M300,242 L300,324" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="306" y="290" font-size="11" text-anchor="start" font-style="italic" class="m">[no]</text>
+<rect x="380" y="310" width="190" height="62" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="475.0" y="330.525" font-size="11.5" text-anchor="middle">retry: available_at = now</text>
+<text x="475.0" y="345.025" font-size="11.5" text-anchor="middle">+ 2^n s with jitter</text>
+<text x="475.0" y="359.525" font-size="11.5" text-anchor="middle">(≤ 1 h); reclaimed later</text>
+<path d="M316,340 L380,340" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="326" y="334" font-size="11" text-anchor="start" font-style="italic" class="m">[yes]</text>
+<circle cx="475" cy="400" r="9" fill="#ffffff" stroke="#3d444d" stroke-width="1.4"/>
+<path d="M468.7,393.7 L481.3,406.3 M481.3,393.7 L468.7,406.3" stroke="#3d444d" stroke-width="1.4"/>
+<path d="M475,372 L475,391" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="170" y="420" width="260" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="300.0" y="441.775" font-size="11.5" text-anchor="middle">dead; xbrl_job_dead_letters_total</text>
+<text x="300.0" y="456.275" font-size="11.5" text-anchor="middle">fires an alert (ops/alerts.yml)</text>
+<path d="M300,356 L300,420" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="170" y="500" width="260" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="300.0" y="521.775" font-size="11.5" text-anchor="middle">jobs list --state dead; read</text>
+<text x="300.0" y="536.275" font-size="11.5" text-anchor="middle">last_error and quarantine diagnostic</text>
+<path d="M300,470 L300,500" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="170" y="580" width="260" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="300.0" y="601.775" font-size="11.5" text-anchor="middle">fix the cause (config, taxonomy,</text>
+<text x="300.0" y="616.275" font-size="11.5" text-anchor="middle">code + extraction revision)</text>
+<path d="M300,550 L300,580" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="170" y="660" width="260" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="300.0" y="681.775" font-size="11.5" text-anchor="middle">jobs retry &lt;id&gt;: dead → retry,</text>
+<text x="300.0" y="696.275" font-size="11.5" text-anchor="middle">attempts reset, claimable now</text>
+<path d="M300,630 L300,660" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="306" y="400" font-size="11" text-anchor="start" font-style="italic" class="m">[no]</text>
+<circle cx="300" cy="745" r="11" fill="#ffffff" stroke="#3d444d" stroke-width="1.4"/>
+<circle cx="300" cy="745" r="6.5" fill="#3d444d"/>
+<path d="M300,710 L300,734" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<circle cx="890" cy="118" r="8" fill="#3d444d"/>
+<rect x="740" y="140" width="300" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="890.0" y="161.775" font-size="11.5" text-anchor="middle">create new, empty PostgreSQL, ClickHouse</text>
+<text x="890.0" y="176.275" font-size="11.5" text-anchor="middle">databases and bucket (never live names)</text>
+<path d="M890,126 L890,140" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="740" y="215" width="300" height="44" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="890.0" y="241.025" font-size="11.5" text-anchor="middle">verify backup manifest and object checksums</text>
+<path d="M890,190 L890,215" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="740" y="284" width="300" height="44" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="890.0" y="310.025" font-size="11.5" text-anchor="middle">restore pg_dump and object store</text>
+<path d="M890,259 L890,284" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="740" y="353" width="300" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="890.0" y="374.775" font-size="11.5" text-anchor="middle">deploy recorded code + dependencies;</text>
+<text x="890.0" y="389.275" font-size="11.5" text-anchor="middle">migrate only to recorded revisions</text>
+<path d="M890,328 L890,353" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M890,434 L906,450 L890,466 L874,450 Z" fill="#ffffff" stroke="#3d444d" stroke-width="1.3"/>
+<text x="900" y="428" font-size="11" text-anchor="start" font-style="italic" class="m">ClickHouse snapshot?</text>
+<path d="M890,403 L890,434" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="640" y="480" width="140" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="710.0" y="501.775" font-size="11.5" text-anchor="middle">restore ClickHouse</text>
+<text x="710.0" y="516.275" font-size="11.5" text-anchor="middle">snapshot</text>
+<path d="M874,450 L710,450 L710,480" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="800" y="444" font-size="11" text-anchor="middle" font-style="italic" class="m">[yes]</text>
+<rect x="1000" y="480" width="165" height="62" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="1082.5" y="500.525" font-size="11.5" text-anchor="middle">init-clickhouse, then</text>
+<text x="1082.5" y="515.025" font-size="11.5" text-anchor="middle">replay silver Parquet</text>
+<text x="1082.5" y="529.525" font-size="11.5" text-anchor="middle">or re-run jobs ¹</text>
+<path d="M906,450 L1082,450 L1082,480" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="990" y="444" font-size="11" text-anchor="middle" font-style="italic" class="m">[no]</text>
+<path d="M890,564 L906,580 L890,596 L874,580 Z" fill="#ffffff" stroke="#3d444d" stroke-width="1.3"/>
+<path d="M710,530 L710,580 L874,580" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<path d="M1082,542 L1082,580 L906,580" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="740" y="615" width="300" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="890.0" y="636.775" font-size="11.5" text-anchor="middle">doctor; reconcile counts, checksums,</text>
+<text x="890.0" y="651.275" font-size="11.5" text-anchor="middle">sampled facts, lineage, jobs</text>
+<path d="M890,596 L890,615" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<rect x="740" y="685" width="300" height="50" rx="12" fill="#e8f0fe" stroke="#3d444d" stroke-width="1.2"/>
+<text x="890.0" y="706.775" font-size="11.5" text-anchor="middle">reclaim only stale jobs whose</text>
+<text x="890.0" y="721.275" font-size="11.5" text-anchor="middle">checkpoint inputs still match</text>
+<path d="M890,665 L890,685" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<circle cx="1110" cy="710" r="11" fill="#ffffff" stroke="#3d444d" stroke-width="1.4"/>
+<circle cx="1110" cy="710" r="6.5" fill="#3d444d"/>
+<path d="M1040,710 L1099,710" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#filled)"/>
+<text x="20" y="790" font-size="11" text-anchor="start" class="m">¹ The repository has no dedicated ClickHouse rebuild command; replaying silver Parquet is a documented intent, not a scripted procedure.</text>
+</svg>

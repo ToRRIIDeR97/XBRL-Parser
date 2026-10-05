@@ -127,3 +127,24 @@ before and after.
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-1–AC-3: `ValidationIssue.extraction_revision`; `validation/issue_grouping.py`
+  groups by `(source, code, severity, source_document)` (fatal never grouped) and
+  tags the revision. `ingest` records grouped issues on the validation stage and on
+  failure; the reject decision still sees every issue.
+- AC-4: `CanonicalMapper.map_batches` keeps one review per
+  `(concept_namespace, concept_name)` across batches and sends them after the last
+  batch with `fact_count` and up to 5 `sample_fact_ids`.
+- AC-5: migrations `0002_validation_issue_revision` and
+  `0003_mapping_review_per_concept`. 0003 adds concept columns, a partial unique index
+  on open reviews, and `mapping_review_observations` (per review and accession, so
+  replay doesn't inflate counts). It keeps the earliest open review per concept and
+  marks the rest `superseded` (not deleted); downgrade reopens them.
+- Copy of the local database (`pg_dump` into a scratch DB, since dropped): upgrade in
+  ~3 s; 41,333 open reviews became 4,881 open (one per concept) + 36,452 superseded;
+  observations sum to 41,333 facts. `downgrade -1` restored 41,333 open; downgrade to
+  0001 and upgrade to head again succeeded. `mapping reviews` lists one row per concept.
+- Gates: compileall, ruff, format, mypy, unit (317 passed, 1 skipped), scan_stubs (0),
+  integration (25 passed), plan tests 01–05 (12/10/8/10/8 passed).

@@ -135,6 +135,16 @@ One row per QName/taxonomy version used by the filing or loaded taxonomy. Includ
 
 One row per arc. Includes network type, link role, arc role, source/target QName, order, priority, weight, preferred label, and dimensional flags.
 
+## Validation issues
+
+`validation_issues` stores diagnostics in PostgreSQL. Filing extractions record
+issues tagged with `extraction_revision` (NULL for bulk loads and for rows written
+before migration `0002_validation_issue_revision`). Repeated issues from one
+extraction that share `(source, code, severity, source_document)` are stored as one
+row: the first occurrence's message, line, and column, plus `details.occurrences`
+and up to five `details.samples` (line, column, message). Fatal issues are never
+grouped. The reject decision still uses every individual issue.
+
 ## Canonical layer
 
 ### `canonical_metrics` in PostgreSQL

@@ -107,6 +107,10 @@ Silver is the rebuild source for ClickHouse and protects against database corrup
 - Primary statements as presented (`xbrl_roles`, `xbrl_statement_lines`,
   `v_statement_lines_latest`), derived from roles, presentation arcs, and facts and
   published with the same extraction revision marker.
+- Cover pages, segment/product/geographic breakdowns, and text blocks
+  (`xbrl_cover_pages`, `xbrl_segment_facts`, `v_cover_pages_latest`,
+  `v_segment_facts_latest`, `v_text_blocks_latest`), derived from dei and dimensional
+  facts and published the same way.
 - Query-optimized denormalization such as CIK, filing date, form, and period fields on facts.
 
 ### PostgreSQL control plane

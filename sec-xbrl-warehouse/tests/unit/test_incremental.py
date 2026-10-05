@@ -192,7 +192,8 @@ def test_ingest_runs_pipeline(tmp_path: Path) -> None:
     assert result["extraction_revision"] == 2
     assert result["entity_counts"]["facts"] == 1
     assert control.upserts[0].accession == "0000000001-26-000001"
-    assert writer.calls == 2  # only the non-empty context and fact tables emit batches
+    # the non-empty context and fact tables, plus the one-row cover page, emit batches
+    assert writer.calls == 3
     assert warehouse.bundles[0].filing.accession == "0000000001-26-000001"
     assert store.deletes == 0
 

@@ -89,6 +89,8 @@ class Settings(BaseSettings):
 
     worker_id: str = "local-worker"
     worker_poll_seconds: float = Field(default=2.0, gt=0)
+    # Daily-index discovery refetches a stored company older than this.
+    company_refresh_days: int = Field(default=30, ge=1)
     worker_lock_timeout_seconds: int = Field(default=900, gt=30)
     worker_max_attempts: int = Field(default=5, ge=1)
     worker_metrics_host: str = "127.0.0.1"

@@ -247,6 +247,11 @@ def test_filing_discover_with_cik_queues_submissions_job(
         "forms": ["10-K"],
         "cik": 320193,
     }
+    # --refresh gives the same issuer a fresh idempotency key.
+    cli.filing_discover(None, None, None, True, 320193)
+    cli.filing_discover(None, None, None, False, 320193)
+    keys = [job["idempotency_key"] for job in jobs]
+    assert keys[0] == keys[2] != keys[1]
     with pytest.raises(typer.BadParameter):
         cli.filing_discover(None, None, None, False, None)
 

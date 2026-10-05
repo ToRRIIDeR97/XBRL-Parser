@@ -32,6 +32,7 @@ from sec_xbrl_warehouse.domain.xbrl import (
     XbrlFact,
     XbrlFootnote,
     XbrlRelationship,
+    XbrlRole,
     XbrlUnit,
 )
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
@@ -164,6 +165,7 @@ class ArelleExtractor:
                 for fact in facts
             )
             relationships = self._extract_relationships(model_xbrl, facts, footnotes)
+            roles = self._extract_roles(model_xbrl, relationships)
             issues = self._extract_validation_issues(log_records, filing)
             metadata = metadata.model_copy(
                 update={
@@ -183,6 +185,7 @@ class ArelleExtractor:
                 footnotes=footnotes,
                 validation_issues=issues,
                 extraction_revision=extraction_revision,
+                roles=roles,
             )
         except Exception as exc:
             # Retain engine diagnostics even when no bundle can be produced.
@@ -698,6 +701,44 @@ class ArelleExtractor:
     ) -> tuple[XbrlFootnote, ...]:
         return _extract_footnote_objects(model_xbrl, facts)
 
+    def _extract_roles(
+        self, model_xbrl: Any, relationships: tuple[XbrlRelationship, ...]
+    ) -> tuple[XbrlRole, ...]:
+        """Role types the filing declares or uses in its relationship networks.
+
+        Roles declared only by standard taxonomies and not used by this filing's
+        arcs are left out, so a filing's roles stay a few dozen rows.
+        """
+        used = {relationship.link_role_uri for relationship in relationships}
+        roles: list[XbrlRole] = []
+        for role_uri, role_types in sorted((getattr(model_xbrl, "roleTypes", None) or {}).items()):
+            local = any(
+                _is_local_document(getattr(item, "modelDocument", None)) for item in role_types
+            )
+            if str(role_uri) not in used and not local:
+                continue
+            definition = next(
+                (
+                    str(item.definition).strip()
+                    for item in role_types
+                    if getattr(item, "definition", None) and str(item.definition).strip()
+                ),
+                None,
+            )
+            used_on = sorted(
+                {str(qname) for item in role_types for qname in getattr(item, "usedOns", ()) or ()}
+            )
+            roles.append(
+                XbrlRole(
+                    role_uri=str(role_uri),
+                    definition=definition,
+                    used_on=tuple(used_on),
+                    sort_code=role_sort_code(definition),
+                    category=role_category(definition),
+                )
+            )
+        return tuple(roles)
+
     def _extract_validation_issues(
         self,
         log_records: Iterable[dict[str, Any]],
@@ -978,6 +1019,29 @@ def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
         return str(result) if result is not None else None
 
     cache.getfilename = getfilename
+
+
+_ROLE_SORT_CODE = re.compile(r"^\s*(\d+)")
+
+
+def role_sort_code(definition: str | None) -> str | None:
+    """Leading digits of a role definition ("100000 - Statement - ..." -> "100000")."""
+    match = _ROLE_SORT_CODE.match(definition or "")
+    return match.group(1) if match else None
+
+
+def role_category(definition: str | None) -> str:
+    """Middle token of the SEC "<code> - <Category> - <Title>" convention, lower-cased."""
+    parts = [part.strip() for part in (definition or "").split(" - ")]
+    if len(parts) >= 3 and parts[1]:
+        category = parts[1].lower()
+        return category if category in {"statement", "disclosure", "document"} else "other"
+    return "other"
+
+
+def _is_local_document(document: Any) -> bool:
+    uri = str(getattr(document, "uri", "") or "")
+    return bool(uri) and urlsplit(uri).scheme not in {"http", "https"}
 
 
 def _context_entity(context: Any) -> tuple[str, str]:

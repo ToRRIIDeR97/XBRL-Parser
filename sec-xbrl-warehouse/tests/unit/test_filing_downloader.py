@@ -119,14 +119,8 @@ def test_archive_and_materialize_round_trip(tmp_path: Path) -> None:
     materialized = downloader.materialize_package(archived, tmp_path / "out")
     assert materialized.name == "example-20251231.htm"
     assert materialized.is_file()
-
-    downloader.delete_source_files(archived)
-    assert archived.package_object_key and not store.exists(archived.package_object_key)
-    assert all(
-        not store.exists(filing_object_key(filing, member.name, member.checksum_sha256))
-        for member in members
-        if member.checksum_sha256
-    )
+    # Raw artifacts are never deleted by the application (no delete API).
+    assert not hasattr(downloader, "delete_source_files")
 
 
 def test_materialize_refuses_path_traversal(tmp_path: Path) -> None:

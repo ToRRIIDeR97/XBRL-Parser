@@ -108,7 +108,6 @@ class _FakePackageStore:
         self.local_directory = None
         self.downloads = 0
         self.archives = 0
-        self.deletes = 0
 
     async def download_package(self, filing: FilingRef) -> FilingPackageManifest:
         self.downloads += 1
@@ -127,9 +126,6 @@ class _FakePackageStore:
     def archive_package(self, manifest: FilingPackageManifest, source: Path):
         self.archives += 1
         return manifest.model_copy(update={"package_object_key": "bronze/filing.zip"})
-
-    def delete_source_files(self, manifest: FilingPackageManifest) -> None:
-        self.deletes += 1
 
 
 class _FakeWriter:
@@ -195,7 +191,6 @@ def test_ingest_runs_pipeline(tmp_path: Path) -> None:
     # the non-empty context and fact tables, plus the one-row cover page, emit batches
     assert writer.calls == 3
     assert warehouse.bundles[0].filing.accession == "0000000001-26-000001"
-    assert store.deletes == 0
 
 
 def test_ingestion_cannot_disable_raw_retention():

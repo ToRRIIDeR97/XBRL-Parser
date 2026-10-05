@@ -141,3 +141,11 @@ independently authored.
   bucket).
 - Operator follow-up (separate approval): run `storage report` and decide retention for
   legacy loose members and JSON checkpoints.
+
+### Follow-up (verifier, 5 October 2026)
+
+- `delete_source_files` is removed from `FilingPackageDownloader` and the
+  `FilingPackageStore` port (it was unused and would have deleted the package archive,
+  every raw byte of a filing). The application has no raw-artifact delete path.
+  Plan-authored test fakes that still define the method are unaffected.
+- `read_bundle` validates the decompressed `bytearray` directly (no extra full copy).

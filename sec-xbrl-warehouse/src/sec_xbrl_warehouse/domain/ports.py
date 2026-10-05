@@ -213,8 +213,6 @@ class FilingPackageStore(Protocol):
         self, manifest: FilingPackageManifest, package_directory: Path
     ) -> FilingPackageManifest: ...
 
-    def delete_source_files(self, manifest: FilingPackageManifest) -> None: ...
-
 
 @runtime_checkable
 class BatchWriter(Protocol):

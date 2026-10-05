@@ -81,7 +81,7 @@ def read_bundle(path: Path, max_bytes: int) -> XbrlExtractionBundle:
             data += chunk
             if len(data) > max_bytes:
                 raise XbrlExtractionError("Extraction exceeds configured serialized byte limit")
-    return XbrlExtractionBundle.model_validate_json(bytes(data))
+    return XbrlExtractionBundle.model_validate_json(data)
 
 
 def _open_output(path: Path) -> Any:

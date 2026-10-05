@@ -5,6 +5,12 @@
 - `arelle-release[EFM]`: authoritative XBRL/iXBRL loading, DTS traversal, validation, dimensions, relationships, and footnotes.
 - `edgartools`: optional ergonomic SEC discovery and exploratory financial-statement access.
 - `httpx`, `aiofiles`, `tenacity`: controlled SEC transport, streaming downloads, and retry primitives.
+- SEC inline transformation registry (`ixt-sec`, namespace
+  `http://www.sec.gov/inlineXBRL/transformation/2015-08-31`): an in-repo Arelle plugin,
+  `infrastructure/xbrl/sec_transforms.py`, written for this project from the SEC
+  "Inline XBRL Transformation Registry" semantics. No third-party code is vendored.
+  It is versioned by `SEC_TRANSFORM_REGISTRY_VERSION` and covered by the repository
+  license. `arelle-release` does not ship this registry.
 - `beautifulsoup4`, `lxml`: catalog markup and package/XML support. They must not replace Arelle's XBRL semantics.
 
 ## Data and storage

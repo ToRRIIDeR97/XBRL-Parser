@@ -122,3 +122,21 @@ All 8 tests fail on their assertions:
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- Decision (coordinator): in-repo Arelle plugin, no vendored code.
+  `infrastructure/xbrl/sec_transforms.py` registers 19 `ixt-sec` transforms through
+  `ModelManager.LoadCustomTransforms`. Its version is `2015-08-31/sec-xbrl-warehouse-1`.
+- `_create_controller` always loads the plugin by path and calls
+  `loadCustomTransforms()`. It raises `XbrlExtractionError` if any transform is
+  missing (AC-5).
+- `_extract_facts` maps Arelle's `INVALIDixVALUE` to a `None` typed value and keeps
+  `raw_value` (AC-4). Provenance lists `transform_registries` (AC-6).
+- `edgarprovcountryen` covers US states, Canadian provinces and a reviewed subset of
+  EDGAR country codes. Unmapped names fail with `transformValueError`.
+- Revision: shares `CURRENT_EXTRACTION_REVISION = 3`.
+- Gates: compileall, ruff, format, mypy, unit (248 passed), scan_stubs (0),
+  integration (23 passed), plan tests 01/02/03 (12/10/8 passed).
+- Not done: re-extracting AAPL and checking no `(ixTransformValueError)` values remain
+  (operator step).

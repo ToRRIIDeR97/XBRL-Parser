@@ -348,3 +348,19 @@ def test_offline_dei_schema_resolves_through_pinned_sec_zip(tmp_path: Path) -> N
     values = {fact.concept_name: fact.value_text for fact in bundle.facts}
     assert values["EntityRegistrantName"] == "Example Corp"
     assert all(fact.concept_namespace == "http://xbrl.sec.gov/dei/2024" for fact in bundle.facts)
+
+
+def test_archive_mapping_to_missing_directory_is_reported(tmp_path: Path) -> None:
+    digest = _fixture_zip(tmp_path / "packages")
+    settings = _archive_settings(
+        tmp_path,
+        "  - id: fx-2025\n    kind: archive\n    filename: fx-2025.zip\n"
+        f"    url: https://xbrl.sec.gov/2025.zip\n    sha256: {digest}\n    mappings:\n"
+        '      https://xbrl.sec.gov/fx/2025/: "published/xbrl.sec.gov/fx/2025/"\n'
+        '      https://xbrl.sec.gov/fy/2025/: "published/xbrl.sec.gov/fy/2025/"\n'
+        '      https://xbrl.sec.gov/fz/2025/: "published/"\n',
+    )
+    (status,) = package_status(settings)
+    assert status.state == "mapping_missing"
+    assert "published/xbrl.sec.gov/fy/2025/" in status.detail
+    assert "fx/2025" not in status.detail and "'published/'" not in status.detail

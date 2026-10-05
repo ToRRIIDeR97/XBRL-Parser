@@ -114,15 +114,8 @@ async def test_mapping_specificity_and_review_workflow(postgres_settings: Settin
         assert len(await repository.list_reviews()) == 1
         await repository.resolve_review(review, cik_mapping)
         assert await repository.list_reviews() == []
-        from sqlalchemy import event
-
-        statements = []
-
-        def capture(conn, cursor, statement, parameters, context, executemany):
-            if "mapping_reviews" in statement:
-                statements.append(statement)
-
-        event.listen(repository.engine.sync_engine, "before_cursor_execute", capture)
+        # Reviews are per concept: a later filing updates the open review, and
+        # replaying a filing doesn't inflate its cumulative counts.
         requests = [
             (fact.model_copy(update={"fact_id": str(i)}), (), {"reason": "bulk"})
             for i in range(1001)
@@ -130,7 +123,26 @@ async def test_mapping_specificity_and_review_workflow(postgres_settings: Settin
         first = await repository.create_reviews(filing, requests)
         replay = await repository.create_reviews(filing, requests)
         assert first == replay
-        assert len(first) == 1001
-        assert len(statements) == 9  # 3 inserts, then 3 replay inserts + 3 lookups
+        assert len(first) == 1001 and len(set(first.values())) == 1
+        later = filing.model_copy(update={"accession": "0000000001-26-000100"})
+        await repository.create_reviews(
+            later,
+            [
+                (fact, (), {"reason": "bulk", "fact_count": 3, "sample_fact_ids": ["a", "b"]}),
+                (
+                    fact.model_copy(
+                        update={"concept_namespace": "http://example.com/2025", "fact_id": "x"}
+                    ),
+                    (),
+                    {},
+                ),
+            ],
+        )
+        reviews = await repository.list_reviews()
+        assert len(reviews) == 2
+        revenue = next(item for item in reviews if item["concept_namespace"] == namespace)
+        assert revenue["id"] == str(next(iter(first.values())))
+        assert (revenue["fact_count"], revenue["filing_count"]) == (1004, 2)
+        assert revenue["latest_accession"] == later.accession
     finally:
         await repository.close()

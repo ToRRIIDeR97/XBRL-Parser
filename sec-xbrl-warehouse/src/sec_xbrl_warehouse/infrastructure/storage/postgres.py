@@ -469,6 +469,7 @@ class PostgresControlRepository:
                 "line": issue.line,
                 "column_number": issue.column,
                 "details": issue.details,
+                "extraction_revision": issue.extraction_revision,
             }
             for issue in issues
         ]

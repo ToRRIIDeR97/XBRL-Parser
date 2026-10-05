@@ -292,8 +292,22 @@ async def test_upsert_filing_and_validation_issues(postgres_settings: Settings) 
             message="test message",
             accession=accession,
             line=12,
+            extraction_revision=3,
         )
         await repo.record_validation_issues([issue])
+        from sqlalchemy import select
+
+        from sec_xbrl_warehouse.infrastructure.storage.postgres_models import ValidationIssueRow
+
+        async with repo.sessions() as session:
+            revisions = (
+                await session.scalars(
+                    select(ValidationIssueRow.extraction_revision).where(
+                        ValidationIssueRow.accession == accession
+                    )
+                )
+            ).all()
+        assert revisions == [3]
     finally:
         await repo.close()
 

@@ -8,7 +8,8 @@ transform changes (extraction revision 3, selection policy 2): re-extract the 42
 `xmlSchema:syntax` counts, and fact counts against revision 2. Confirm
 `SELECT countIf(fiscal_year IS NULL) FROM xbrl.v_xbrl_facts_latest` returns 0. Confirm
 `SELECT count() FROM xbrl.v_xbrl_facts_latest WHERE value_text = '(ixTransformValueError)'`
-returns 0. Before that, run
+returns 0. Use the per-revision diagnostics query in INGESTION_RUNBOOK.md to confirm
+which issues belong to the live revision. Before that, run
 `xbrl-warehouse taxonomy sync` (50 pinned FASB and SEC sources; `taxonomy status` must
 show no `uncovered` rows), set
 `XBRL_ARELLE_OFFLINE=true` for the re-extraction, and confirm no `webCache:*` issues.

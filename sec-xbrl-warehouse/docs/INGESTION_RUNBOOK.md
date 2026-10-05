@@ -45,6 +45,22 @@ xbrl-warehouse filing enqueue --accession <accession> --cik <cik> \
 xbrl-warehouse worker run --job-type ingest_filing
 ```
 
+### Diagnostics per extraction revision
+
+Filing diagnostics carry the revision that raised them, and repeated ones are grouped:
+
+```sql
+SELECT extraction_revision, code, severity,
+       count(*) AS rows,
+       sum(coalesce((details->>'occurrences')::int, 1)) AS occurrences
+FROM validation_issues
+WHERE accession = '<accession>'
+GROUP BY 1, 2, 3
+ORDER BY 1 DESC, occurrences DESC;
+```
+
+Rows with a NULL `extraction_revision` predate the revision tag.
+
 ## Recovery
 
 ### Download interrupted

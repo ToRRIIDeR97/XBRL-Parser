@@ -196,3 +196,13 @@ independently authored.
 - SECURITY.md lists the new tables/views the API reader needs `SELECT` on.
 - The verifier's probes (synthetic and real AAPL, temp databases) were rerun against
   this tree: no derived shares/EPS points; OCF quarters sum to FY; rebuild idempotent.
+
+### Approved amendment (coordinator, 5 October 2026)
+
+- New derivation `annual_minus_quarters`: Q4 = FY - (Q1 + Q2 + Q3), used only when
+  the fiscal year has no nine-month year-to-date value (otherwise
+  `annual_minus_nine_months` applies). Q1 starts on the fiscal year's start, Q1-Q3 are
+  contiguous discrete quarters, Q4 starts the day after Q3 ends and spans a quarter,
+  every input shares one unit, and the metric is additive. `source_accessions` and
+  `available_at` cover all four inputs. Unit tests cover the fallback, the nine-month
+  precedence case, a gap, mixed units, and a non-additive metric.

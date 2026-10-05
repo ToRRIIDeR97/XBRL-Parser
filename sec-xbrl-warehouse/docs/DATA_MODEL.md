@@ -279,7 +279,10 @@ Standardized series rebuilt per company from `canonical_facts` by
   months, 350-380 a year (52/53-week calendars fit). Discrete quarters are reported
   3-month values, else differences of consecutive year-to-date values sharing a
   `period_start` (`ytd_difference`); Q4 = year - nine months
-  (`annual_minus_nine_months`). TTM (`ttm_sum`) sums four contiguous discrete quarters.
+  (`annual_minus_nine_months`). Only when the year has no nine-month value, Q4 =
+  year - (Q1 + Q2 + Q3) (`annual_minus_quarters`): Q1 starts on the year's start, Q1-Q3
+  are contiguous discrete quarters, and Q4 starts the day after Q3 ends.
+  TTM (`ttm_sum`) sums four contiguous discrete quarters.
   Instants are `instant` points; there is no TTM for them. A derived point needs every
   input and one unit.
 - **Labels.** `fiscal_year`/`fiscal_quarter` come from the filing whose `report_date`

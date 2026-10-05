@@ -173,3 +173,55 @@ def test_catalogue_marks_shares_and_eps_non_additive() -> None:
     # An explicit empty set restores additive treatment (callers own the catalogue).
     points = build_series(_apple_shares_and_eps(), non_additive=())
     assert any(p.metric == "diluted_shares" and p.derivation == "ttm_sum" for p in points)
+
+
+def _discrete_year(**units):
+    """Apple-like FY2025: three reported 3-month quarters and the fiscal year."""
+    unit = units.get("q2_unit", "USD")
+    return [
+        _obs("revenue", "2024-09-29", "2024-12-28", 124300, "q1", "2025-01-31T00:00:00"),
+        _obs("revenue", "2024-12-29", "2025-03-29", 95359, "q2", "2025-05-02T00:00:00", unit=unit),
+        _obs("revenue", "2025-03-30", "2025-06-28", 94036, "q3", "2025-08-01T00:00:00"),
+        _obs("revenue", "2024-09-29", "2025-09-27", 416161, "fy", "2025-10-31T00:00:00"),
+    ]
+
+
+def test_q4_falls_back_to_annual_minus_three_contiguous_quarters() -> None:
+    points = build_series(_discrete_year())
+    q4 = next(p for p in points if p.period_type == "quarter" and p.period_end == date(2025, 9, 27))
+    assert (q4.period_start, q4.value, q4.derivation) == (
+        date(2025, 6, 29),
+        D(102466),
+        "annual_minus_quarters",
+    )
+    assert q4.source_accessions == ("fy", "q1", "q2", "q3")
+    assert q4.available_at == datetime(2025, 10, 31, tzinfo=UTC)
+    (ttm,) = [p for p in points if p.period_type == "ttm"]
+    assert ttm.value == D(416161)
+
+
+def test_nine_month_value_takes_precedence_over_the_quarter_fallback() -> None:
+    observations = [
+        *_discrete_year(),
+        _obs("revenue", "2024-09-29", "2025-06-28", 313000, "q3", "2025-08-01T00:00:00"),
+    ]
+    q4 = next(
+        p
+        for p in build_series(observations)
+        if p.period_type == "quarter" and p.period_end == date(2025, 9, 27)
+    )
+    assert (q4.value, q4.derivation) == (D(103161), "annual_minus_nine_months")
+
+
+def test_quarter_fallback_needs_contiguous_quarters_one_unit_and_additivity() -> None:
+    def q4s(observations, **kwargs):
+        return [
+            p
+            for p in build_series(observations, **kwargs)
+            if p.period_type == "quarter" and p.period_end == date(2025, 9, 27)
+        ]
+
+    gap = [item for item in _discrete_year() if item.accession != "q2"]
+    assert q4s(gap) == []
+    assert q4s(_discrete_year(q2_unit="EUR")) == []
+    assert q4s(_discrete_year(), non_additive={"revenue"}) == []

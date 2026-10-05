@@ -8,7 +8,8 @@ discrete quarters, fiscal years, trailing twelve months, and instants:
   then the newest (`latest`) or oldest (`as_reported`) filing; `as_of` drops
   observations accepted after the cutoff first.
 - Quarters are reported 3-month values, or differences of consecutive
-  year-to-date values that share a `period_start`; Q4 = year - nine months.
+  year-to-date values that share a `period_start`; Q4 = year - nine months, or,
+  only when no nine-month value exists, year - (Q1 + Q2 + Q3) of contiguous quarters.
 - TTM is the sum of four contiguous discrete quarters.
 - A derived point needs every input; nothing is guessed from calendars.
 """
@@ -26,7 +27,14 @@ from typing import Literal
 
 View = Literal["latest", "as_reported"]
 PeriodType = Literal["quarter", "annual", "ttm", "instant"]
-Derivation = Literal["reported", "ytd_difference", "annual_minus_nine_months", "ttm_sum", "formula"]
+Derivation = Literal[
+    "reported",
+    "ytd_difference",
+    "annual_minus_nine_months",
+    "annual_minus_quarters",
+    "ttm_sum",
+    "formula",
+]
 
 # Inclusive duration lengths in days (end - start), wide enough for 52/53-week years.
 QUARTER_DAYS = range(80, 101)
@@ -236,6 +244,7 @@ def _metric_points(
                 derivation=kind,
             )
 
+    _annual_minus_quarters(durations, quarters)
     ordered_quarters = sorted(quarters.values(), key=lambda value: value.end)
     for quarter in ordered_quarters:
         points.append(_point(cik, metric, "quarter", quarter, labels, quarter_from_label=True))
@@ -256,6 +265,44 @@ def _metric_points(
         )
         points.append(_point(cik, metric, "ttm", ttm, labels, quarter_from_label=True))
     return points
+
+
+def _annual_minus_quarters(
+    durations: Mapping[tuple[date, date], _Value], quarters: dict[date, _Value]
+) -> None:
+    """Fallback Q4 = FY - (Q1 + Q2 + Q3) when the filer reports no nine-month value.
+
+    Q1 starts on the fiscal year's start, Q1-Q3 are contiguous discrete quarters, Q4
+    starts the day after Q3 ends, and every input shares one unit.
+    """
+    by_start = {quarter.start: quarter for quarter in quarters.values()}
+    for (start, end), annual in durations.items():
+        if (end - start).days not in YEAR_DAYS or end in quarters:
+            continue
+        if any(
+            other_start == start and (other_end - start).days in NINE_MONTH_DAYS
+            for other_start, other_end in durations
+        ):
+            continue
+        first = by_start.get(start)
+        second = by_start.get(first.end + timedelta(days=1)) if first is not None else None
+        third = by_start.get(second.end + timedelta(days=1)) if second is not None else None
+        if first is None or second is None or third is None:
+            continue
+        inputs = (annual, first, second, third)
+        q4_start = third.end + timedelta(days=1)
+        if (end - q4_start).days not in QUARTER_DAYS or len({item.unit for item in inputs}) != 1:
+            continue
+        quarters[end] = _Value(
+            start=q4_start,
+            end=end,
+            value=annual.value - first.value - second.value - third.value,
+            unit=annual.unit,
+            concept=annual.concept,
+            accessions=frozenset().union(*(item.accessions for item in inputs)),
+            available_at=_latest(*(item.available_at for item in inputs)),
+            derivation="annual_minus_quarters",
+        )
 
 
 def _ytd_step(start: date, previous_end: date, current_end: date) -> Derivation | None:

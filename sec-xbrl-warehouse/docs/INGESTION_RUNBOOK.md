@@ -88,6 +88,12 @@ discovered CIK without a company row, through the same rate-limited client.
 
 ## Recovery
 
+### Dead jobs
+
+List them with `xbrl-warehouse jobs list --state dead`, fix the cause recorded in
+`last_error`, then `xbrl-warehouse jobs retry <job-id>`. The job keeps its idempotency
+key and checkpoints, so it resumes from the last completed stage.
+
 ### Download interrupted
 
 - Keep `.part` file and byte count.

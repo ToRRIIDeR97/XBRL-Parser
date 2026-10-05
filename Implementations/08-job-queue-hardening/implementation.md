@@ -137,3 +137,24 @@ always exercised through the repository.
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-1: `is_retryable_exception` checks integrity/drift first, then transient
+  ClickHouse (`OperationalError`; `DatabaseError` codes in `TRANSIENT_CLICKHOUSE_CODES`)
+  and botocore errors (connection/timeout classes; `ClientError` codes in
+  `TRANSIENT_S3_CODES` or HTTP 500/503), then the `__cause__` chain.
+- AC-2: `list_jobs`, `retry_job` (dead -> retry, attempts 0, `available_at=now()`,
+  previous error prefixed in `last_error`; other states raise `StateTransitionError`).
+- AC-3: `claim_job` loops (bounded) inside one `SKIP LOCKED` transaction: an exhausted
+  job is dead-lettered with a reason, counted in `xbrl_job_transitions_total{state=dead}`
+  and `xbrl_job_dead_letters_total{reason}`, and the next eligible job is claimed.
+  Type scoping is applied in the same query, so scoped workers never touch other types.
+- AC-4: `fail_job` sets `available_at = now() + retry_delay_seconds(attempts)`
+  (2^n seconds, 50-100% jitter, capped at 3600 s); `retry_at` still applies via `greatest`.
+- AC-5: `queue_snapshot()`; `QueueCollector` registered by `worker run` exports
+  `xbrl_queue_jobs`, `xbrl_queue_oldest_ready_age_seconds`, `xbrl_queue_snapshot_up`
+  at scrape time; four new rules in `ops/alerts.yml`. CLI `jobs list|retry`.
+- Gates: compileall, ruff, format, mypy, unit (345 passed, 1 skipped), scan_stubs (0),
+  integration (30 passed, incl. concurrent no-double-claim with dead letters and
+  scoped-claim tests), plan tests 01–08 (12/10/8/10/8/12/10/22 passed).

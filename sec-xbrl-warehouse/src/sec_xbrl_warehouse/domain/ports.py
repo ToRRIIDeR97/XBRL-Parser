@@ -14,6 +14,7 @@ from sec_xbrl_warehouse.domain.models import (
     FilingPackageManifest,
     FilingRef,
     JobRecord,
+    QueueSnapshot,
     SourceArtifactRef,
     StoredObject,
     ValidationIssue,
@@ -88,6 +89,14 @@ class ControlRepository(Protocol):
         priority: int = 100,
         max_attempts: int = 5,
     ) -> UUID: ...
+
+    async def list_jobs(
+        self, *, state: str | None = None, job_type: str | None = None, limit: int = 100
+    ) -> list[JobRecord]: ...
+
+    async def retry_job(self, job_id: UUID) -> JobRecord: ...
+
+    async def queue_snapshot(self) -> QueueSnapshot: ...
 
     async def enqueue_job_if_absent(
         self,

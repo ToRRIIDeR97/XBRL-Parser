@@ -464,3 +464,70 @@ def test_discovery_stores_companies_for_cik_and_daily_index_jobs() -> None:
     assert daily == {"filings_enqueued": 2, "companies_stored": 1}
     assert http.urls == ["https://data.sec.gov/submissions/CIK0000000002.json"]
     assert [company.cik for company in control.companies] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Code: 202. DB::Exception: Too many simultaneous queries", True),
+        ("Code: 210. DB::Exception: Connection reset by peer (NETWORK_ERROR)", True),
+        ("Code: 81. DB::Exception: Database xbrl does not exist (UNKNOWN_DATABASE)", False),
+        ("Code: 53. DB::Exception: Type mismatch", False),
+    ],
+)
+def test_clickhouse_codes_decide_retry(message: str, expected: bool) -> None:
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    assert is_retryable_exception(DatabaseError(message)) is expected
+
+
+def test_s3_status_and_timeouts_decide_retry() -> None:
+    from botocore.exceptions import ClientError, ReadTimeoutError
+
+    throttled = ClientError(
+        {"Error": {"Code": "Unknown"}, "ResponseMetadata": {"HTTPStatusCode": 503}}, "GetObject"
+    )
+    assert is_retryable_exception(throttled)
+    assert is_retryable_exception(ReadTimeoutError(endpoint_url="http://minio:9000"))
+    missing = ClientError(
+        {"Error": {"Code": "NoSuchKey"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "GetObject"
+    )
+    assert not is_retryable_exception(missing)
+
+
+def test_retry_delay_is_jittered_and_capped() -> None:
+    from sec_xbrl_warehouse.infrastructure.storage.postgres import retry_delay_seconds
+
+    first = {round(retry_delay_seconds(1), 6) for _ in range(50)}
+    assert len(first) > 1 and all(1.0 <= value <= 2.0 for value in first)
+    assert all(1800.0 <= retry_delay_seconds(40) <= 3600.0 for _ in range(50))
+
+
+def test_queue_collector_exports_snapshot_and_failure() -> None:
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from sec_xbrl_warehouse.domain.models import QueueSnapshot
+    from sec_xbrl_warehouse.observability.metrics import QueueCollector
+
+    registry = CollectorRegistry()
+    registry.register(
+        QueueCollector(
+            lambda: QueueSnapshot(
+                counts={("load_bulk", "pending"): 3, ("ingest_filing", "dead"): 1},
+                oldest_ready_age_seconds=42.5,
+            )
+        )
+    )
+    text = generate_latest(registry).decode()
+    assert 'xbrl_queue_jobs{job_type="load_bulk",state="pending"} 3.0' in text
+    assert 'xbrl_queue_jobs{job_type="ingest_filing",state="dead"} 1.0' in text
+    assert "xbrl_queue_oldest_ready_age_seconds 42.5" in text
+    assert "xbrl_queue_snapshot_up 1.0" in text
+
+    def broken() -> QueueSnapshot:
+        raise TimeoutError
+
+    failing = CollectorRegistry()
+    failing.register(QueueCollector(broken))
+    text = generate_latest(failing).decode()
+    assert "xbrl_queue_snapshot_up 0.0" in text and "xbrl_queue_jobs{" not in text

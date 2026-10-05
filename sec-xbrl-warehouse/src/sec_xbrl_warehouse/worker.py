@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import signal
 from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from typing import Any
@@ -366,8 +367,49 @@ def _payload_date(value: Any) -> Any:
     return date.fromisoformat(str(value)) if value else None
 
 
-def is_retryable_exception(exc: Exception) -> bool:
-    """Classify network/timeout/temporary DB failures explicitly."""
+# ClickHouse server error codes that clear on their own (load, merges, restarts).
+TRANSIENT_CLICKHOUSE_CODES = frozenset(
+    {
+        159,  # TIMEOUT_EXCEEDED
+        164,  # READONLY (replica temporarily read-only)
+        202,  # TOO_MANY_SIMULTANEOUS_QUERIES
+        203,  # NO_FREE_CONNECTION
+        209,  # SOCKET_TIMEOUT
+        210,  # NETWORK_ERROR
+        241,  # MEMORY_LIMIT_EXCEEDED
+        242,  # TABLE_IS_READ_ONLY
+        252,  # TOO_MANY_PARTS
+        319,  # UNKNOWN_STATUS_OF_INSERT
+        425,  # SYSTEM_ERROR
+        999,  # KEEPER_EXCEPTION
+    }
+)
+# S3/MinIO error codes worth retrying; others (AccessDenied, NoSuchBucket) are permanent.
+TRANSIENT_S3_CODES = frozenset(
+    {
+        "SlowDown",
+        "ServiceUnavailable",
+        "InternalError",
+        "RequestTimeout",
+        "RequestTimeTooSkewed",
+        "Throttling",
+        "ThrottlingException",
+        "503",
+        "500",
+    }
+)
+_CLICKHOUSE_CODE = re.compile(r"\bCode:\s*(\d+)")
+
+
+def is_retryable_exception(exc: BaseException) -> bool:
+    """Classify network, timeout, and temporary storage failures as retryable.
+
+    Wrapped errors (for example a `WarehouseWriteError` raised from a ClickHouse
+    or S3 error) are classified by their `__cause__`. Integrity, schema drift,
+    ClickHouse syntax/missing-table, and S3 permission/bucket errors stay permanent.
+    """
+    if isinstance(exc, (ArtifactIntegrityError, SchemaDriftError)):
+        return False
     if isinstance(
         exc,
         (
@@ -381,9 +423,9 @@ def is_retryable_exception(exc: Exception) -> bool:
         ),
     ):
         return True
-    if isinstance(exc, (ArtifactIntegrityError, SchemaDriftError)):
-        return False
-    if exc.__cause__ is not None and isinstance(exc.__cause__, Exception):
+    if _is_transient_storage_error(exc):
+        return True
+    if exc.__cause__ is not None:
         return is_retryable_exception(exc.__cause__)
     # PostgreSQL transient error classes surface through SQLAlchemy.
     module = type(exc).__module__
@@ -393,4 +435,36 @@ def is_retryable_exception(exc: Exception) -> bool:
             marker in text
             for marker in ("timeout", "connection", "locked", "deadlock", "serialization")
         )
+    return False
+
+
+def _is_transient_storage_error(exc: BaseException) -> bool:
+    module = type(exc).__module__
+    if module.startswith("clickhouse_connect"):
+        from clickhouse_connect.driver.exceptions import DatabaseError, OperationalError
+
+        if isinstance(exc, OperationalError):
+            return True  # connection refused/reset, HTTP timeouts
+        if isinstance(exc, DatabaseError):
+            match = _CLICKHOUSE_CODE.search(str(exc))
+            return match is not None and int(match.group(1)) in TRANSIENT_CLICKHOUSE_CODES
+        return False
+    if module.startswith(("botocore", "boto3")):
+        from botocore.exceptions import (
+            ClientError,
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ReadTimeoutError,
+        )
+
+        if isinstance(
+            exc,
+            (EndpointConnectionError, ConnectionClosedError, ReadTimeoutError, ConnectTimeoutError),
+        ):
+            return True
+        if isinstance(exc, ClientError):
+            error = exc.response.get("Error", {})
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            return str(error.get("Code")) in TRANSIENT_S3_CODES or status in {500, 503}
     return False

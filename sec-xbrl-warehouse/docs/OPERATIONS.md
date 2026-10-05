@@ -29,7 +29,7 @@ jobs aren't affected. A worker that hits the lock defers the job by
 validation issues. Deferral is capped: after `XBRL_SEC_EGRESS_MAX_DEFER_SECONDS`
 (default 6 hours) from the first deferral the job goes `dead` with that reason
 (`xbrl_job_dead_letters_total{reason="egress_busy_timeout"}`); `XbrlSecEgressDeferrals`
-fires after 30 minutes of deferrals.
+fires after about 30 minutes of continued deferrals (15-minute window held 15 minutes).
 
 A worker keeps the lock for its whole lifetime once it has sent an SEC request, so
 `catalog sync` and `taxonomy sync` fail as busy until that worker stops. The holder

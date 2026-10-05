@@ -120,3 +120,21 @@ All 10 tests fail because the interfaces are new: `parse_company`,
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-1: `Company`/`FormerName` in `domain/models.py`; `parse_company` validates
+  `fiscal_year_end` as a real MMDD date (0229 allowed), keeps no EIN/phone/addresses,
+  and records a checksum of the submissions document.
+- AC-2/AC-4: migration `0004_companies` (text[] tickers with a GIN index, JSONB former
+  names). `upsert_company` upper-cases tickers and, under an advisory lock in the same
+  transaction, removes listed tickers from other companies; `get_company`,
+  `find_company_by_ticker` (case-insensitive), `known_company_ciks`.
+- AC-3: `discover_with_company` (one submissions request); `discover` delegates to it.
+- AC-5: `enrich_companies` dedupes, skips known CIKs, fetches only new ones.
+- Wiring: `discover_filings` jobs with `cik` use submissions discovery and store the
+  company; daily-index jobs enrich new CIKs after discovery. CLI `filing discover --cik`
+  (enqueues; SEC access stays in the worker) and `company show <cik|ticker>`.
+- Gates: compileall, ruff, format, mypy, unit (337 passed, 1 skipped), scan_stubs (0),
+  integration (28 passed; one run hit a transient ClickHouse container OOM on an Arrow
+  insert, unrelated and passing on rerun), plan tests 01–07 (12/10/8/10/8/12/10 passed).

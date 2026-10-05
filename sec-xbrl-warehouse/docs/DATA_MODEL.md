@@ -135,6 +135,23 @@ One row per QName/taxonomy version used by the filing or loaded taxonomy. Includ
 
 One row per arc. Includes network type, link role, arc role, source/target QName, order, priority, weight, preferred label, and dimensional flags.
 
+## Companies
+
+`companies` in PostgreSQL (migration `0004_companies`) holds one row per CIK from
+the SEC submissions JSON: `name`, `entity_type`, `sic`, `sic_description`, `tickers`
+and `exchanges` (text arrays in source order, tickers upper-cased),
+`fiscal_year_end` (`MMDD`, or NULL when missing or not a real date),
+`state_of_incorporation`, `filer_category`, `former_names` (JSON list of
+`{name, valid_from, valid_to}`), `source_checksum` (hash of the submissions
+document), and `fetched_at`. EIN, phone, and addresses are not stored.
+
+- A ticker belongs to at most one company: an upsert that lists a ticker removes it
+  from any other company in the same transaction.
+- Ticker lookups are case-insensitive.
+- Rows come from `filing discover --cik` (the same submissions request as the
+  filings) and, for daily-index discovery, from one submissions request per CIK not
+  yet stored. Existing rows are refreshed by later `--cik` discoveries.
+
 ## Validation issues
 
 `validation_issues` stores diagnostics in PostgreSQL. Filing extractions record

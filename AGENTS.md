@@ -54,7 +54,7 @@ docker compose up -d api
 `doctor` fails while a pinned taxonomy package is missing; `taxonomy sync` installs them.
 
 Privileged and operator CLI commands (migrations, `catalog`, `backfill`, `filing`,
-`mapping`, `taxonomy`) run through the `worker` service. The `api` service has no writer
+`mapping`, `taxonomy`, `company`) run through the `worker` service. The `api` service has no writer
 credentials or data volume. It connects as `xbrl_api` to PostgreSQL and ClickHouse, and
 those identities must be provisioned first (see SECURITY.md). Docs are served at
 `http://127.0.0.1:8080/docs`. Avoid `docker compose down -v`, which deletes data volumes.

@@ -80,6 +80,8 @@ Canary one artifact before enqueuing the full range. Source ZIPs, Parquet, stage
 
 ```bash
 xbrl-warehouse filing discover-latest --lookback-days 3
+xbrl-warehouse filing discover --cik 320193   # one issuer, stores its company row
+xbrl-warehouse company show AAPL
 xbrl-warehouse worker run
 ```
 

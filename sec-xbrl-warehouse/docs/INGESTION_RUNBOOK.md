@@ -74,6 +74,18 @@ xbrl-warehouse worker run --job-type map_canonical
 `map_canonical` needs the saved extraction of a completed `ingest_filing` job for that
 revision; filings without one fail with "No saved extraction" and need re-ingestion.
 
+### Companies
+
+```bash
+xbrl-warehouse filing discover --cik 320193   # queue one issuer; the worker stores its company row
+xbrl-warehouse worker run --job-type discover_filings
+xbrl-warehouse company show AAPL               # or a CIK; reads PostgreSQL only
+```
+
+Daily-index discovery (`filing discover --filed-from ... --filed-to ...`) also stores
+companies: after a run, the worker fetches the submissions JSON once for each
+discovered CIK without a company row, through the same rate-limited client.
+
 ## Recovery
 
 ### Download interrupted

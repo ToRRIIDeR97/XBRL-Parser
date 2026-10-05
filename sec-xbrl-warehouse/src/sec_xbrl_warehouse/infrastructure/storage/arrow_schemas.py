@@ -444,6 +444,23 @@ def taxonomy_concepts_schema() -> Any:
             pa.field("labels_json", pa.string(), False),
             pa.field("documentation", pa.string()),
             pa.field("references_json", pa.string()),
+            pa.field("labels_rank", pa.uint8(), False),
+            pa.field("_row_hash", pa.string(), False),
+            pa.field("_ingested_at", pa.timestamp("ms", tz="UTC"), False),
+        ]
+    )
+
+
+def concept_labels_schema() -> Any:
+    pa = _pa()
+    return pa.schema(
+        [
+            pa.field("accession", pa.string(), False),
+            pa.field("concept_namespace", pa.string(), False),
+            pa.field("concept_name", pa.string(), False),
+            pa.field("concept_qname", pa.string(), False),
+            pa.field("labels_json", pa.string(), False),
+            pa.field("extraction_revision", pa.uint32(), False),
             pa.field("_row_hash", pa.string(), False),
             pa.field("_ingested_at", pa.timestamp("ms", tz="UTC"), False),
         ]

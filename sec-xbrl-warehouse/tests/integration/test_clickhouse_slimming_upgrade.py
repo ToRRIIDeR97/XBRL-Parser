@@ -165,6 +165,16 @@ def _bundle() -> XbrlExtractionBundle:
                 from_qname="us-gaap:IncomeStatementAbstract",
                 to_qname="us-gaap:Revenues",
             ),
+            # The filer labels us-gaap:Revenues in its own label linkbase.
+            XbrlRelationship(
+                relationship_id=_h("label-arc"),
+                relationship_type=RelationshipType.LABEL,
+                link_role_uri="http://www.xbrl.org/2003/role/link",
+                arc_role_uri="http://www.xbrl.org/2003/arcrole/concept-label",
+                from_qname="us-gaap:Revenues",
+                to_qname=f"label:{_h('net sales')}",
+                source_document="x.htm",
+            ),
         ),
         footnotes=(
             XbrlFootnote(footnote_id=note, text="A note", linked_fact_ids=(facts[0].fact_id,)),
@@ -262,10 +272,16 @@ def test_upgrade_from_main_ddl_keeps_query_results(clickhouse_settings: Settings
             ),
         ):
             _insert_old(warehouse, table_name, table)
-        warehouse.client.command(
-            f"INSERT INTO {database}.xbrl_extractions "
-            "(accession, extraction_revision, entity_counts_json, metadata_json, completed_at) "
-            f"VALUES ('{ACCESSION}', 1, '{{}}', '{{}}', now64(3))"
+        warehouse.client.insert(
+            f"{database}.xbrl_extractions",
+            [[ACCESSION, 1, "{}", bundle.metadata.model_dump_json(), datetime.now(UTC)]],
+            column_names=[
+                "accession",
+                "extraction_revision",
+                "entity_counts_json",
+                "metadata_json",
+                "completed_at",
+            ],
         )
         old_canonical = set(warehouse._columns("canonical_facts"))
         before = _snapshot(warehouse, old_canonical)
@@ -307,9 +323,37 @@ def test_upgrade_from_main_ddl_keeps_query_results(clickhouse_settings: Settings
         assert warehouse.query(
             "SELECT concept_qname FROM v_filing_concepts_latest ORDER BY concept_qname"
         ) == [{"concept_qname": "ex:ServicesNetSales"}, {"concept_qname": "us-gaap:Revenues"}]
+        # The filer's labels stay with the filing; only taxonomy-owned labels are shared.
+        revenues = next(
+            c for c in silver_concepts_table(bundle).to_pylist() if c["concept_name"] == "Revenues"
+        )
         assert warehouse.query(
-            "SELECT lower(hex(relationship_id)) AS id FROM xbrl_relationships"
-        ) == [{"id": bundle.relationships[0].relationship_id}]
+            "SELECT labels_json FROM v_filing_concepts_latest WHERE concept_name = 'Revenues'"
+        ) == [{"labels_json": revenues["labels_json"]}]
+        assert warehouse.query(
+            "SELECT concept_name, labels_json, labels_rank FROM taxonomy_concepts FINAL "
+            "ORDER BY concept_name"
+        ) == [
+            {
+                "concept_name": "Assets",
+                "labels_json": next(
+                    c["labels_json"]
+                    for c in silver_concepts_table(bundle).to_pylist()
+                    if c["concept_name"] == "Assets"
+                ),
+                "labels_rank": 1,
+            },
+            {"concept_name": "Revenues", "labels_json": "[]", "labels_rank": 0},
+        ]
+        assert warehouse.query("SELECT accession, concept_qname FROM xbrl_concept_labels") == [
+            {"accession": ACCESSION, "concept_qname": "us-gaap:Revenues"}
+        ]
+        assert sorted(
+            row["id"]
+            for row in warehouse.query(
+                "SELECT lower(hex(relationship_id)) AS id FROM xbrl_relationships"
+            )
+        ) == sorted(relationship.relationship_id for relationship in bundle.relationships)
 
         # New writes land in the upgraded schema and read back identically.
         revised = bundle.model_copy(update={"extraction_revision": 2})
@@ -481,6 +525,73 @@ def test_upgrade_maps_non_hex_ids_like_new_writes(clickhouse_settings: Settings)
             (hash_bytes("rev"), bytes(32)),
             (bytes.fromhex(_h("x")), bytes.fromhex(_h("ctx"))),
         ]
+    finally:
+        warehouse.close()
+        admin.client.command(f"DROP DATABASE IF EXISTS {database} SYNC")
+        admin.close()
+
+
+def test_filer_labels_never_leak_to_another_filing(clickhouse_settings: Settings) -> None:
+    """Two filers label the same us-gaap concept differently; each sees its own labels."""
+    from datetime import timedelta
+
+    from sec_xbrl_warehouse.infrastructure.storage.clickhouse import taxonomy_concepts_table
+
+    apple = _bundle()
+
+    def relabel(concept: XbrlConcept) -> XbrlConcept:
+        if concept.name != "Revenues":
+            return concept
+        return concept.model_copy(
+            update={
+                "labels": (
+                    ConceptLabel(
+                        role_uri="http://www.xbrl.org/2003/role/terseLabel",
+                        language="en-US",
+                        text="Total revenue (Other Corp)",
+                    ),
+                )
+            }
+        )
+
+    other = apple.model_copy(
+        update={
+            "filing": apple.filing.model_copy(
+                update={"accession": "0000789019-26-000001", "cik": 789019}
+            ),
+            "concepts": tuple(relabel(concept) for concept in apple.concepts),
+            "metadata": apple.metadata.model_copy(
+                update={"extracted_at": apple.metadata.extracted_at + timedelta(days=1)}
+            ),
+        }
+    )
+    assert {row["labels_rank"] for row in taxonomy_concepts_table(other).to_pylist()} == {0, 1}
+    admin = ClickHouseWarehouse(clickhouse_settings)
+    database = f"xbrl_test_slim_{uuid4().hex[:12]}"
+    admin.client.command(f"CREATE DATABASE {database}")
+    warehouse = ClickHouseWarehouse(
+        clickhouse_settings.model_copy(update={"clickhouse_database": database})
+    )
+    try:
+        warehouse.apply_ddl(Path("sql/clickhouse"))
+        for bundle in (apple, other):
+            warehouse.publish_xbrl_bundle(bundle, warehouse.insert_xbrl_bundle(bundle))
+        rows = warehouse.query(
+            "SELECT accession, labels_json FROM v_filing_concepts_latest "
+            "WHERE concept_name = 'Revenues' ORDER BY accession"
+        )
+        labels = {row["accession"]: row["labels_json"] for row in rows}
+        assert "Total revenue (Other Corp)" in labels["0000789019-26-000001"]
+        assert "Other Corp" not in labels[ACCESSION]
+        assert labels[ACCESSION] == next(
+            row["labels_json"]
+            for row in silver_concepts_table(apple).to_pylist()
+            if row["concept_name"] == "Revenues"
+        )
+        # Taxonomy-owned labels (no filer label arc) are still shared once.
+        assert warehouse.query(
+            "SELECT count() AS n FROM taxonomy_concepts FINAL WHERE labels_json LIKE '%Other Corp%'"
+        ) == [{"n": 0}]
     finally:
         warehouse.close()
         admin.client.command(f"DROP DATABASE IF EXISTS {database} SYNC")

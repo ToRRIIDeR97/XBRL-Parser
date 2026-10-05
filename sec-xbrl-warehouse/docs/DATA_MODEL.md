@@ -106,9 +106,13 @@ every raw value, every concept). ClickHouse stores the same data more compactly;
   stored as 32 raw bytes (`FixedString(32)`). The views return `lower(hex(...))` under
   the same column names, so query results and API responses are unchanged. A tuple
   fact's blank `context_hash` is stored as zero bytes and read back as `''`. Querying
-  a raw table directly needs `lower(hex(col))` or `unhex('<hex>')`. An identifier that
-  isn't a hex digest (none are written by this pipeline) is stored as its SHA-256.
-  SEC bulk tables keep their hex `_row_hash`.
+  a raw table directly needs `lower(hex(col))` or `unhex('<hex>')`. SEC bulk tables keep
+  their hex `_row_hash`.
+- **Non-hex identifiers (test-only).** The pipeline only produces hex SHA-256
+  identifiers. Some test fixtures use other strings (`"rev"`); those are stored as the
+  SHA-256 of the text, identically on insert and upgrade, so joins still match, but the
+  views then return that digest rather than the original text. Outside
+  `XBRL_ENV=test` this logs `non_hex_identifier_hashed`.
 - **Raw values.** `xbrl_facts.raw_value` is NULL when it equals the typed value, and
   `raw_value_scale` records how to rebuild it: for numeric facts, the fraction digits
   of `str(value_decimal)` in plain notation (`"1000"` → 0, `"1.50"` → 2); for text
@@ -156,11 +160,21 @@ abstract/nillable flags, labels, documentation, and extension status.
 - `xbrl_concepts` holds each filing's **extension** concepts (per accession and
   revision).
 - `taxonomy_concepts` holds standard concepts (us-gaap, dei, srt, ...) once per
-  `(concept_namespace, concept_name, taxonomy_version)` (`ReplacingMergeTree`; labels
-  and attributes from the most recent write). Labels a filer attaches to standard
-  concepts are kept per filing in silver Parquet, not in this table.
+  `(concept_namespace, concept_name, taxonomy_version)`.
+- **Labels.** SEC filings don't load the standard label linkbases, so most labels a
+  bundle carries for a standard concept come from the filer's own label linkbase (for
+  example AAPL's terse label "Net sales"). A concept counts as filer-labelled when the
+  filing has a label arc for it in one of its own documents (`xbrl_relationships`,
+  `network_type = 'label'`, `source_document` in the extraction's
+  `source_documents`). Its full label set is stored for that filing only in
+  `xbrl_concept_labels (accession, extraction_revision, concept_qname, labels_json)`,
+  and `taxonomy_concepts` gets `labels_json = '[]'`, `labels_rank = 0` for it. Other
+  standard concepts' labels are taxonomy-owned and shared (`labels_rank = 1`;
+  `ReplacingMergeTree(labels_rank)`, so `FINAL` keeps a labelled row).
 - `v_filing_concepts_latest` lists, per accession (latest revision), its extension
-  concepts plus the standard concepts its facts use, matched on namespace and name.
+  concepts plus the standard concepts its facts use (matched on namespace and name),
+  with the filing's own labels where it has them, else the shared ones. No filer's
+  labels reach another filing.
 
 Silver Parquet keeps every concept of every filing.
 

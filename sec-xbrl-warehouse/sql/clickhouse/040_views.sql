@@ -90,6 +90,8 @@ FROM {{database}}.v_xbrl_facts_latest
 WHERE endsWith(concept_name, 'TextBlock');
 
 -- Per filing: its extension concepts plus the standard taxonomy concepts its facts use.
+-- A standard concept's labels are the filing's own (xbrl_concept_labels) when it labels
+-- the concept itself, else the taxonomy-owned labels.
 CREATE OR REPLACE VIEW {{database}}.v_filing_concepts_latest AS
 SELECT
     accession, concept_namespace, concept_name, concept_qname, taxonomy_version,
@@ -103,7 +105,9 @@ UNION ALL
 SELECT
     used.accession, t.concept_namespace, t.concept_name, t.concept_qname, t.taxonomy_version,
     t.datatype_qname, t.substitution_group_qname, t.period_type, t.balance, t.abstract,
-    t.nillable, toUInt8(0) AS is_extension, t.labels_json, t.documentation, t.references_json
+    t.nillable, toUInt8(0) AS is_extension,
+    if(empty(own.labels_json), t.labels_json, own.labels_json) AS labels_json,
+    t.documentation, t.references_json
 FROM (
     SELECT DISTINCT accession, concept_namespace, concept_name
     FROM {{database}}.v_xbrl_facts_latest
@@ -116,4 +120,13 @@ INNER JOIN (
     LIMIT 1 BY concept_namespace, concept_name
 ) AS t
     ON t.concept_namespace = used.concept_namespace
-   AND t.concept_name = used.concept_name;
+   AND t.concept_name = used.concept_name
+LEFT JOIN (
+    SELECT accession, concept_namespace, concept_name, labels_json
+    FROM {{database}}.xbrl_concept_labels FINAL
+    WHERE (accession, extraction_revision) IN
+        (SELECT accession, max(extraction_revision) FROM {{database}}.xbrl_extractions GROUP BY accession)
+) AS own
+    ON own.accession = used.accession
+   AND own.concept_namespace = used.concept_namespace
+   AND own.concept_name = used.concept_name;

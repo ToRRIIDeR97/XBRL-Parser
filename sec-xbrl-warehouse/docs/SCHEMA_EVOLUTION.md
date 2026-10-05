@@ -29,8 +29,11 @@ Upgrading from the hex-hash schema (main @ 8f16ca0 and plans 10-13):
   written by this pipeline) becomes its SHA-256, the same mapping new writes use, so
   joins between tables still match.
 - `xbrl_concepts` keeps extension rows; its standard rows are copied into
-  `taxonomy_concepts` (deduplicated). The backup keeps every original row, and the
-  row-count check compares extension rows.
+  `taxonomy_concepts` (deduplicated). Standard concepts a published filing labels
+  itself (label arc in its own documents) are copied with `labels_json = '[]'`, and
+  their labels go to `xbrl_concept_labels` for that filing; unpublished revisions
+  share no labels. The backup keeps every original row, and the row-count check
+  compares extension rows.
 - `xbrl_facts` gains `raw_value_scale` (NULL for existing rows, so their stored raw
   values are returned as before). Only new writes drop raw values that equal the
   typed value.
@@ -41,7 +44,7 @@ Upgrading from the hex-hash schema (main @ 8f16ca0 and plans 10-13):
 Steps: back up (BACKUP_RESTORE.md), stop workers, run `doctor` (it reports the drift),
 check free space (at least 110% of the affected tables), run
 `db upgrade-clickhouse --yes`, then `doctor` again. Grant `xbrl_api` `SELECT` on
-`taxonomy_concepts` and `v_filing_concepts_latest`.
+`taxonomy_concepts`, `xbrl_concept_labels`, and `v_filing_concepts_latest`.
 
 ## PostgreSQL
 

@@ -48,6 +48,7 @@ worker_app = typer.Typer(help="PostgreSQL job worker.")
 filing_app = typer.Typer(help="Incremental filing discovery and ingestion.")
 mapping_app = typer.Typer(help="Canonical metric and mapping review workflows.")
 taxonomy_app = typer.Typer(help="Pinned local taxonomy packages for Arelle.")
+company_app = typer.Typer(help="Companies from SEC submissions data.")
 app.add_typer(db_app, name="db")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(backfill_app, name="backfill")
@@ -56,6 +57,7 @@ app.add_typer(worker_app, name="worker")
 app.add_typer(filing_app, name="filing")
 app.add_typer(mapping_app, name="mapping")
 app.add_typer(taxonomy_app, name="taxonomy")
+app.add_typer(company_app, name="company")
 console = Console()
 
 
@@ -415,17 +417,25 @@ async def _enqueue_filing(filing: FilingRef, revision: int) -> None:
 
 @filing_app.command("discover")
 def filing_discover(
-    filed_from: str = typer.Option(..., help="First filing date in YYYY-MM-DD format."),
-    filed_to: str = typer.Option(..., help="Last filing date in YYYY-MM-DD format."),
+    filed_from: str | None = typer.Option(None, help="First filing date in YYYY-MM-DD format."),
+    filed_to: str | None = typer.Option(None, help="Last filing date in YYYY-MM-DD format."),
     forms: str | None = typer.Option(None, help="Comma-separated forms; defaults to sources.yml."),
-    refresh: bool = typer.Option(False, help="Queue another scan of the same date range."),
+    refresh: bool = typer.Option(False, help="Queue another scan of the same range."),
+    cik: int | None = typer.Option(
+        None,
+        min=1,
+        help="Discover one issuer from its SEC submissions JSON and store its company row; "
+        "dates are optional filters.",
+    ),
 ) -> None:
+    """Queue discovery: a daily-index date range, or one issuer with --cik."""
     parsed_from = _parse_cli_date(filed_from, "filed-from")
     parsed_to = _parse_cli_date(filed_to, "filed-to")
-    assert parsed_from is not None and parsed_to is not None
-    if parsed_from > parsed_to:
+    if cik is None and (parsed_from is None or parsed_to is None):
+        raise typer.BadParameter("--filed-from and --filed-to are required without --cik")
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
         raise typer.BadParameter("filed-from must not exceed filed-to")
-    asyncio.run(_enqueue_discovery(parsed_from, parsed_to, forms, refresh))
+    asyncio.run(_enqueue_discovery(parsed_from, parsed_to, forms, refresh, cik=cik))
 
 
 @filing_app.command("discover-latest")
@@ -442,16 +452,23 @@ def filing_discover_latest(
 
 
 async def _enqueue_discovery(
-    filed_from: date, filed_to: date, forms: str | None, refresh: bool
+    filed_from: date | None,
+    filed_to: date | None,
+    forms: str | None,
+    refresh: bool,
+    *,
+    cik: int | None = None,
 ) -> None:
     settings = get_settings()
     configured = load_yaml(settings.config_dir / "sources.yml")["sec"]["default_forms"]
     selected = [item.strip() for item in forms.split(",") if item.strip()] if forms else configured
-    payload = {
-        "filed_from": filed_from.isoformat(),
-        "filed_to": filed_to.isoformat(),
+    payload: dict[str, object] = {
+        "filed_from": filed_from.isoformat() if filed_from else None,
+        "filed_to": filed_to.isoformat() if filed_to else None,
         "forms": selected,
     }
+    if cik is not None:
+        payload["cik"] = cik
     identity = stable_json_hash(payload)
     if refresh:
         identity += f":{datetime.now(UTC).isoformat()}"
@@ -689,3 +706,29 @@ def _print_taxonomy_statuses(statuses: list[TaxonomyPackageStatus]) -> None:
     for item in statuses:
         table.add_row(item.package_id, item.filename, item.state, item.detail)
     console.print(table)
+
+
+@company_app.command("show")
+def company_show(identifier: str = typer.Argument(..., help="CIK or ticker.")) -> None:
+    """Show a stored company by CIK or ticker (no SEC request)."""
+    asyncio.run(_company_show(identifier))
+
+
+async def _company_show(identifier: str) -> None:
+    settings = get_settings()
+    control = PostgresControlRepository(settings)
+    try:
+        text = identifier.strip()
+        company = (
+            await control.get_company(int(text))
+            if text.isdigit()
+            else await control.find_company_by_ticker(text)
+        )
+    finally:
+        await control.close()
+    if company is None:
+        console.print(
+            f"No company stored for {identifier}; run `xbrl-warehouse filing discover --cik <cik>`"
+        )
+        raise typer.Exit(code=1)
+    console.print_json(company.model_dump_json())

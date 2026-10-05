@@ -419,3 +419,70 @@ async def test_extraction_checkpoint_finds_completed_ingest(postgres_settings: S
         )
     finally:
         await repo.close()
+
+
+async def test_company_round_trips_every_field(postgres_settings: Settings) -> None:
+    from datetime import date
+
+    from sec_xbrl_warehouse.domain.models import Company, FormerName
+
+    company = Company(
+        cik=987654,
+        name="Round Trip Corp",
+        entity_type="operating",
+        sic=3571,
+        sic_description="Electronic Computers",
+        tickers=("RTC", "RTC-W"),
+        exchanges=("Nasdaq", "Nasdaq"),
+        fiscal_year_end="0630",
+        state_of_incorporation="DE",
+        filer_category="Large accelerated filer",
+        former_names=(FormerName(name="OLD RTC", valid_from=date(2001, 1, 2), valid_to=None),),
+        source_checksum="c" * 64,
+        fetched_at=datetime(2026, 10, 5, 12, 0, tzinfo=UTC),
+    )
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.upsert_company(company)
+        assert await repo.get_company(987654) == company
+        assert await repo.find_company_by_ticker("rtc-w") == company
+        assert await repo.known_company_ciks([987654, 1]) == {987654}
+        assert await repo.known_company_ciks([]) == set()
+    finally:
+        await repo.close()
+
+
+async def test_ticker_move_removes_matching_exchange(postgres_settings: Settings) -> None:
+    from sec_xbrl_warehouse.domain.models import Company
+
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.upsert_company(
+            Company(
+                cik=555001,
+                name="Holder A",
+                tickers=("AAA", "MOVE", "aaa"),
+                exchanges=("NYSE", "Nasdaq", "NYSE"),
+                fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+        stored = await repo.get_company(555001)
+        assert stored is not None
+        assert (stored.tickers, stored.exchanges) == (("AAA", "MOVE"), ("NYSE", "Nasdaq"))
+        await repo.upsert_company(
+            Company(
+                cik=555002,
+                name="Holder B",
+                tickers=("MOVE",),
+                exchanges=("CboeBZX",),
+                fetched_at=datetime(2026, 10, 1, tzinfo=UTC),
+            )
+        )
+        old = await repo.get_company(555001)
+        assert old is not None and (old.tickers, old.exchanges) == (("AAA",), ("NYSE",))
+        stale = await repo.stale_company_ciks(
+            [555001, 555002, 999], datetime(2026, 6, 1, tzinfo=UTC)
+        )
+        assert stale == {555001}
+    finally:
+        await repo.close()

@@ -19,15 +19,18 @@ from sqlalchemy.ext.asyncio import (
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import ArtifactState, JobState, JobType
 from sec_xbrl_warehouse.domain.models import (
+    Company,
     DatasetArtifact,
     FilingPackageManifest,
     FilingRef,
+    FormerName,
     JobRecord,
     SourceArtifactRef,
     ValidationIssue,
 )
 from sec_xbrl_warehouse.exceptions import StateTransitionError
 from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
+    CompanyRow,
     FilingRow,
     IngestionJobRow,
     JobCheckpointRow,
@@ -320,6 +323,111 @@ class PostgresControlRepository:
         async with self.sessions() as session:
             return [(str(row[0]), int(row[1])) for row in (await session.execute(statement)).all()]
 
+    async def upsert_company(self, company: Company) -> None:
+        """Insert or update a company; tickers it lists are removed from other companies.
+
+        `tickers` and `exchanges` are parallel lists (SEC submissions order). A
+        ticker belongs to at most one company at a time, so the newest upsert that
+        lists it wins, and the previous holder loses the ticker together with the
+        exchange at the same position. Both changes commit in one transaction.
+        """
+        pairs = _ticker_pairs(company.tickers, company.exchanges)
+        tickers = [ticker for ticker, _ in pairs]
+        values = {
+            "cik": company.cik,
+            "name": company.name,
+            "entity_type": company.entity_type,
+            "sic": company.sic,
+            "sic_description": company.sic_description,
+            "tickers": tickers,
+            "exchanges": [exchange for _, exchange in pairs]
+            if _aligned(company)
+            else list(company.exchanges),
+            "fiscal_year_end": company.fiscal_year_end,
+            "state_of_incorporation": company.state_of_incorporation,
+            "filer_category": company.filer_category,
+            "former_names": [item.model_dump(mode="json") for item in company.former_names],
+            "source_checksum": company.source_checksum,
+            "fetched_at": company.fetched_at,
+        }
+        async with self.sessions.begin() as session:
+            # Serialize ticker moves so concurrent upserts can't both keep a ticker.
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended('companies:tickers', 0))")
+            )
+            if tickers:
+                holders = (
+                    await session.scalars(
+                        select(CompanyRow)
+                        .where(CompanyRow.cik != company.cik, CompanyRow.tickers.overlap(tickers))
+                        .with_for_update()
+                    )
+                ).all()
+                moved = set(tickers)
+                for holder in holders:
+                    aligned = len(holder.exchanges or []) == len(holder.tickers or [])
+                    keep = [
+                        index
+                        for index, ticker in enumerate(holder.tickers or [])
+                        if ticker not in moved
+                    ]
+                    holder.exchanges = (
+                        [holder.exchanges[index] for index in keep]
+                        if aligned
+                        else list(holder.exchanges or [])
+                    )
+                    holder.tickers = [holder.tickers[index] for index in keep]
+                    holder.updated_at = func.now()
+                await session.flush()
+            statement = pg_insert(CompanyRow).values(**values)
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[CompanyRow.cik],
+                    set_={
+                        **{key: value for key, value in values.items() if key != "cik"},
+                        "updated_at": func.now(),
+                    },
+                )
+            )
+
+    async def stale_company_ciks(self, ciks: Sequence[int], fetched_before: datetime) -> set[int]:
+        """Stored CIKs whose submissions were fetched before `fetched_before` (or never)."""
+        if not ciks:
+            return set()
+        async with self.sessions() as session:
+            rows = await session.scalars(
+                select(CompanyRow.cik).where(
+                    CompanyRow.cik.in_(list(ciks)),
+                    or_(CompanyRow.fetched_at.is_(None), CompanyRow.fetched_at < fetched_before),
+                )
+            )
+            return {int(cik) for cik in rows}
+
+    async def get_company(self, cik: int) -> Company | None:
+        async with self.sessions() as session:
+            row = await session.get(CompanyRow, cik)
+            return _company_from_row(row) if row is not None else None
+
+    async def find_company_by_ticker(self, ticker: str) -> Company | None:
+        """Case-insensitive ticker lookup; None when no company lists it."""
+        normalized = ticker.strip().upper()
+        if not normalized:
+            return None
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(CompanyRow).where(CompanyRow.tickers.contains([normalized])).limit(1)
+            )
+            return _company_from_row(row) if row is not None else None
+
+    async def known_company_ciks(self, ciks: Sequence[int]) -> set[int]:
+        if not ciks:
+            return set()
+        async with self.sessions() as session:
+            rows = await session.scalars(
+                select(CompanyRow.cik).where(CompanyRow.cik.in_(list(ciks)))
+            )
+            return {int(cik) for cik in rows}
+
     async def extraction_checkpoint(self, accession: str, revision: int) -> dict[str, Any] | None:
         """The saved extraction (`object_key`, `sha256`) of a completed filing ingestion."""
         statement = (
@@ -586,3 +694,34 @@ def filing_upsert_statement(values: dict[str, Any], *, keep_derived: bool = Fals
         for key in _DERIVED_FILING_FIELDS:
             updates[key] = func.coalesce(statement.excluded[key], getattr(FilingRow, key))
     return statement.on_conflict_do_update(index_elements=[FilingRow.accession], set_=updates)
+
+
+def _company_from_row(row: CompanyRow) -> Company:
+    return Company(
+        cik=int(row.cik),
+        name=row.name,
+        entity_type=row.entity_type,
+        sic=row.sic,
+        sic_description=row.sic_description,
+        tickers=tuple(row.tickers or ()),
+        exchanges=tuple(row.exchanges or ()),
+        fiscal_year_end=row.fiscal_year_end,
+        state_of_incorporation=row.state_of_incorporation,
+        filer_category=row.filer_category,
+        former_names=tuple(FormerName.model_validate(item) for item in row.former_names or ()),
+        source_checksum=row.source_checksum,
+        fetched_at=row.fetched_at,
+    )
+
+
+def _aligned(company: Company) -> bool:
+    return len(company.exchanges) == len(company.tickers)
+
+
+def _ticker_pairs(tickers: Sequence[str], exchanges: Sequence[str]) -> list[tuple[str, str]]:
+    """Upper-cased, de-duplicated tickers with the exchange at the same position."""
+    aligned = len(exchanges) == len(tickers)
+    pairs: dict[str, str] = {}
+    for index, ticker in enumerate(tickers):
+        pairs.setdefault(ticker.upper(), exchanges[index] if aligned else "")
+    return list(pairs.items())

@@ -1,4 +1,4 @@
-"""Upgrade and downgrade the plan 05 control-plane migrations on a scratch database."""
+"""Upgrade and downgrade the control-plane migrations on a scratch database."""
 
 from __future__ import annotations
 
@@ -128,12 +128,17 @@ def test_review_and_issue_migrations_upgrade_and_downgrade() -> None:
         )
         assert len(columns) == 1
 
-        _alembic(dsn, "downgrade", "-1")
+        tables = asyncio.run(_run(plain, "SELECT to_regclass('companies') AS name"))
+        assert tables[0]["name"] == "companies"
+        _alembic(dsn, "downgrade", "0003_mapping_review_per_concept")
+        tables = asyncio.run(_run(plain, "SELECT to_regclass('companies') AS name"))
+        assert tables[0]["name"] is None
+        _alembic(dsn, "downgrade", "0002_validation_issue_revision")
         states = asyncio.run(
             _run(plain, "SELECT state, count(*) AS n FROM mapping_reviews GROUP BY state")
         )
         assert {row["state"]: row["n"] for row in states} == {"open": 4, "resolved": 1}
-        _alembic(dsn, "downgrade", "-1")
+        _alembic(dsn, "downgrade", "0001_control_plane")
         columns = asyncio.run(
             _run(
                 plain,

@@ -21,8 +21,21 @@
 
 ## Taxonomy packages
 
-Standard taxonomies (us-gaap, srt, and others) load from pinned packages listed in
-`config/taxonomy_packages.yml`, under `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR`.
+Standard taxonomies (us-gaap, srt, dei, and the other SEC families) load from
+pinned, unmodified files published by FASB and the SEC, listed in
+`config/taxonomy_packages.yml` and kept under `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR`.
+Entries have one of three kinds:
+
+- `package`: an XBRL Taxonomy Package; Arelle reads its catalog (FASB us-gaap
+  2017+ and srt).
+- `archive`: an official zip mapped by explicit URI prefix to a directory inside it
+  (us-gaap 2015/2016, the SEC per-family zips, and the SEC combined annual zips
+  `https://xbrl.sec.gov/<year>.zip`, mapped per family and year).
+- `file`: a schema the SEC publishes only as an individual file (exch 2018,
+  stpr 2018, invest 2013).
+
+Every prefix maps under both `http://` and `https://`. `required_prefixes` lists the
+family/years the corpus uses; each must be served by an enabled entry.
 
 ```bash
 xbrl-warehouse taxonomy status   # verify files on disk; no network access
@@ -38,8 +51,11 @@ xbrl-warehouse taxonomy sync     # download missing or corrupt enabled packages
   `XBRL_ARELLE_OFFLINE=true` or `XBRL_ENV=production`. Elsewhere, extraction records a
   `warehouse:taxonomyPackageMissing` warning and resolves that taxonomy through the
   allowlisted web cache, so results can depend on the cache until `sync` runs.
-- `doctor` fails its "Taxonomy packages" check when any enabled package isn't `ok`,
-  or when `XBRL_ENV=production` and `XBRL_ARELLE_OFFLINE` is false.
+- `taxonomy status` and `doctor` report an `uncovered` row for each required prefix
+  with no enabled entry. `doctor` fails its "Taxonomy packages" check when any
+  enabled entry isn't `ok`, any required prefix is uncovered, or `XBRL_ENV=production`
+  and `XBRL_ARELLE_OFFLINE` is false. Offline or production extraction also refuses
+  to start while a required prefix is uncovered.
 - The W3C `xml.xsd` schemas that the taxonomy package schema imports are shipped with
   the application and never fetched.
 
@@ -48,14 +64,14 @@ xbrl-warehouse taxonomy sync     # download missing or corrupt enabled packages
 1. Find the official package URL on the publisher's site (FASB `xbrl.fasb.org`, SEC
    `xbrl.sec.gov`). The host must be on the allowlist.
 2. Download it once and record its SHA-256 and size.
-3. Check it contains `META-INF/taxonomyPackage.xml`. Arelle can't load a zip without
-   it; pin such a zip with `enabled: false` and a note.
-4. Check its `META-INF/catalog.xml` rewrite prefix doesn't overlap an enabled package.
-   Arelle uses only one package per identical prefix. Each SEC combined annual package
-   (`https://xbrl.sec.gov/<year>.zip`) rewrites all of `https://xbrl.sec.gov/`, so they
-   stay disabled.
-5. Add the entry, run `taxonomy sync` and `taxonomy status`, then re-extract a filing
-   that uses the year. Package changes alter extraction input, so they ship with an
+3. If it contains `META-INF/taxonomyPackage.xml` and a catalog limited to that
+   family/year, add a `package` entry with its `prefixes`. Otherwise add an `archive`
+   entry whose `mappings` point each `https://<host>/<family>/<year>/` prefix at the
+   matching directory in the zip (`""` for the zip root). Don't repackage the file.
+   Two enabled entries may not claim the same prefix.
+4. Add the family/year to `required_prefixes`.
+5. Run `taxonomy sync` and `taxonomy status`, then re-extract a filing that uses the
+   year offline. Package changes alter extraction input, so they ship with an
    extraction revision bump.
 
 ## Metrics and dashboard

@@ -181,3 +181,21 @@ independently authored.
   integration (24 passed), plan tests 01/02/03/04 (12/10/8/10 passed). Live
   `taxonomy sync` of srt-2026 from xbrl.fasb.org into a scratch directory verified.
 - Not done: operator `taxonomy sync` on the live host, offline re-extraction of AAPL.
+
+### Follow-up (verifier, 5 October 2026)
+
+- Registry entry kinds: `package` (Arelle catalog), `archive` (official zip, explicit
+  URI prefix -> directory in the zip), `file` (single published schema). Files stay
+  byte-identical. Verified `archive`/`file` mappings and http/https twins of every
+  prefix are added to Arelle's package remappings in `_create_controller`.
+- 50 pinned sources, all enabled: us-gaap 2015–2026, srt 2018–2026, SEC per-family
+  zips (country, currency, dei, exch, naics, sic, stpr up to 2020), SEC combined zips
+  2021–2026 mapped per family/year (dei 2021–2026, ecd 2023–2026, cyd 2025–2026,
+  and others), and single files for exch 2018, stpr 2018, invest 2013.
+- `required_prefixes` (92 family/years) plus a coverage check: `taxonomy status`
+  reports `uncovered` rows, `doctor` fails on them, and offline/production extraction
+  refuses to start.
+- Tests: fixture-zip archive mapping offline (http form resolved via the https
+  mapping), coverage, invalid mappings, and a real dei 2024 offline extraction through
+  `sec-2024.zip` (skips with instructions when the zip isn't installed; passed with
+  the scratch download).

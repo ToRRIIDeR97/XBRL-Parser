@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema"
+        targetNamespace="http://example.com/2026"
+        elementFormDefault="qualified">
+  <import namespace="https://xbrl.fasb.org/fixture-taxonomy/2025"
+          schemaLocation="https://xbrl.fasb.org/fixture-taxonomy/2025/base.xsd"/>
+</schema>

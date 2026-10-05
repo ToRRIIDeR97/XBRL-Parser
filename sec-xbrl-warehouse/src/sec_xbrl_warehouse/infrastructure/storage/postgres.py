@@ -279,6 +279,66 @@ class PostgresControlRepository:
                 raise RuntimeError("PostgreSQL did not return a job ID")
             return job_id
 
+    async def enqueue_job_if_absent(
+        self,
+        *,
+        job_type: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        priority: int = 100,
+        max_attempts: int = 5,
+    ) -> UUID | None:
+        """Insert a pending job; return None if the idempotency key already exists."""
+        statement = (
+            pg_insert(IngestionJobRow)
+            .values(
+                job_type=JobType(job_type).value,
+                state=JobState.PENDING.value,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                priority=priority,
+                max_attempts=max_attempts,
+            )
+            .on_conflict_do_nothing(index_elements=[IngestionJobRow.idempotency_key])
+            .returning(IngestionJobRow.id)
+        )
+        async with self.sessions.begin() as session:
+            job_id: UUID | None = await session.scalar(statement)
+            return job_id
+
+    async def published_filing_revisions(
+        self, accessions: Sequence[str] | None = None
+    ) -> list[tuple[str, int]]:
+        """`(accession, latest_extraction_revision)` for filings with a published extraction."""
+        statement = (
+            select(FilingRow.accession, FilingRow.latest_extraction_revision)
+            .where(FilingRow.latest_extraction_revision > 0)
+            .order_by(FilingRow.accession)
+        )
+        if accessions is not None:
+            statement = statement.where(FilingRow.accession.in_(list(accessions)))
+        async with self.sessions() as session:
+            return [(str(row[0]), int(row[1])) for row in (await session.execute(statement)).all()]
+
+    async def extraction_checkpoint(self, accession: str, revision: int) -> dict[str, Any] | None:
+        """The saved extraction (`object_key`, `sha256`) of a completed filing ingestion."""
+        statement = (
+            select(JobCheckpointRow.payload)
+            .join(IngestionJobRow, IngestionJobRow.id == JobCheckpointRow.job_id)
+            .where(
+                IngestionJobRow.job_type == JobType.INGEST_FILING.value,
+                IngestionJobRow.state == JobState.COMPLETE.value,
+                IngestionJobRow.payload["filing"]["accession"].astext == accession,
+                IngestionJobRow.payload["extraction_revision"].astext == str(revision),
+                JobCheckpointRow.stage == "extract",
+            )
+            .order_by(IngestionJobRow.updated_at.desc())
+            .limit(1)
+        )
+        async with self.sessions() as session:
+            payload = await session.scalar(statement)
+        return dict(payload) if payload else None
+
     async def claim_job(
         self,
         worker_id: str,
@@ -432,7 +492,7 @@ class PostgresControlRepository:
             row.locked_by = None
             row.heartbeat_at = None
 
-    async def upsert_filing(self, filing: FilingRef) -> None:
+    async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
         values = {
             "accession": filing.accession,
             "cik": filing.cik,
@@ -450,13 +510,8 @@ class PostgresControlRepository:
             "is_amendment": filing.is_amendment,
             "is_inline_xbrl": filing.is_inline_xbrl,
         }
-        statement = pg_insert(FilingRow).values(**values)
-        statement = statement.on_conflict_do_update(
-            index_elements=[FilingRow.accession],
-            set_={key: value for key, value in values.items() if key != "accession"},
-        )
         async with self.sessions.begin() as session:
-            await session.execute(statement)
+            await session.execute(filing_upsert_statement(values, keep_derived=keep_derived))
 
     async def record_validation_issues(self, issues: Sequence[ValidationIssue]) -> None:
         if not issues:
@@ -474,6 +529,7 @@ class PostgresControlRepository:
                 "line": issue.line,
                 "column_number": issue.column,
                 "details": issue.details,
+                "extraction_revision": issue.extraction_revision,
             }
             for issue in issues
         ]
@@ -513,3 +569,20 @@ class PostgresControlRepository:
             locked_at=row.locked_at,
             locked_by=row.locked_by,
         )
+
+
+# Filing-level fields derived from the filing's own dei facts. Discovery usually
+# lacks them, so the discovery upsert at the start of a re-ingestion must not
+# erase values an earlier extraction stored. The post-extraction upsert writes
+# them as derived, including NULL for conflicting or invalid dei values.
+_DERIVED_FILING_FIELDS = ("report_date", "fiscal_year", "fiscal_period")
+
+
+def filing_upsert_statement(values: dict[str, Any], *, keep_derived: bool = False) -> Any:
+    """Insert or update a filing row; `keep_derived` keeps stored fiscal fields over NULLs."""
+    statement = pg_insert(FilingRow).values(**values)
+    updates: dict[str, Any] = {key: value for key, value in values.items() if key != "accession"}
+    if keep_derived:
+        for key in _DERIVED_FILING_FIELDS:
+            updates[key] = func.coalesce(statement.excluded[key], getattr(FilingRow, key))
+    return statement.on_conflict_do_update(index_elements=[FilingRow.accession], set_=updates)

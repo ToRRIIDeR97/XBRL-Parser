@@ -41,7 +41,7 @@ class _Connection:
         return None
 
     async def scalar(self, statement: object) -> str:
-        return "0001_control_plane"
+        return "0003_mapping_review_per_concept"
 
 
 class _Engine:

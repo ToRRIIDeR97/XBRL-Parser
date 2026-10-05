@@ -95,6 +95,34 @@ Required identity and lineage:
 - footnote IDs and tuple ancestry.
 - source document, source fact ID, extraction revision.
 
+### Filing fiscal fields
+
+`fiscal_year`, `fiscal_period`, and `report_date` on `xbrl_facts` and on the
+PostgreSQL `filings` row are filing-level values denormalized from the filing's own
+dei facts (`normalization/fiscal_focus.py`). The SEC submissions JSON doesn't publish
+them, so discovery usually leaves them NULL.
+
+- Only non-nil, non-dimensional facts in a `http://xbrl.sec.gov/dei/<version>`
+  namespace count. Dimensional (co-registrant) dei facts are ignored.
+- `fiscal_year` is the integer `dei:DocumentFiscalYearFocus`.
+- `fiscal_period` is `dei:DocumentFiscalPeriodFocus`, trimmed and upper-cased, and
+  must be one of `FY, Q1, Q2, Q3, Q4, H1, H2, M9, T1, T2, T3, M8, CY`.
+- `report_date` is `dei:DocumentPeriodEndDate`, used only when discovery supplied none.
+- A dei value replaces a different discovery value and records a
+  `warehouse:fiscalFocusMismatch` warning. Different values for the same concept
+  leave the field NULL with a `warehouse:fiscalFocusConflict` error. A value outside
+  the enumeration or not a year leaves it NULL with a `warehouse:fiscalFocusInvalid`
+  warning. Without dei facts, the discovery value passes through.
+- Raw dei facts and the saved extraction checkpoint are unchanged. The values are
+  derived again on replay, so they are deterministic. No date-based calendar
+  inference is done. Bulk FSNDS rows keep the SEC's own `fy` and `fp`.
+- The discovery upsert at the start of a re-ingestion
+  (`upsert_filing(..., keep_derived=True)`) never replaces a stored `fiscal_year`,
+  `fiscal_period`, or `report_date` with NULL. The post-extraction upsert writes the
+  derived values as they are, including NULL for conflicting or invalid dei values,
+  so PostgreSQL and the fact rows agree. A period that differs from discovery only in
+  case isn't a mismatch.
+
 ### `xbrl_contexts`
 
 One row per context per extraction revision. Includes entity, period, dimensional scenario/segment content, and a canonical context hash.
@@ -107,6 +135,16 @@ One row per QName/taxonomy version used by the filing or loaded taxonomy. Includ
 
 One row per arc. Includes network type, link role, arc role, source/target QName, order, priority, weight, preferred label, and dimensional flags.
 
+## Validation issues
+
+`validation_issues` stores diagnostics in PostgreSQL. Filing extractions record
+issues tagged with `extraction_revision` (NULL for bulk loads and for rows written
+before migration `0002_validation_issue_revision`). Repeated issues from one
+extraction that share `(source, code, severity, source_document)` are stored as one
+row: the first occurrence's message, line, and column, plus `details.occurrences`
+and up to five `details.samples` (line, column, message, details). Fatal issues are never
+grouped. The reject decision still uses every individual issue.
+
 ## Canonical layer
 
 ### `canonical_metrics` in PostgreSQL
@@ -118,9 +156,20 @@ Defines the stable metric code, expected statement, period type, unit family, an
 Append-only/versioned mapping decisions. A mapping can be:
 
 - exact taxonomy version + QName;
-- namespace + local name with validity range;
+- namespace + local name with validity range, where the namespace is an exact URI or
+  a family token (`us-gaap`, `ifrs-full`, `dei`, `srt`) covering every standard year;
 - filing-specific extension mapping;
 - rule-based candidate requiring review.
+
+Specificity order: CIK, taxonomy version, exact namespace URI, family. See
+CANONICAL_MAPPING.md.
+
+### Fact `taxonomy_version`
+
+`xbrl_facts.taxonomy_version` is the date or year in the concept's namespace
+(`http://fasb.org/us-gaap/2025` gives `2025`). Before extraction revision 3 it was
+read from the namespace of the concept's XML Schema declaration, so every fact
+showed `2001`; facts and reviews written at revisions 1–2 carry that value.
 
 ### `canonical_facts` in ClickHouse
 

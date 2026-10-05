@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -29,9 +29,20 @@ class SecHttpClient:
 
     ALLOWED_HOSTS = frozenset({"www.sec.gov", "sec.gov", "data.sec.gov"})
 
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        allowed_hosts: Iterable[str] | None = None,
+    ) -> None:
         settings.assert_sec_identity()
         self.settings = settings
+        # Taxonomy package sync passes the taxonomy host allowlist; everything
+        # else uses the SEC hosts. Rate limits, identity, and byte limits apply alike.
+        self.allowed_hosts = (
+            frozenset(allowed_hosts) if allowed_hosts is not None else self.ALLOWED_HOSTS
+        )
         self.rate_limiter = AsyncRateLimiter(settings.sec_max_requests_per_second)
         self._semaphore = asyncio.Semaphore(settings.sec_max_concurrency)
         timeout = httpx.Timeout(
@@ -61,7 +72,7 @@ class SecHttpClient:
     def _validate_url(self, url: str) -> None:
         try:
             parsed = urlparse(url)
-            if parsed.hostname not in self.ALLOWED_HOSTS:
+            if parsed.hostname not in self.allowed_hosts:
                 raise SecAccessError(
                     f"Refusing non-SEC host through SecHttpClient: {parsed.hostname!r}"
                 )

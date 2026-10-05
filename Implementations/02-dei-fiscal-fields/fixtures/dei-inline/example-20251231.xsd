@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema"
+        xmlns:xbrli="http://www.xbrl.org/2003/instance"
+        xmlns:ex="http://example.com/2026"
+        targetNamespace="http://example.com/2026"
+        elementFormDefault="qualified">
+  <import namespace="http://www.xbrl.org/2003/instance"
+          schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <import namespace="http://xbrl.sec.gov/dei/2024" schemaLocation="dei-2024.xsd"/>
+  <element name="Revenue" id="ex_Revenue" type="xbrli:monetaryItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+</schema>

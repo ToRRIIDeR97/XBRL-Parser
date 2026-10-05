@@ -13,11 +13,12 @@ import uvicorn
 from rich.console import Console
 from rich.table import Table
 
-from sec_xbrl_warehouse.config import get_settings
+from sec_xbrl_warehouse.config import Settings, get_settings
 from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.enums import DatasetKind, JobType
 from sec_xbrl_warehouse.domain.models import BackfillPlan, DatasetArtifact, FilingRef
 from sec_xbrl_warehouse.domain.ports import ControlRepository
+from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.infrastructure.http.sec_client import (
     SecHttpClient,
     build_archive_directory_url,
@@ -26,6 +27,11 @@ from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWareh
 from sec_xbrl_warehouse.infrastructure.storage.hashing import stable_json_hash
 from sec_xbrl_warehouse.infrastructure.storage.object_store import create_object_store
 from sec_xbrl_warehouse.infrastructure.storage.postgres import PostgresControlRepository
+from sec_xbrl_warehouse.infrastructure.xbrl.taxonomy_packages import (
+    TaxonomyPackageStatus,
+    package_status,
+    sync_taxonomy_packages,
+)
 from sec_xbrl_warehouse.ingestion.bulk_catalog import BulkCatalogService, filter_artifacts_by_year
 from sec_xbrl_warehouse.ingestion.orchestrator import IngestionOrchestrator
 from sec_xbrl_warehouse.logging import configure_logging
@@ -41,6 +47,7 @@ api_app = typer.Typer(help="HTTP query API.")
 worker_app = typer.Typer(help="PostgreSQL job worker.")
 filing_app = typer.Typer(help="Incremental filing discovery and ingestion.")
 mapping_app = typer.Typer(help="Canonical metric and mapping review workflows.")
+taxonomy_app = typer.Typer(help="Pinned local taxonomy packages for Arelle.")
 app.add_typer(db_app, name="db")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(backfill_app, name="backfill")
@@ -48,6 +55,7 @@ app.add_typer(api_app, name="api")
 app.add_typer(worker_app, name="worker")
 app.add_typer(filing_app, name="filing")
 app.add_typer(mapping_app, name="mapping")
+app.add_typer(taxonomy_app, name="taxonomy")
 console = Console()
 
 
@@ -55,6 +63,26 @@ console = Console()
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, json_logs=settings.env != "development")
+
+
+def _taxonomy_package_check(settings: Settings) -> tuple[str, bool, str]:
+    """Every enabled package verified; production must parse offline."""
+    try:
+        statuses = package_status(settings)
+    except Exception as exc:
+        return ("Taxonomy packages", False, str(exc))
+    problems = [
+        f"{item.package_id}={item.state}"
+        for item in statuses
+        if item.state not in {"ok", "disabled"}
+    ]
+    if settings.env == "production" and not settings.arelle_offline:
+        problems.append("XBRL_ARELLE_OFFLINE must be true in production")
+    ready = sum(item.state == "ok" for item in statuses)
+    details = "; ".join(problems) if problems else f"{ready} verified"
+    if problems and any(item.state == "missing" for item in statuses):
+        details += " (run `xbrl-warehouse taxonomy sync`)"
+    return ("Taxonomy packages", not problems, details)
 
 
 @app.command()
@@ -112,6 +140,8 @@ def doctor(skip_sec_identity: bool = False) -> None:
             f"cache={settings.arelle_cache_dir.resolve()}, packages={settings.arelle_taxonomy_packages_dir.resolve()}",
         )
     )
+
+    checks.append(_taxonomy_package_check(settings))
 
     warehouse: ClickHouseWarehouse | None = None
     try:
@@ -344,7 +374,7 @@ def filing_enqueue(
     filed_date: str = typer.Option(..., help="Filing date in YYYY-MM-DD format."),
     primary_document: str | None = typer.Option(None),
     instance_document: str | None = typer.Option(None),
-    extraction_revision: int = typer.Option(1, min=1),
+    extraction_revision: int = typer.Option(CURRENT_EXTRACTION_REVISION, min=1),
 ) -> None:
     """Queue one accession without guessing issuer identity from its number."""
     parsed_filed_date = _parse_cli_date(filed_date, "filed-date")
@@ -524,6 +554,82 @@ async def _mapping_approve(
         await control.close()
 
 
+@mapping_app.command("approve-seeds")
+def mapping_approve_seeds(
+    reviewer: str = typer.Option(..., help="Person approving the reviewed seed list."),
+    rationale: str = typer.Option(..., help="Why these seeds are approved."),
+    metric: Annotated[
+        list[str] | None, typer.Option("--metric", help="Limit to these metrics (repeatable).")
+    ] = None,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report only; write nothing."),
+) -> None:
+    """Approve seed candidates as family mappings (`us-gaap`, `ifrs-full`, `dei`, `srt`)."""
+    asyncio.run(_mapping_approve_seeds(reviewer, rationale, metric, dry_run))
+
+
+async def _mapping_approve_seeds(
+    reviewer: str, rationale: str, metrics: list[str] | None, dry_run: bool
+) -> None:
+    from sec_xbrl_warehouse.mapping.seed_approval import approve_seed_candidates
+
+    settings = get_settings()
+    control = PostgresControlRepository(settings)
+    repository = PostgresMappingRepository(settings, engine=control.engine)
+    try:
+        mapper = CanonicalMapper.load_rules(
+            settings.config_dir / "canonical_metrics.yml",
+            settings.config_dir / "concept_seed.yml",
+            repository,
+        )
+        results = await approve_seed_candidates(
+            mapper,
+            repository,
+            reviewer=reviewer,
+            rationale=rationale,
+            metrics=set(metrics) if metrics else None,
+            dry_run=dry_run,
+        )
+        table = Table("Metric", "Namespace", "Concept", "Result")
+        for item in results:
+            if item.created:
+                outcome = "approved"
+            elif item.already_approved:
+                outcome = "already approved"
+            else:
+                outcome = "would approve"
+            table.add_row(item.metric, item.namespace, item.concept_name, outcome)
+        console.print(table)
+        created = sum(item.created for item in results)
+        console.print(
+            f"{'Dry run: ' if dry_run else ''}{len(results)} candidates, {created} approved now"
+        )
+    finally:
+        await control.close()
+
+
+@mapping_app.command("remap")
+def mapping_remap(
+    epoch: str = typer.Option(..., help="Label for this set of approvals, e.g. 2026-10-05."),
+    accession: Annotated[
+        list[str] | None, typer.Option("--accession", help="Limit to these filings (repeatable).")
+    ] = None,
+) -> None:
+    """Enqueue one map_canonical job per published filing for this epoch."""
+    asyncio.run(_mapping_remap(epoch, accession))
+
+
+async def _mapping_remap(epoch: str, accessions: list[str] | None) -> None:
+    from sec_xbrl_warehouse.mapping.remap import enqueue_canonical_remap
+
+    settings = get_settings()
+    control = PostgresControlRepository(settings)
+    try:
+        created = await enqueue_canonical_remap(control, epoch=epoch, accessions=accessions)
+        console.print(f"Enqueued {created} map_canonical jobs for epoch {epoch}")
+    finally:
+        await control.close()
+
+
 @mapping_app.command("reviews")
 def mapping_reviews(
     limit: int = typer.Option(100, min=1, max=10_000),
@@ -549,3 +655,35 @@ def _parse_cli_date(value: str | None, option: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise typer.BadParameter(f"{option} must use YYYY-MM-DD") from exc
+
+
+@taxonomy_app.command("status")
+def taxonomy_status() -> None:
+    """Verify registered taxonomy packages on disk (no network access)."""
+    settings = get_settings()
+    statuses = package_status(settings)
+    _print_taxonomy_statuses(statuses)
+    if any(item.state not in {"ok", "disabled"} for item in statuses):
+        raise typer.Exit(code=1)
+
+
+@taxonomy_app.command("sync")
+def taxonomy_sync() -> None:
+    """Download missing or corrupt enabled packages and verify their SHA-256."""
+    settings = get_settings()
+    statuses = asyncio.run(_sync_taxonomy_packages(settings))
+    _print_taxonomy_statuses(statuses)
+    if any(item.state not in {"ok", "disabled"} for item in statuses):
+        raise typer.Exit(code=1)
+
+
+async def _sync_taxonomy_packages(settings: Settings) -> list[TaxonomyPackageStatus]:
+    async with SecHttpClient(settings, allowed_hosts=settings.allowed_taxonomy_hosts) as http:
+        return await sync_taxonomy_packages(settings, http)
+
+
+def _print_taxonomy_statuses(statuses: list[TaxonomyPackageStatus]) -> None:
+    table = Table("Package", "File", "State", "Details")
+    for item in statuses:
+        table.add_row(item.package_id, item.filename, item.state, item.detail)
+    console.print(table)

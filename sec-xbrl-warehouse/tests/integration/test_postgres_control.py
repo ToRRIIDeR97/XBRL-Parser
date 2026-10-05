@@ -298,6 +298,45 @@ async def test_upsert_filing_and_validation_issues(postgres_settings: Settings) 
         await repo.close()
 
 
+async def test_upsert_filing_keeps_stored_fiscal_fields_over_nulls(
+    postgres_settings: Settings,
+) -> None:
+    from sqlalchemy import select
+
+    from sec_xbrl_warehouse.infrastructure.storage.postgres_models import FilingRow
+
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        accession = "0000000001-26-000002"
+        enriched = _filing(accession).model_copy(
+            update={
+                "fiscal_year": 2025,
+                "fiscal_period": "FY",
+                "report_date": datetime(2025, 12, 31).date(),
+            }
+        )
+        await repo.upsert_filing(enriched)
+        await repo.upsert_filing(_filing(accession).model_copy(update={"form": "10-K/A"}))
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert (row.fiscal_year, row.fiscal_period, row.report_date) == (
+            2025,
+            "FY",
+            datetime(2025, 12, 31).date(),
+        )
+        assert row.form == "10-K/A"
+        await repo.upsert_filing(enriched.model_copy(update={"fiscal_period": "Q4"}))
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert row.fiscal_period == "Q4"
+    finally:
+        await repo.close()
+
+
 async def test_deferred_retry_preserves_server_deadline_and_fence(postgres_settings):
     repo = PostgresControlRepository(postgres_settings)
     try:

@@ -36,6 +36,7 @@ from sec_xbrl_warehouse.domain.xbrl import (
 )
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file
+from sec_xbrl_warehouse.infrastructure.xbrl import sec_transforms
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
 from sec_xbrl_warehouse.validation.xbrl_validation import ArelleIssueNormalizer
 
@@ -196,6 +197,7 @@ class ArelleExtractor:
         """Create a headless Arelle controller and structured log sink."""
         from arelle import Cntlr, PackageManager, PluginManager
         from arelle.ModelFormulaObject import FormulaOptions
+        from arelle.ModelValue import qname
 
         self.settings.ensure_directories()
         cache_dir = self.settings.arelle_cache_dir
@@ -249,6 +251,21 @@ class ArelleExtractor:
             for plugin in dict.fromkeys(plugins):
                 if PluginManager.addPluginModule(plugin) is None:
                     raise XbrlExtractionError(f"Cannot load configured Arelle plugin: {plugin}")
+            # The SEC `ixt-sec` registry is always on; EDGAR filings depend on it.
+            if PluginManager.addPluginModule(str(Path(sec_transforms.__file__).resolve())) is None:
+                raise XbrlExtractionError("Cannot load the SEC inline transformation registry")
+            controller.modelManager.customTransforms = None
+            controller.modelManager.loadCustomTransforms()
+            loaded = controller.modelManager.customTransforms or {}
+            missing = sorted(
+                name
+                for name in sec_transforms.SEC_TRANSFORMS
+                if qname(sec_transforms.SEC_TRANSFORM_NAMESPACE, f"ixt-sec:{name}") not in loaded
+            )
+            if missing:
+                raise XbrlExtractionError(
+                    f"SEC inline transformation registry is incomplete: missing {missing}"
+                )
             _restrict_taxonomy_access(cache, self.settings)
             PackageManager.init(controller, loadPackagesConfig=False)
             registry_path = self.settings.config_dir / "taxonomy_packages.yml"
@@ -284,10 +301,13 @@ class ArelleExtractor:
         controller.webCache._filing_root = entrypoint.parent.resolve()
         source = str(entrypoint)
         if entrypoint.suffix.lower() in {".htm", ".html"}:
+            # Only inline XBRL documents join the document set; exhibits and
+            # rendered pages in the same directory are not XBRL inputs.
             documents = sorted(
                 path
                 for path in entrypoint.parent.iterdir()
                 if path.suffix.lower() in {".htm", ".html"}
+                and (path == entrypoint or _declares_inline_xbrl(path))
             )
             if len(documents) > 1:
                 source = str(entrypoint.parent / IXDS_SURROGATE) + IXDS_DOC_SEPARATOR.join(
@@ -342,6 +362,7 @@ class ArelleExtractor:
                 "validate_efm": self.settings.arelle_validate_efm,
                 "offline": self.settings.arelle_offline,
                 "plugins": self.settings.arelle_plugins,
+                "transform_registries": _transform_registries(model_xbrl),
                 "taxonomy_packages": load_yaml(
                     self.settings.config_dir / "taxonomy_packages.yml"
                 ).get("packages", [])
@@ -487,14 +508,20 @@ class ArelleExtractor:
             raw_value = _fact_raw_value(fact)
             is_nil = bool(getattr(fact, "isNil", False))
             is_numeric = bool(getattr(fact, "isNumeric", False))
+            transformed = getattr(fact, "value", raw_value)
+            # A failed inline transformation yields Arelle's error sentinel. Arelle
+            # has already logged the diagnostic; keep raw_value and store no typed value.
+            failed = not is_nil and _is_transform_error(fact, transformed)
             value_kind, typed = _coerce_fact_value(
-                str(getattr(fact, "value", raw_value)) if not is_nil else raw_value,
+                None if failed else str(transformed) if not is_nil else raw_value,
                 is_nil=is_nil,
                 is_numeric=is_numeric,
                 base_xsd_type=str(
                     getattr(concept, "baseXsdType", None) or getattr(concept, "typeQname", "")
                 ),
             )
+            if failed and is_numeric:
+                value_kind = FactValueKind.NUMERIC
             unit = _fact_unit(fact)
             dimension_hash = _context_dimension_hash(context)
             fact_qname = fact.qname
@@ -681,6 +708,39 @@ def _require_complete_dts(log_records: list[dict[str, Any]]) -> None:
             raise XbrlExtractionError(
                 f"Taxonomy did not load completely ({record['code']}): {record.get('message')}"
             )
+
+
+_INLINE_XBRL_NAMESPACES = frozenset(
+    {"http://www.xbrl.org/2013/inlineXBRL", "http://www.xbrl.org/2008/inlineXBRL"}
+)
+
+
+def _declares_inline_xbrl(path: Path) -> bool:
+    """Return whether `path` declares the inline XBRL namespace.
+
+    Streams the document without entity resolution or network access and stops
+    at the first inline declaration. Documents that are not well-formed XML
+    before any such declaration (typical of exhibits) are not inline XBRL.
+    """
+    from lxml import etree
+
+    try:
+        for event, item in etree.iterparse(
+            str(path),
+            events=("start-ns", "end"),
+            resolve_entities=False,
+            no_network=True,
+            load_dtd=False,
+            huge_tree=False,
+        ):
+            if event == "start-ns":
+                if item[1] in _INLINE_XBRL_NAMESPACES:
+                    return True
+            else:
+                item.clear()
+    except (etree.XMLSyntaxError, OSError):
+        return False
+    return False
 
 
 def _restrict_taxonomy_access(cache: Any, settings: Settings) -> None:
@@ -916,6 +976,47 @@ def _source_document(value: Any) -> str:
     if document is None:
         document = getattr(value, "document", None)
     return _document_name(document)
+
+
+def _is_transform_error(fact: Any, value: Any) -> bool:
+    from arelle.ModelValue import INVALIDixVALUE
+
+    return value is INVALIDixVALUE or (
+        getattr(fact, "format", None) is not None and str(value) == str(INVALIDixVALUE)
+    )
+
+
+def _transform_registries(model_xbrl: Any) -> list[dict[str, str]]:
+    """List the inline transformation registries available to this extraction."""
+    from importlib.metadata import version as package_version
+
+    from arelle.FunctionIxt import ixtNamespacesByVersion
+
+    try:
+        arelle_version = package_version("arelle-release")
+    except Exception:
+        arelle_version = "unknown"
+    registries = [
+        {
+            "namespace": namespace,
+            "version": f"TR{number}",
+            "source": f"arelle-release {arelle_version}",
+        }
+        for number, namespace in sorted(ixtNamespacesByVersion.items())
+    ]
+    custom = getattr(model_xbrl.modelManager, "customTransforms", None) or {}
+    if any(
+        getattr(key, "namespaceURI", None) == sec_transforms.SEC_TRANSFORM_NAMESPACE
+        for key in custom
+    ):
+        registries.append(
+            {
+                "namespace": sec_transforms.SEC_TRANSFORM_NAMESPACE,
+                "version": sec_transforms.SEC_TRANSFORM_REGISTRY_VERSION,
+                "source": "sec_xbrl_warehouse.infrastructure.xbrl.sec_transforms",
+            }
+        )
+    return registries
 
 
 def _fact_raw_value(fact: Any) -> str | None:

@@ -142,7 +142,7 @@ issues tagged with `extraction_revision` (NULL for bulk loads and for rows writt
 before migration `0002_validation_issue_revision`). Repeated issues from one
 extraction that share `(source, code, severity, source_document)` are stored as one
 row: the first occurrence's message, line, and column, plus `details.occurrences`
-and up to five `details.samples` (line, column, message). Fatal issues are never
+and up to five `details.samples` (line, column, message, details). Fatal issues are never
 grouped. The reject decision still uses every individual issue.
 
 ## Canonical layer

@@ -128,3 +128,18 @@ taxonomy download is needed.
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- Helper `normalization/fiscal_focus.py::derive_fiscal_focus(bundle)` returns the
+  enriched `FilingRef` and `warehouse:fiscalFocus*` issues (AC-2 to AC-6).
+- `IncrementalFilingIngestor.ingest` applies it after a fresh or checkpointed
+  extraction, before the validation stage: it replaces `bundle.filing`, appends the
+  issues to `bundle.validation_issues` (recorded once under the validation
+  checkpoint), and calls `upsert_filing` with the enriched filing (AC-1). The saved
+  extraction stays as extracted.
+- Conflicting or invalid dei values set the field to NULL even if discovery had a value.
+- Revision: shares `CURRENT_EXTRACTION_REVISION = 3` from plan 01.
+- Gates: compileall, ruff, format, mypy, unit (194 passed), scan_stubs (0),
+  integration (23 passed), plan 01 tests (12 passed), plan 02 tests (10 passed).
+- Not done: re-extracting AAPL and checking `countIf(fiscal_year IS NULL) = 0` (operator step).

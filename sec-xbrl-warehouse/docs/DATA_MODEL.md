@@ -95,6 +95,28 @@ Required identity and lineage:
 - footnote IDs and tuple ancestry.
 - source document, source fact ID, extraction revision.
 
+### Filing fiscal fields
+
+`fiscal_year`, `fiscal_period`, and `report_date` on `xbrl_facts` and on the
+PostgreSQL `filings` row are filing-level values denormalized from the filing's own
+dei facts (`normalization/fiscal_focus.py`). The SEC submissions JSON doesn't publish
+them, so discovery usually leaves them NULL.
+
+- Only non-nil, non-dimensional facts in a `http://xbrl.sec.gov/dei/<version>`
+  namespace count. Dimensional (co-registrant) dei facts are ignored.
+- `fiscal_year` is the integer `dei:DocumentFiscalYearFocus`.
+- `fiscal_period` is `dei:DocumentFiscalPeriodFocus`, trimmed and upper-cased, and
+  must be one of `FY, Q1, Q2, Q3, Q4, H1, H2, M9, T1, T2, T3, M8, CY`.
+- `report_date` is `dei:DocumentPeriodEndDate`, used only when discovery supplied none.
+- A dei value replaces a different discovery value and records a
+  `warehouse:fiscalFocusMismatch` warning. Different values for the same concept
+  leave the field NULL with a `warehouse:fiscalFocusConflict` error. A value outside
+  the enumeration or not a year leaves it NULL with a `warehouse:fiscalFocusInvalid`
+  warning. Without dei facts, the discovery value passes through.
+- Raw dei facts and the saved extraction checkpoint are unchanged. The values are
+  derived again on replay, so they are deterministic. No date-based calendar
+  inference is done. Bulk FSNDS rows keep the SEC's own `fy` and `fp`.
+
 ### `xbrl_contexts`
 
 One row per context per extraction revision. Includes entity, period, dimensional scenario/segment content, and a canonical context hash.

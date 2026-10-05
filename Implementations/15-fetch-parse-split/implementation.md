@@ -180,3 +180,12 @@ independently authored.
   was written against the baseline revision 1. It fails on that assertion only.
 - Operator follow-up: Alembic 0006; benchmark one fetch worker plus one parse worker at
   concurrency 4 against the 43-minute baseline.
+
+### Plan-author test correction (5 October 2026)
+
+`verification/test_fetch_parse_verification.py::test_ac5_discovery_enqueues_fetch_jobs`
+originally asserted the key `fetch:<accession>:1`, written against the old baseline
+default revision. AC-5 specifies `fetch:{accession}:{revision}`, and plan 01 set the
+project's current extraction revision to 3 (`CURRENT_EXTRACTION_REVISION`). The
+assertion now uses that constant. The contract is unchanged.
+

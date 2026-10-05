@@ -45,7 +45,12 @@ def test_ac5_discovery_enqueues_fetch_jobs() -> None:
         job(JobType.DISCOVER_FILINGS, {"filed_from": "2026-01-01", "filed_to": "2026-01-02"})
     ))
     assert [item["job_type"] for item in control.jobs] == [JobType.FETCH_FILING.value]
-    assert control.jobs[0]["idempotency_key"] == f"fetch:{filing().accession}:1"
+    # Discovery enqueues at the project's current extraction revision (plan 01 set it to 3).
+    from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
+
+    assert control.jobs[0]["idempotency_key"] == (
+        f"fetch:{filing().accession}:{CURRENT_EXTRACTION_REVISION}"
+    )
 
 
 # AC-2: parsing without a stored package fails clearly (not by reaching for the network).

@@ -22,7 +22,8 @@
 ## Job queue
 
 - **Retries.** A failed job is retried when the error is transient: network and
-  timeout errors, ClickHouse connection errors and server codes listed in
+  timeout errors, HTTP 403 (SEC throttling), 408, 429 and 5xx responses (other 4xx
+  are permanent), ClickHouse connection errors and server codes listed in
   `TRANSIENT_CLICKHOUSE_CODES` (for example 252 `TOO_MANY_PARTS`, 241
   `MEMORY_LIMIT_EXCEEDED`, 159 `TIMEOUT_EXCEEDED`), and S3/MinIO connection errors,
   timeouts, and codes such as `SlowDown`, `ServiceUnavailable`, `InternalError`,

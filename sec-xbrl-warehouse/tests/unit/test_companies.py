@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from sec_xbrl_warehouse.ingestion.filing_discovery import enrich_companies, parse_company
 
@@ -43,11 +43,25 @@ def test_enrichment_refetches_stale_companies_only_with_max_age() -> None:
             self.saved.append(company.cik)
 
     http, control = _Http(), _Control()
+    # Staleness is measured from now, not from the (possibly historical) as_of date.
     stored = asyncio.run(
-        enrich_companies(control, http, ciks=[1, 2, 3], as_of=date(2026, 10, 5), max_age_days=30)
+        enrich_companies(
+            control,
+            http,
+            ciks=[1, 2, 3],
+            as_of=date(2016, 3, 1),
+            max_age_days=30,
+            now=datetime(2026, 10, 5, tzinfo=UTC),
+        )
     )
     assert stored == 2 and control.saved == [2, 3]
     assert control.cutoffs == [datetime(2026, 9, 5, tzinfo=UTC)]
+
+    control = _Control()
+    asyncio.run(
+        enrich_companies(control, _Http(), ciks=[2], as_of=date(2016, 3, 1), max_age_days=30)
+    )
+    assert datetime.now(UTC) - control.cutoffs[0] > timedelta(days=29)
 
     http, control = _Http(), _Control()
     assert (

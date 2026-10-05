@@ -20,7 +20,6 @@ from sec_xbrl_warehouse.domain.models import (
     BackfillPlan,
     DatasetArtifact,
     FilingRef,
-    QueueSnapshot,
 )
 from sec_xbrl_warehouse.domain.ports import ControlRepository
 from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
@@ -362,21 +361,17 @@ def worker_run(
 async def _run_worker(job_types: list[JobType] | None = None) -> None:
     from prometheus_client import REGISTRY, start_http_server
 
-    from sec_xbrl_warehouse.observability.metrics import QueueCollector
+    from sec_xbrl_warehouse.observability.metrics import QueueCollector, snapshot_on_loop
 
     settings = get_settings()
     metrics_server, _ = start_http_server(
         settings.worker_metrics_port, addr=settings.worker_metrics_host
     )
     control = PostgresControlRepository(settings)
-    loop = asyncio.get_running_loop()
-
-    def snapshot() -> QueueSnapshot:
-        # Runs in the metrics server thread; reuse the worker's pool on its loop.
-        future = asyncio.run_coroutine_threadsafe(control.queue_snapshot(), loop)
-        return future.result(timeout=5)
-
-    collector = QueueCollector(snapshot)
+    # Scrapes run in the metrics server thread and reuse the worker's pool on its loop.
+    collector = QueueCollector(
+        snapshot_on_loop(lambda: control.queue_snapshot(), asyncio.get_running_loop(), timeout=5.0)
+    )
     REGISTRY.register(collector)
     try:
         async with runtime_services(settings, control) as services:

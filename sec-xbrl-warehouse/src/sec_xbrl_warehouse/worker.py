@@ -391,18 +391,24 @@ def _payload_date(value: Any) -> Any:
 
 
 # ClickHouse server error codes that clear on their own (load, merges, restarts).
+# 164 READONLY is a permission/settings error and stays permanent.
 TRANSIENT_CLICKHOUSE_CODES = frozenset(
     {
+        3,  # UNEXPECTED_END_OF_FILE (connection dropped mid-read)
+        32,  # ATTEMPT_TO_READ_AFTER_EOF (connection dropped mid-read)
         159,  # TIMEOUT_EXCEEDED
-        164,  # READONLY (replica temporarily read-only)
         202,  # TOO_MANY_SIMULTANEOUS_QUERIES
         203,  # NO_FREE_CONNECTION
         209,  # SOCKET_TIMEOUT
         210,  # NETWORK_ERROR
+        236,  # ABORTED
         241,  # MEMORY_LIMIT_EXCEEDED
-        242,  # TABLE_IS_READ_ONLY
+        242,  # TABLE_IS_READ_ONLY (replica temporarily read-only)
+        244,  # UNEXPECTED_ZOOKEEPER_ERROR
         252,  # TOO_MANY_PARTS
+        285,  # TOO_FEW_LIVE_REPLICAS
         319,  # UNKNOWN_STATUS_OF_INSERT
+        394,  # QUERY_WAS_CANCELLED
         425,  # SYSTEM_ERROR
         999,  # KEEPER_EXCEPTION
     }
@@ -421,6 +427,7 @@ TRANSIENT_S3_CODES = frozenset(
         "500",
     }
 )
+RETRYABLE_HTTP_STATUSES = frozenset({403, 408, 429})
 _CLICKHOUSE_CODE = re.compile(r"\bCode:\s*(\d+)")
 
 
@@ -443,10 +450,13 @@ def is_retryable_exception(exc: BaseException) -> bool:
             ConnectionError,
             httpx.TimeoutException,
             httpx.TransportError,
-            httpx.HTTPStatusError,
         ),
     ):
         return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        # SEC throttling answers 403; 408/429/5xx are transient; other 4xx aren't.
+        status = exc.response.status_code
+        return status in RETRYABLE_HTTP_STATUSES or status >= 500
     if _is_transient_storage_error(exc):
         return True
     if exc.__cause__ is not None:

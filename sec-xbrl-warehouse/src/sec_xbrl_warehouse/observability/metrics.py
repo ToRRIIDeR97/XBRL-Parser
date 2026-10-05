@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+import asyncio
+from collections.abc import Awaitable, Callable, Iterator
 from typing import TYPE_CHECKING
 
 from prometheus_client import Counter, Gauge, Histogram
@@ -108,3 +109,25 @@ class QueueCollector(Collector):
             "Age of the oldest claimable pending/retry job",
             value=snapshot.oldest_ready_age_seconds,
         )
+
+
+def snapshot_on_loop(
+    snapshot: Callable[[], Awaitable[QueueSnapshot]],
+    loop: asyncio.AbstractEventLoop,
+    *,
+    timeout: float,
+) -> Callable[[], QueueSnapshot]:
+    """Run `snapshot()` on `loop` from another thread, cancelling it on timeout or error."""
+
+    def run() -> QueueSnapshot:
+        async def call() -> QueueSnapshot:
+            return await snapshot()
+
+        future = asyncio.run_coroutine_threadsafe(call(), loop)
+        try:
+            return future.result(timeout=timeout)
+        except BaseException:
+            future.cancel()  # don't leave a slow snapshot running on the worker loop
+            raise
+
+    return run

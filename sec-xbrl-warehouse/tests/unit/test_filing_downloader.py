@@ -414,3 +414,27 @@ def test_inline_detection_reads_namespace_declarations(tmp_path: Path) -> None:
     assert not _declares_inline_xbrl(plain)
     assert not _declares_inline_xbrl(malformed)
     assert not _declares_inline_xbrl(entity)
+
+
+async def test_xbrl_zip_without_instance_is_rejected_and_archive_retained(
+    tmp_path: Path,
+) -> None:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("example-20251231.xsd", b"<schema/>")
+        archive.writestr("example-20251231_lab.xml", b"<linkbase/>")
+    zip_name = "0000000001-26-000001-xbrl.zip"
+    data = buffer.getvalue()
+    http = _NamedHttp({"0000000001-26-000001.txt": b"x", zip_name: data})
+    settings = Settings(env="test", temp_dir=tmp_path / "tmp", data_dir=tmp_path / "data")
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    downloader = FilingPackageDownloader(settings, http, store)  # type: ignore[arg-type]
+    with pytest.raises(ArtifactIntegrityError, match="no XBRL instance"):
+        await downloader.download_package(_filing())
+    assert store.exists(filing_object_key(_filing(), zip_name, sha256(data).hexdigest()))
+    assert not store.exists(
+        filing_object_key(_filing(), "example-20251231.xsd", sha256(b"<schema/>").hexdigest())
+    )

@@ -220,6 +220,10 @@ class FilingPackageDownloader:
             _expand_filing_archive, archive_path, expanded, self.settings, budget
         )
         entrypoint = _archive_entrypoint([name for name, _, _ in entries], filing)
+        if entrypoint is None:
+            raise ArtifactIntegrityError(
+                f"{archive_name} contains no XBRL instance document to use as the entrypoint"
+            )
         members = [archive]
         for name, checksum, size in entries:
             await asyncio.to_thread(

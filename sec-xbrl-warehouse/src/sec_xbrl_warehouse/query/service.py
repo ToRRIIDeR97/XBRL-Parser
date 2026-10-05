@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from collections.abc import Sequence
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +191,74 @@ class QueryService:
         """,
             params,
         )
+
+    def metric_series(
+        self,
+        *,
+        cik: int,
+        metrics: Sequence[str],
+        view: str = "latest",
+        as_of: datetime | None = None,
+        period_types: Sequence[str] | None = None,
+        limit: int = 5_000,
+    ) -> list[dict[str, Any]]:
+        """Standardized series points from the company's newest `metric_series` build.
+
+        `latest` returns each point's newest version known at `as_of` (now when
+        omitted); `as_reported` returns first-reported values available by then.
+        """
+        if cik < 0 or not 1 <= limit <= 10_000:
+            raise ValueError("Invalid company or limit")
+        if view not in {"latest", "as_reported"}:
+            raise ValueError("view must be latest or as_reported")
+        selected = sorted({metric.strip() for metric in metrics if metric.strip()})
+        if not selected or len(selected) > 50:
+            raise ValueError("Request between 1 and 50 metrics")
+        if any(re.fullmatch(r"[a-z][a-z0-9_]{0,127}", metric) is None for metric in selected):
+            raise ValueError("Invalid metric code")
+        kinds = sorted(set(period_types or ())) or None
+        if kinds and not set(kinds) <= {"quarter", "annual", "ttm", "instant"}:
+            raise ValueError("Unknown period type")
+        params: dict[str, Any] = {"cik": cik, "view": view, "metrics": selected, "limit": limit}
+        filters = ""
+        if as_of is not None:
+            filters += " AND known_from <= %(as_of)s"
+            params["as_of"] = as_of if as_of.tzinfo else as_of.replace(tzinfo=UTC)
+        if kinds:
+            filters += " AND period_type IN %(period_types)s"
+            params["period_types"] = kinds
+        return self.warehouse.query(
+            f"""
+            SELECT metric, view, period_type, fiscal_year, fiscal_quarter, period_start,
+                   period_end, value, unit, derivation, concept_qname, source_accessions,
+                   available_at, known_from
+            FROM metric_series
+            WHERE cik = %(cik)s
+              AND built_at = (SELECT max(built_at) FROM metric_series WHERE cik = %(cik)s)
+              AND view = %(view)s
+              AND metric IN %(metrics)s{filters}
+            ORDER BY metric, period_type, period_end, known_from DESC
+            LIMIT 1 BY metric, period_type, period_start, period_end
+            LIMIT %(limit)s
+            """,
+            params,
+        )
+
+    def cik_for_ticker(self, ticker: str) -> int | None:
+        """Resolve a ticker through the ClickHouse `companies` mirror (newest holder wins)."""
+        symbol = ticker.strip().upper()
+        if re.fullmatch(r"[A-Z0-9.\-]{1,16}", symbol) is None:
+            raise ValueError("Invalid ticker")
+        rows = self.warehouse.query(
+            """
+            SELECT cik FROM companies FINAL
+            WHERE has(tickers, %(ticker)s)
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            {"ticker": symbol},
+        )
+        return int(rows[0]["cik"]) if rows else None
 
     def filing_summary(
         self, accession: str, *, cik: int | None = None, filed_date: date | None = None

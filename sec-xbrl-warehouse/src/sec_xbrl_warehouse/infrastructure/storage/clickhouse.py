@@ -16,6 +16,7 @@ import pyarrow as pa
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
 from sec_xbrl_warehouse.domain.enums import SecTable
+from sec_xbrl_warehouse.domain.models import Company
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle, XbrlFact
 from sec_xbrl_warehouse.exceptions import ConfigurationError, WarehouseWriteError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
@@ -464,6 +465,41 @@ class ClickHouseWarehouse:
             ),
         )
 
+    def command(self, sql: str, parameters: dict[str, Any] | None = None) -> Any:
+        return self.client.command(sql, parameters=parameters or {})
+
+    def insert_metric_series(self, table: pa.Table) -> int:
+        """Append one company's rebuilt series rows (see `query.series`)."""
+        return self._insert_arrow("metric_series", table)
+
+    def upsert_company_mirror(self, company: Company) -> int:
+        """Mirror a PostgreSQL company row for read-only ticker lookups in ClickHouse."""
+        table = pa.Table.from_pylist(
+            [
+                {
+                    "cik": company.cik,
+                    "name": company.name,
+                    "tickers": [ticker.upper() for ticker in company.tickers],
+                    "exchanges": list(company.exchanges),
+                    "sic": company.sic,
+                    "fiscal_year_end": company.fiscal_year_end,
+                    "updated_at": _now(),
+                }
+            ],
+            schema=pa.schema(
+                [
+                    pa.field("cik", pa.uint64(), False),
+                    pa.field("name", pa.string(), False),
+                    pa.field("tickers", pa.list_(pa.string()), False),
+                    pa.field("exchanges", pa.list_(pa.string()), False),
+                    pa.field("sic", pa.uint32()),
+                    pa.field("fiscal_year_end", pa.string()),
+                    pa.field("updated_at", pa.timestamp("ms", tz="UTC"), False),
+                ]
+            ),
+        )
+        return self._insert_arrow("companies", table)
+
     def query(self, sql: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         result = self.client.query(sql, parameters=parameters or {})
         names = list(result.column_names)
@@ -898,6 +934,8 @@ def _canonical_fact_row(fact: CanonicalFact) -> dict[str, Any]:
         "mapping_explanation": fact.mapping_explanation,
         "extraction_revision": fact.extraction_revision,
         "accepted_at": fact.accepted_at,
+        "concept_namespace": fact.concept_namespace,
+        "concept_qname": fact.concept_qname,
         "fiscal_year": fact.fiscal_year,
         "fiscal_period": fact.fiscal_period,
         "report_date": fact.report_date,

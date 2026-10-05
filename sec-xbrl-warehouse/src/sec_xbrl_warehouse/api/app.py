@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from prometheus_client import make_asgi_app
 
 from sec_xbrl_warehouse import __version__
-from sec_xbrl_warehouse.api.routers import facts, filings, health
+from sec_xbrl_warehouse.api.routers import facts, filings, health, series
 from sec_xbrl_warehouse.config import Settings, get_settings
 from sec_xbrl_warehouse.exceptions import ConfigurationError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWarehouse
@@ -86,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(facts.router)
     app.include_router(filings.router)
+    app.include_router(series.router)
     app.mount("/metrics", make_asgi_app())
     return app
 

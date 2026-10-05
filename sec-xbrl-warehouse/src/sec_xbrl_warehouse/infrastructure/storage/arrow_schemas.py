@@ -405,6 +405,8 @@ def canonical_fact_schema() -> Any:
             pa.field("mapping_explanation", pa.string(), False),
             pa.field("extraction_revision", pa.uint32(), False),
             pa.field("accepted_at", pa.timestamp("ms", tz="UTC")),
+            pa.field("concept_namespace", pa.string()),
+            pa.field("concept_qname", pa.string()),
             pa.field("fiscal_year", pa.uint16()),
             pa.field("fiscal_period", pa.string()),
             pa.field("report_date", pa.date32()),

@@ -157,3 +157,28 @@ All 13 tests fail:
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- AC-3: `accepted_at` on `xbrl_facts` (from `bundle.filing.accepted_at`) and on
+  `CanonicalFact` (set by the mapper), plus `concept_namespace`, `concept_qname`,
+  `fiscal_year`, `fiscal_period`, `report_date` on canonical facts. Choice: filled by
+  the stack's re-extraction at revision 3, no backfill; `db upgrade-clickhouse` now adds
+  new Nullable columns to existing tables (NULL for old rows). The remap loader derives
+  dei fiscal fields so remapped canonical facts carry them.
+- AC-1/2/4/5/6: `normalization/series.py` (`MetricObservation`, `SeriesPoint`,
+  `build_series`), selection before derivation, exact duration windows, YTD differences,
+  Q4, contiguous TTM, fiscal labels via `filing_period_end`, formula metrics (simple
+  `+ - * / ()` evaluator; default `free_cash_flow`, callers pass the YAML formulas).
+- AC-7: DDL `045_metric_series.sql` (`metric_series`, `companies` mirror);
+  `query/series.py` `rebuild_metric_series` writes `as_reported` rows and `latest`
+  versions keyed by `known_from` (rebuilt as of each acceptance time); readers use the
+  newest `built_at`. `QueryService.metric_series` / `cik_for_ticker`; API
+  `GET /v1/series/{cik}` and `GET /v1/series?ticker=`. Observations come from each
+  filing's latest published revision, or the newest canonical revision for filings
+  without an extraction record. Missing acceptance time falls back to filed date.
+- Worker: rebuild after completed `ingest_filing` and `map_canonical` (failures logged
+  and reported in the result); company upserts also write the ClickHouse mirror. CLI
+  `series rebuild --cik`.
+- Gates: compileall, ruff, format, mypy, unit (390 passed, 1 skipped), scan_stubs (0),
+  integration (36 passed), plan tests 01–11 (12/10/8/10/8/12/10/22/8/7/13 passed).

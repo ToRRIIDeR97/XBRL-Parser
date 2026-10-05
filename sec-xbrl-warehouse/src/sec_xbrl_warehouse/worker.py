@@ -302,6 +302,8 @@ def build_handlers(
             result: dict[str, Any] | None = await ingestor.ingest(
                 filing, extraction_revision=revision, job_id=job.id
             )
+            if result is not None and result.get("status") == "complete":
+                result = {**result, "series": await _rebuild_series(services, filing.cik)}
             return result
 
         handlers[JobType.INGEST_FILING] = _ingest_filing
@@ -326,7 +328,7 @@ def build_handlers(
             mapped = 0
             async for canonical in mapper.map_batches(
                 bundle.facts,
-                bundle.filing,
+                bundle.filing,  # fiscal fields come from the extraction's dei facts
                 extraction_revision=revision,
                 batch_bytes=run_settings.arrow_batch_bytes,
             ):
@@ -337,6 +339,7 @@ def build_handlers(
                 "extraction_revision": revision,
                 "mapped": mapped,
                 "unmapped": len(bundle.facts) - mapped,
+                "series": await _rebuild_series(services, bundle.filing.cik),
             }
 
         handlers[JobType.MAP_CANONICAL] = _map_canonical
@@ -347,6 +350,7 @@ def build_handlers(
             from sec_xbrl_warehouse.ingestion.filing_discovery import enrich_companies
 
             forms = job.payload.get("forms", services["forms"])
+            companies = _MirroredCompanies(services["control"], services.get("warehouse"))
             filed_from = _payload_date(job.payload.get("filed_from"))
             filed_to = _payload_date(job.payload.get("filed_to"))
             result: dict[str, Any] = {}
@@ -355,7 +359,7 @@ def build_handlers(
                 company, filings = await services["submissions"].discover_with_company(
                     int(job.payload["cik"]), forms=forms, filed_from=filed_from, filed_to=filed_to
                 )
-                await services["control"].upsert_company(company)
+                await companies.upsert_company(company)
                 result["companies_stored"] = 1
             else:
                 if filed_from is None or filed_to is None:
@@ -364,7 +368,7 @@ def build_handlers(
                 if services.get("http") is not None:
                     # Daily indexes carry no company data: fetch submissions once per new CIK.
                     result["companies_stored"] = await enrich_companies(
-                        services["control"],
+                        companies,
                         services["http"],
                         ciks=[filing.cik for filing in filings],
                         as_of=filed_to,
@@ -384,6 +388,51 @@ def build_handlers(
 
         handlers[JobType.DISCOVER_FILINGS] = _discover
     return handlers
+
+
+class _MirroredCompanies:
+    """Company writes go to PostgreSQL and, when available, the ClickHouse mirror."""
+
+    def __init__(self, control: Any, warehouse: Any) -> None:
+        self.control = control
+        self.warehouse = warehouse
+
+    async def known_company_ciks(self, ciks: Any) -> Any:
+        return await self.control.known_company_ciks(ciks)
+
+    async def stale_company_ciks(self, ciks: Any, fetched_before: Any) -> Any:
+        return await self.control.stale_company_ciks(ciks, fetched_before)
+
+    async def upsert_company(self, company: Any) -> None:
+        await self.control.upsert_company(company)
+        if self.warehouse is not None and hasattr(self.warehouse, "upsert_company_mirror"):
+            await asyncio.to_thread(self.warehouse.upsert_company_mirror, company)
+
+
+async def _rebuild_series(services: dict[str, Any], cik: int) -> dict[str, Any]:
+    """Rebuild a company's metric series after new canonical facts.
+
+    Derived data: a failure is logged and reported in the job result instead of
+    failing (and re-running) the ingest. `series rebuild --cik` repairs it.
+    """
+    warehouse = services.get("warehouse")
+    mapper = services.get("mapper")
+    if warehouse is None or not hasattr(warehouse, "insert_metric_series"):
+        return {"status": "skipped"}
+    from sec_xbrl_warehouse.query.series import formulas_from_metrics, rebuild_metric_series
+
+    try:
+        written = await asyncio.to_thread(
+            rebuild_metric_series,
+            warehouse,
+            cik,
+            formulas=formulas_from_metrics(mapper.metrics) if mapper is not None else None,
+            priorities=getattr(mapper, "candidate_priorities", None),
+        )
+    except Exception as exc:
+        logger.exception("series_rebuild_failed", cik=cik)
+        return {"status": "failed", "error": str(exc)[:2000]}
+    return {"status": "rebuilt", "rows": written}
 
 
 def _payload_date(value: Any) -> Any:

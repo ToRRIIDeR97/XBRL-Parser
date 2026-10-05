@@ -91,6 +91,14 @@ the filing) and up to five `sample_fact_ids`.
   earliest open review per concept was kept, and the others were marked `superseded`
   with `resolution.superseded_by` (not deleted). Downgrade reopens them.
 
+## Standardized series
+
+Canonical facts feed `metric_series` (see DATA_MODEL.md). When a filing reports
+several approved concepts for one metric and period, the seed `priority` decides
+(1 first), and the series point records the winning concept. Series are served by
+`GET /v1/series/{cik}?metrics=revenue,operating_cash_flow&view=latest&as_of=2025-01-01T00:00:00Z`
+or `GET /v1/series?ticker=AAPL&metrics=revenue`.
+
 ## Reproducibility
 
 Every canonical fact stores raw fact ID, mapping UUID/version, confidence, explanation, extraction revision, and normalized unit/value. Re-running with a historical mapping version must reproduce the prior result.

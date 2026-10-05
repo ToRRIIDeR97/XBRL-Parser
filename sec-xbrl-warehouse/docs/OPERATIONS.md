@@ -150,6 +150,24 @@ Example cron entry:
 
 Run workers as supervised long-lived services. Do not schedule parallel worker launches or pass `--refresh` in a routine schedule.
 
+## Object-store inventory
+
+`xbrl-warehouse storage report [--keys-file PATH]` (run through the `worker`
+service) lists every object and prints JSON: objects and bytes per kind (package
+archives, legacy loose members, manifests, `.json` and `.json.zst` extraction
+checkpoints, silver Parquet, quarantine) and the reclaimable legacy objects:
+
+- `loose_members_in_archives`: loose bronze members that a stored manifest records
+  inside an existing package archive (materialization reads the archive);
+- `json_checkpoints_with_zst`: uncompressed extraction checkpoints whose accession
+  and revision also have a `.json.zst` checkpoint.
+
+It only lists; nothing is deleted or written. `--keys-file` writes the reclaimable
+keys locally, one per line. Deleting them is a separate, operator-approved retention
+decision. Completed jobs and `mapping remap` read the checkpoint key their job
+recorded, so before deleting a JSON checkpoint confirm that the latest completed job
+for that accession and revision points at the `.json.zst` key (re-ingest otherwise).
+
 ## Safe pause
 
 Stop producers first, then wait for active jobs to checkpoint. Stop workers only after heartbeats cease. PostgreSQL and object storage are the source of recovery state; ClickHouse can be rebuilt from silver Parquet.

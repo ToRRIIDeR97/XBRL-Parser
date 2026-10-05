@@ -112,3 +112,32 @@ after re-ingesting a few filings.
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- `extraction_io.py`: `write_json` writes a zstd stream (pyarrow
+  `CompressedOutputStream`, 1 MiB buffered writes) for `.zst` paths; `read_bundle`
+  detects zstd by magic bytes and decompresses in 1 MiB chunks, enforcing
+  `extraction_max_bytes` on the uncompressed size. Legacy `.json` reads unchanged. The
+  ingestor writes `…/sha256=<hash of the compressed object>.json.zst`; remap reads
+  either form. A 500-fact bundle: 551,561 B plain → 38,769 B compressed.
+- `filing_downloader.py`: members download to staging only; `download_package`
+  stores one deterministic archive (embedded `manifest.json` = filing + members only,
+  so re-downloads of identical bytes share key and checksum). The `-xbrl.zip` fallback
+  archives the source zip plus its expanded members (`source_archive` kept); a
+  rejected `-xbrl.zip` is still stored loose for diagnosis. `materialize_package`
+  extracts from the archive: archive SHA-256, `validate_zip_integrity`, no
+  non-manifest entries, per-member SHA-256 and size. Cached manifests with an archive
+  are reused when the archive exists; `FilingSummary.xml` is read from it. Legacy
+  loose manifests materialize as before and the ingestor still archives them.
+  Plan 15 can call `download_package` (fetch) and `materialize_package` (parse)
+  separately: the manifest alone locates the bytes.
+- `storage report`: `list_objects` on both stores and
+  `infrastructure/storage/inventory.py`; dry-run only (lists, never deletes).
+- Docs: ARCHITECTURE (bronze/silver), BACKUP_RESTORE (scope), OPERATIONS (inventory
+  and retention caveat).
+- Tests: `tests/unit/test_object_store_slimming.py` (fallback archive, archive/manifest
+  mismatches, report and CLI) and a MinIO test in `test_s3_object_store.py` (temporary
+  bucket).
+- Operator follow-up (separate approval): run `storage report` and decide retention for
+  legacy loose members and JSON checkpoints.

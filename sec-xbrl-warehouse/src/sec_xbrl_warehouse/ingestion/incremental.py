@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import tempfile
 import traceback
@@ -29,6 +30,7 @@ from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha2
 from sec_xbrl_warehouse.infrastructure.storage.parquet import verify_checkpoint_objects
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
 from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
+from sec_xbrl_warehouse.normalization.fiscal_focus import derive_fiscal_focus
 from sec_xbrl_warehouse.observability.metrics import (
     ROWS_PARSED,
     ROWS_WRITTEN,
@@ -82,7 +84,7 @@ class IncrementalFilingIngestor:
                 )
             return completed
         self.settings.ensure_directories()
-        await self.control.upsert_filing(filing)
+        await _upsert_discovered_filing(self.control, filing)
         try:
             with tempfile.TemporaryDirectory(
                 prefix="filing-", dir=self.settings.temp_dir
@@ -152,6 +154,18 @@ class IncrementalFilingIngestor:
                         )
                         await self._save(job_id, "extract", {"object_key": key, "sha256": checksum})
 
+                # Filing-level fiscal fields come from the bundle's dei facts. This
+                # runs on fresh and checkpointed extractions alike, so replay
+                # derives the same values; the saved extraction stays as extracted.
+                enriched, fiscal_issues = derive_fiscal_focus(bundle)
+                bundle = bundle.model_copy(
+                    update={
+                        "filing": enriched,
+                        "validation_issues": (*bundle.validation_issues, *fiscal_issues),
+                    }
+                )
+                filing = enriched
+                await self.control.upsert_filing(filing)
                 if await self._checkpoint(job_id, "validation") is None:
                     await self.control.record_validation_issues(bundle.validation_issues)
                     for issue in bundle.validation_issues:
@@ -328,3 +342,20 @@ class IncrementalFilingIngestor:
             await asyncio.to_thread(self.object_store.put_bytes, data, key)
             result["report_object_key"] = key
         return result
+
+
+async def _upsert_discovered_filing(control: ControlRepository, filing: FilingRef) -> None:
+    """Upsert discovery metadata without erasing fiscal fields an extraction stored.
+
+    Repositories whose `upsert_filing` lacks the `keep_derived` keyword (test
+    doubles, older adapters) get a plain upsert; the post-extraction upsert
+    rewrites the derived fields either way.
+    """
+    parameters = inspect.signature(control.upsert_filing).parameters.values()
+    if any(
+        parameter.name == "keep_derived" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    ):
+        await control.upsert_filing(filing, keep_derived=True)
+    else:
+        await control.upsert_filing(filing)

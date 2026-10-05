@@ -432,7 +432,7 @@ class PostgresControlRepository:
             row.locked_by = None
             row.heartbeat_at = None
 
-    async def upsert_filing(self, filing: FilingRef) -> None:
+    async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
         values = {
             "accession": filing.accession,
             "cik": filing.cik,
@@ -450,13 +450,8 @@ class PostgresControlRepository:
             "is_amendment": filing.is_amendment,
             "is_inline_xbrl": filing.is_inline_xbrl,
         }
-        statement = pg_insert(FilingRow).values(**values)
-        statement = statement.on_conflict_do_update(
-            index_elements=[FilingRow.accession],
-            set_={key: value for key, value in values.items() if key != "accession"},
-        )
         async with self.sessions.begin() as session:
-            await session.execute(statement)
+            await session.execute(filing_upsert_statement(values, keep_derived=keep_derived))
 
     async def record_validation_issues(self, issues: Sequence[ValidationIssue]) -> None:
         if not issues:
@@ -513,3 +508,20 @@ class PostgresControlRepository:
             locked_at=row.locked_at,
             locked_by=row.locked_by,
         )
+
+
+# Filing-level fields derived from the filing's own dei facts. Discovery usually
+# lacks them, so the discovery upsert at the start of a re-ingestion must not
+# erase values an earlier extraction stored. The post-extraction upsert writes
+# them as derived, including NULL for conflicting or invalid dei values.
+_DERIVED_FILING_FIELDS = ("report_date", "fiscal_year", "fiscal_period")
+
+
+def filing_upsert_statement(values: dict[str, Any], *, keep_derived: bool = False) -> Any:
+    """Insert or update a filing row; `keep_derived` keeps stored fiscal fields over NULLs."""
+    statement = pg_insert(FilingRow).values(**values)
+    updates: dict[str, Any] = {key: value for key, value in values.items() if key != "accession"}
+    if keep_derived:
+        for key in _DERIVED_FILING_FIELDS:
+            updates[key] = func.coalesce(statement.excluded[key], getattr(FilingRow, key))
+    return statement.on_conflict_do_update(index_elements=[FilingRow.accession], set_=updates)

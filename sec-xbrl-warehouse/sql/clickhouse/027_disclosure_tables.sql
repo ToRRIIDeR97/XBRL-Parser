@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_cover_pages
     security_symbols Array(Nullable(String)),
     security_exchanges Array(Nullable(String)),
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_segment_facts
     cik UInt64,
     form LowCardinality(String),
     filed_date Date,
-    fact_id String,
+    fact_id FixedString(32),
     concept_qname String,
     axis LowCardinality(String),
     member_label String,
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_segment_facts
     period_instant Nullable(Date),
     is_elimination UInt8,
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)

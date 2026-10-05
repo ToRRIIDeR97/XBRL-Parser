@@ -421,6 +421,35 @@ def xbrl_warehouse_schema(entity: str) -> Any:
         raise ValueError(f"Unknown XBRL entity schema: {entity}") from exc
 
 
+def clickhouse_facts_schema() -> Any:
+    """`xbrl_facts` as inserted into ClickHouse: the silver schema plus `raw_value_scale`."""
+    pa = _pa()
+    return xbrl_warehouse_schema("facts").append(pa.field("raw_value_scale", pa.uint8()))
+
+
+def taxonomy_concepts_schema() -> Any:
+    pa = _pa()
+    return pa.schema(
+        [
+            pa.field("concept_namespace", pa.string(), False),
+            pa.field("concept_name", pa.string(), False),
+            pa.field("concept_qname", pa.string(), False),
+            pa.field("taxonomy_version", pa.string()),
+            pa.field("datatype_qname", pa.string()),
+            pa.field("substitution_group_qname", pa.string()),
+            pa.field("period_type", pa.string()),
+            pa.field("balance", pa.string()),
+            pa.field("abstract", pa.uint8(), False),
+            pa.field("nillable", pa.uint8(), False),
+            pa.field("labels_json", pa.string(), False),
+            pa.field("documentation", pa.string()),
+            pa.field("references_json", pa.string()),
+            pa.field("_row_hash", pa.string(), False),
+            pa.field("_ingested_at", pa.timestamp("ms", tz="UTC"), False),
+        ]
+    )
+
+
 def canonical_fact_schema() -> Any:
     pa = _pa()
     return pa.schema(

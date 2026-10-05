@@ -1,9 +1,14 @@
+-- Identity hashes (fact_id, context_hash, ...) and _row_hash are SHA-256 digests stored
+-- as 32 raw bytes (FixedString(32)); the v_* views return them as lower-case hex.
+-- raw_value is NULL when it equals the typed value; raw_value_scale then records how to
+-- render it (see docs/DATA_MODEL.md). Silver Parquet keeps hex and every raw value.
+
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_contexts
 (
     accession String,
     cik UInt64,
     context_id String,
-    context_hash FixedString(64),
+    context_hash FixedString(32),
     entity_scheme String,
     entity_identifier String,
     period_kind LowCardinality(String),
@@ -15,7 +20,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_contexts
     scenario_xml Nullable(String) CODEC(ZSTD(6)),
     source_document String,
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
@@ -41,7 +46,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_concepts
     documentation Nullable(String) CODEC(ZSTD(6)),
     references_json Nullable(String) CODEC(ZSTD(6)),
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
@@ -50,7 +55,7 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_facts
 (
-    fact_id FixedString(64),
+    fact_id FixedString(32),
     accession String,
     cik UInt64,
     company_name String,
@@ -64,11 +69,12 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_facts
     concept_qname String,
     taxonomy_version Nullable(String),
     context_id String,
-    context_hash FixedString(64),
+    context_hash FixedString(32),
     unit_id Nullable(String),
     unit_numerator_json Nullable(String),
     unit_denominator_json Nullable(String),
     raw_value Nullable(String) CODEC(ZSTD(6)),
+    raw_value_scale Nullable(UInt8),
     value_decimal Nullable(Decimal256(18)),
     value_text Nullable(String) CODEC(ZSTD(6)),
     value_boolean Nullable(UInt8),
@@ -84,17 +90,17 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_facts
     entity_scheme String,
     entity_identifier String,
     dimensions_json String CODEC(ZSTD(6)),
-    dimension_hash FixedString(64),
+    dimension_hash FixedString(32),
     tuple_path Nullable(String),
     duplicate_ordinal UInt16,
-    duplicate_set_hash FixedString(64),
-    footnote_ids Array(String),
+    duplicate_set_hash FixedString(32),
+    footnote_ids Array(FixedString(32)),
     source_document String,
     source_fact_id Nullable(String),
     source_attributes_json String DEFAULT '{}' CODEC(ZSTD(6)),
     value_kind LowCardinality(String) DEFAULT 'text',
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
@@ -104,7 +110,7 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_relationships
 (
-    relationship_id FixedString(64),
+    relationship_id FixedString(32),
     accession String,
     network_type LowCardinality(String),
     link_role_uri String,
@@ -123,7 +129,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_relationships
     attributes_json Nullable(String) CODEC(ZSTD(6)),
     source_document Nullable(String),
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
@@ -132,15 +138,15 @@ SETTINGS index_granularity = 8192;
 
 CREATE TABLE IF NOT EXISTS {{database}}.xbrl_footnotes
 (
-    footnote_id FixedString(64),
+    footnote_id FixedString(32),
     accession String,
     role_uri Nullable(String),
     language LowCardinality(Nullable(String)),
     text String CODEC(ZSTD(6)),
     html Nullable(String) CODEC(ZSTD(6)),
-    linked_fact_ids Array(FixedString(64)),
+    linked_fact_ids Array(FixedString(32)),
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)

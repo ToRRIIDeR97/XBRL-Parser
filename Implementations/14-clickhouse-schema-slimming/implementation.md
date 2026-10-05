@@ -129,3 +129,48 @@ FROM system.parts WHERE active AND database = 'xbrl' GROUP BY table
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- **Hashes (AC-2).** Every identity hash and `_row_hash` on the XBRL, statement,
+  disclosure, and canonical tables is `FixedString(32)` (arrays
+  `Array(FixedString(32))`: `footnote_ids`, `linked_fact_ids`, `value_fact_ids`).
+  `encode_hash_columns` converts hex to bytes at the ClickHouse insert boundary only;
+  silver Parquet is unchanged. `v_xbrl_facts_latest`, `v_canonical_facts_latest`,
+  `v_statement_lines_latest`, `v_cover_pages_latest`, and `v_segment_facts_latest`
+  return `lower(hex(...))` under the same names (a tuple fact's blank `context_hash`
+  reads back as `''`). `metric_series`, `companies`, and the SEC bulk tables have no
+  identity hashes to convert (bulk `_row_hash` stays hex, out of scope). A non-hex
+  identifier (none are produced by the pipeline; some plan tests use them) is stored
+  as its SHA-256, identically on insert and upgrade.
+- **Raw values (AC-3).** `facts_table` drops `raw_value` when it equals
+  `str(value_decimal)` in plain notation (≤ 18 fraction digits) or `value_text`, and
+  records `raw_value_scale`; the view rebuilds the exact string (`"1.50"` included).
+  `silver_facts_table` keeps every raw value.
+- **Concepts (AC-1, AC-4).** `concepts_table` = extensions; `taxonomy_concepts_table` =
+  standard concepts → `taxonomy_concepts` (ReplacingMergeTree by `_ingested_at`,
+  ordered by namespace, name, version). `v_filing_concepts_latest` = extensions ∪
+  standard concepts the facts use (matched on namespace and name; the namespace URI
+  carries the year). `silver_concepts_table` keeps every concept. Publish row counts
+  cover extension rows.
+- **Upgrade.** `upgrade_ddl` decodes hex hash columns while copying, moves standard
+  concept rows to `taxonomy_concepts`, and names backups
+  `<table>__backup_<UTC timestamp>_<token>`. Tested on temporary databases only: a DB
+  built from main's DDL (`tests/fixtures/clickhouse_ddl_main`, copied from
+  `main` @ 8f16ca0) with sample rows returns identical `QueryService.raw_facts`,
+  `canonical_series`, `filing_summary`, and a fact-to-canonical lineage join before
+  and after; a DB with hex-encoded plan 10-12 tables returns identical rows.
+- **Readers.** QueryService, reconciliation, series rebuild, statement and disclosure
+  views, and remap (writes through `insert_canonical_facts`) all go through the views
+  or the encoding boundary; the full suite passes.
+- **Sizes** (one AAPL 10-K, temporary databases, after `OPTIMIZE FINAL`): old encoding
+  3.04 MB (concepts 1.88 MB, relationships 0.79 MB, facts 0.35 MB); new 2.03 MB, of
+  which 1.26 MB is `taxonomy_concepts`, written once for all filings using that
+  taxonomy. Per additional filing: about 0.77 MB instead of 3.04 MB; 43 filings
+  ≈ 34 MB instead of ≈ 130 MB.
+- Docs: DATA_MODEL (encoding, concepts), SCHEMA_EVOLUTION (upgrade steps),
+  ARCHITECTURE, SECURITY (`xbrl_api` grants). `doctor` expects
+  `v_filing_concepts_latest`.
+- Operator follow-up: back up, stop workers, `doctor`, `db upgrade-clickhouse --yes`,
+  `doctor`, grant `xbrl_api` on the new objects; drop the `__backup_*` tables only
+  after verifying.

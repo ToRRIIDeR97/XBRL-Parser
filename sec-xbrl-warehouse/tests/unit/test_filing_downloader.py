@@ -256,6 +256,11 @@ async def test_download_package_reuses_checksum_manifest(tmp_path: Path) -> None
     assert second.manifest_object_key
     assert second.acquired_at <= datetime.now(UTC)
 
+    corrected = _filing().model_copy(update={"instance_document": "example-20251231.xsd"})
+    third = await downloader.download_package(corrected)
+    assert third.filing == corrected
+    assert http.downloads == 4
+
 
 async def test_storage_upload_keeps_event_loop_responsive(tmp_path):
     import threading

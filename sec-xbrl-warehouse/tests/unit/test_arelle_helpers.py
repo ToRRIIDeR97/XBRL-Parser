@@ -73,8 +73,13 @@ def test_taxonomy_transport_enforces_authority_and_stream_budgets(monkeypatch):
     ):
         with pytest.raises(XbrlExtractionError, match="denied"):
             handler.https_request(Request(url))
-    request = handler.https_request(Request("https://www.sec.gov/a.xsd"))
-    assert request.get_header("Accept-encoding") == "identity"
+    arelle_request = Request("https://www.sec.gov/a.xsd")
+    # Arelle sets this as an unredirected header, which urllib sends in
+    # preference to ordinary headers.
+    arelle_request.add_unredirected_header("Accept-encoding", "gzip, deflate")
+    request = handler.https_request(arelle_request)
+    sent = {**request.headers, **request.unredirected_hdrs}
+    assert sent["Accept-encoding"] == "identity"
 
     def response(data, headers=None):
         stream = io.BytesIO(data)
@@ -135,3 +140,19 @@ def test_cache_helper_rejects_escape_and_symlink(tmp_path):
     (root / "https/www.sec.gov/link.xsd").symlink_to(tmp_path / "outside.xsd")
     with pytest.raises(XbrlExtractionError, match="escapes"):
         cache.getfilename("https://www.sec.gov/link.xsd")
+
+
+def test_incomplete_taxonomy_fails_extraction() -> None:
+    import pytest
+
+    from sec_xbrl_warehouse.exceptions import XbrlExtractionError
+    from sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter import _require_complete_dts
+
+    _require_complete_dts([{"code": "ix11.11.1.2:invalidTransformation", "message": "kept"}])
+    for code in (
+        "FileNotLoadable",
+        "webCache:unsuccessfulRetrieval",
+        "ix11.12.1.2:missingReferences",
+    ):
+        with pytest.raises(XbrlExtractionError, match="did not load completely"):
+            _require_complete_dts([{"code": code, "message": "srt-2022.xsd"}])

@@ -581,18 +581,6 @@ class FilingPackageDownloader:
                             f"Materialized member checksum mismatch: {member.name}"
                         )
 
-    def delete_source_files(self, manifest: FilingPackageManifest) -> None:
-        """Delete downloaded filing bytes while retaining lightweight manifests."""
-        keys = [
-            filing_object_key(manifest.filing, member.name, member.checksum_sha256)
-            for member in manifest.members
-            if member.checksum_sha256
-        ]
-        if manifest.package_object_key:
-            keys.append(manifest.package_object_key)
-        for key in keys:
-            self.object_store.delete(key)
-
     def _materialize_member(
         self,
         filing: FilingRef,

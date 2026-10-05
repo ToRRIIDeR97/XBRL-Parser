@@ -114,6 +114,7 @@ class IncrementalFilingIngestor:
                     await self._save(job_id, "package", manifest.model_dump(mode="json"))
                 extracted = await self._checkpoint(job_id, "extract")
                 if extracted and self.object_store is not None:
+                    # Plain `.json` (legacy) or `.json.zst`; `read_bundle` detects which.
                     path = staging / "extraction.json"
                     stored = await asyncio.to_thread(
                         self.object_store.get_file,
@@ -159,12 +160,13 @@ class IncrementalFilingIngestor:
                     }.items():
                         ROWS_PARSED.labels(source="arelle", table=entity).inc(count)
                     if self.object_store is not None:
-                        path = staging / "extraction.json"
+                        # zstd-compressed; the checksum is of the stored object.
+                        path = staging / "extraction.json.zst"
                         await asyncio.to_thread(
                             write_json, bundle, path, self.settings.extraction_max_bytes
                         )
                         checksum = await asyncio.to_thread(sha256_file, path)
-                        key = f"silver/xbrl/extractions/accession={filing.accession}/revision={extraction_revision}/sha256={checksum}.json"
+                        key = f"silver/xbrl/extractions/accession={filing.accession}/revision={extraction_revision}/sha256={checksum}.json.zst"
                         await asyncio.to_thread(
                             self.object_store.put_file, path, key, expected_sha256=checksum
                         )

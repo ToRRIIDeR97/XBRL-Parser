@@ -400,3 +400,67 @@ def test_worker_claims_only_requested_job_types() -> None:
     )
     asyncio.run(worker.run())
     assert requested == [(JobType.INGEST_FILING,)]
+
+
+def test_discovery_stores_companies_for_cik_and_daily_index_jobs() -> None:
+    from sec_xbrl_warehouse.domain.models import Company
+
+    class _Control:
+        def __init__(self):
+            self.jobs = []
+            self.companies = []
+
+        async def enqueue_job(self, **kwargs):
+            self.jobs.append(kwargs)
+
+        async def upsert_company(self, company):
+            self.companies.append(company)
+
+        async def known_company_ciks(self, ciks):
+            return {1} & set(ciks)
+
+    class _Submissions:
+        async def discover_with_company(self, cik, *, forms, filed_from, filed_to):
+            self.received = (cik, tuple(forms), filed_from, filed_to)
+            return Company(cik=cik, name="Example Corp", tickers=("EX",)), (_filing(),)
+
+    class _Daily:
+        async def discover_range(self, filed_from, filed_to, forms):
+            other = _filing().model_copy(update={"cik": 2, "accession": "0000000002-26-000001"})
+            return (_filing(), other)
+
+    class _Http:
+        def __init__(self):
+            self.urls = []
+
+        async def get_json(self, url):
+            self.urls.append(url)
+            return {"cik": "2", "name": "Second Corp", "tickers": ["SEC"]}
+
+    control, submissions, http = _Control(), _Submissions(), _Http()
+    handlers = build_handlers(
+        services={
+            "control": control,
+            "forms": ["10-K"],
+            "discovery": _Daily(),
+            "submissions": submissions,
+            "http": http,
+            "data_api_base": "https://data.sec.gov",
+        }
+    )
+    by_cik = asyncio.run(
+        handlers[JobType.DISCOVER_FILINGS](_job(JobType.DISCOVER_FILINGS, {"cik": 1}))
+    )
+    assert by_cik == {"filings_enqueued": 1, "companies_stored": 1}
+    assert submissions.received == (1, ("10-K",), None, None)
+    daily = asyncio.run(
+        handlers[JobType.DISCOVER_FILINGS](
+            _job(
+                JobType.DISCOVER_FILINGS,
+                {"filed_from": "2026-01-01", "filed_to": "2026-01-02"},
+            )
+        )
+    )
+    assert daily == {"filings_enqueued": 2, "companies_stored": 1}
+    assert http.urls == ["https://data.sec.gov/submissions/CIK0000000002.json"]
+    assert [company.cik for company in control.companies] == [1, 2]

@@ -21,7 +21,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -287,3 +287,30 @@ class MappingReviewObservationRow(Base):
     observed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class CompanyRow(TimestampMixin, Base):
+    """Issuer metadata from SEC submissions; tickers are upper-cased and unique per holder."""
+
+    __tablename__ = "companies"
+    __table_args__ = (Index("ix_companies_tickers", "tickers", postgresql_using="gin"),)
+
+    cik: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str | None] = mapped_column(Text)
+    sic: Mapped[int | None] = mapped_column(Integer)
+    sic_description: Mapped[str | None] = mapped_column(Text)
+    tickers: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{}", default=list
+    )
+    exchanges: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default="{}", default=list
+    )
+    fiscal_year_end: Mapped[str | None] = mapped_column(String(4))
+    state_of_incorporation: Mapped[str | None] = mapped_column(Text)
+    filer_category: Mapped[str | None] = mapped_column(Text)
+    former_names: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]", default=list
+    )
+    source_checksum: Mapped[str | None] = mapped_column(String(64))
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

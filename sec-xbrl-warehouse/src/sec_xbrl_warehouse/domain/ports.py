@@ -9,6 +9,7 @@ from uuid import UUID
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
 from sec_xbrl_warehouse.domain.enums import ArtifactState, JobType, SecTable
 from sec_xbrl_warehouse.domain.models import (
+    Company,
     DatasetArtifact,
     FilingPackageManifest,
     FilingRef,
@@ -101,6 +102,14 @@ class ControlRepository(Protocol):
     async def published_filing_revisions(
         self, accessions: Sequence[str] | None = None
     ) -> list[tuple[str, int]]: ...
+
+    async def upsert_company(self, company: Company) -> None: ...
+
+    async def get_company(self, cik: int) -> Company | None: ...
+
+    async def find_company_by_ticker(self, ticker: str) -> Company | None: ...
+
+    async def known_company_ciks(self, ciks: Sequence[int]) -> set[int]: ...
 
     async def extraction_checkpoint(
         self, accession: str, revision: int

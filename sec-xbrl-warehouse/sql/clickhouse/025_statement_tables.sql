@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_roles
     category LowCardinality(String),
     statement_kind LowCardinality(Nullable(String)),
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
@@ -38,14 +38,14 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_statement_lines
     is_abstract UInt8,
     is_total UInt8,
     line_role LowCardinality(String),
-    value_fact_ids Array(String),
+    value_fact_ids Array(FixedString(32)),
     value_concept_qnames Array(String),
     value_period_starts Array(Nullable(Date)),
     value_period_ends Array(Nullable(Date)),
     value_period_instants Array(Nullable(Date)),
     value_decimals Array(Nullable(Decimal256(18))),
     extraction_revision UInt32,
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(extraction_revision)

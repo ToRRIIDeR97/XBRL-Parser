@@ -119,7 +119,10 @@ uncompressed JSON. Legacy uncompressed `.json` checkpoints are still read.
 ### Gold: ClickHouse
 
 - Raw SEC bulk tables.
-- Full-fidelity XBRL facts, contexts, concepts, and relationships.
+- Full-fidelity XBRL facts, contexts, concepts, and relationships. Hashes are stored
+  as 32 bytes and raw values only when they differ from the typed value; standard
+  taxonomy concepts are shared in `taxonomy_concepts`. The `v_*` views return the
+  original hex and raw values (DATA_MODEL.md).
 - Canonical facts with explicit mapping lineage.
 - Standardized metric series (`metric_series`) with latest, as-reported, and as-of
   views, rebuilt per company from canonical facts; a `companies` mirror for tickers.

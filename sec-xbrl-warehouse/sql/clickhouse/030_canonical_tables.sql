@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS {{database}}.canonical_facts
 (
-    canonical_fact_id FixedString(64),
-    raw_fact_id FixedString(64),
+    canonical_fact_id FixedString(32),
+    raw_fact_id FixedString(32),
     accession String,
     cik UInt64,
     filed_date Date,
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.canonical_facts
     fiscal_year Nullable(UInt16),
     fiscal_period LowCardinality(Nullable(String)),
     report_date Nullable(Date),
-    _row_hash FixedString(64),
+    _row_hash FixedString(32),
     _ingested_at DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(mapping_version)

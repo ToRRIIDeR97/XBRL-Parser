@@ -125,8 +125,9 @@ bounded object restores. The full gates are listed in the root `AGENTS.md`.
 Grant the API's ClickHouse reader (`xbrl_api`) `SELECT` on the tables and views added
 by the statement, series, and disclosure work: `metric_series`, `companies`,
 `xbrl_roles`, `xbrl_statement_lines`, `v_statement_lines_latest`, `xbrl_cover_pages`,
-`xbrl_segment_facts`, `v_cover_pages_latest`, `v_segment_facts_latest`, and
-`v_text_blocks_latest` (in addition to the existing latest views). The API reads them only through bounded `QueryService` queries.
+`xbrl_segment_facts`, `v_cover_pages_latest`, `v_segment_facts_latest`,
+`v_text_blocks_latest`, `taxonomy_concepts`, `xbrl_concept_labels`, and
+`v_filing_concepts_latest` (in addition to the existing latest views). The API reads them only through bounded `QueryService` queries.
 
 
 Production authentication, a dedicated bounded ClickHouse reader, TLS, managed

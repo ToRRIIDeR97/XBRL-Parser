@@ -95,6 +95,31 @@ Required identity and lineage:
 - footnote IDs and tuple ancestry.
 - source document, source fact ID, extraction revision.
 
+**ClickHouse encoding.** Silver Parquet keeps every value as extracted (hex hashes,
+every raw value, every concept). ClickHouse stores the same data more compactly; the
+`v_*` views and `QueryService` return it in the original form:
+
+- **Hashes.** Identity hashes (`fact_id`, `context_hash`, `dimension_hash`,
+  `duplicate_set_hash`, `footnote_ids`, `relationship_id`, `footnote_id`,
+  `linked_fact_ids`, `canonical_fact_id`, `raw_fact_id`, segment `fact_id`,
+  statement-line `value_fact_ids`) and every `_row_hash` are the same SHA-256 values
+  stored as 32 raw bytes (`FixedString(32)`). The views return `lower(hex(...))` under
+  the same column names, so query results and API responses are unchanged. A tuple
+  fact's blank `context_hash` is stored as zero bytes and read back as `''`. Querying
+  a raw table directly needs `lower(hex(col))` or `unhex('<hex>')`. SEC bulk tables keep
+  their hex `_row_hash`.
+- **Non-hex identifiers (test-only).** The pipeline only produces hex SHA-256
+  identifiers. Some test fixtures use other strings (`"rev"`); those are stored as the
+  SHA-256 of the text, identically on insert and upgrade, so joins still match, but the
+  views then return that digest rather than the original text. Outside
+  `XBRL_ENV=test` this logs `non_hex_identifier_hashed`.
+- **Raw values.** `xbrl_facts.raw_value` is NULL when it equals the typed value, and
+  `raw_value_scale` records how to rebuild it: for numeric facts, the fraction digits
+  of `str(value_decimal)` in plain notation (`"1000"` → 0, `"1.50"` → 2); for text
+  facts equal to `value_text`, 0. Formatted numbers (`"1,234"`, `"(5)"`), HTML text
+  blocks, nil, boolean, and date facts, and facts without a typed value keep
+  `raw_value`. `v_xbrl_facts_latest.raw_value` rebuilds the exact string.
+
 ### Filing fiscal fields
 
 `fiscal_year`, `fiscal_period`, and `report_date` on `xbrl_facts` and on the
@@ -127,9 +152,31 @@ them, so discovery usually leaves them NULL.
 
 One row per context per extraction revision. Includes entity, period, dimensional scenario/segment content, and a canonical context hash.
 
-### `xbrl_concepts`
+### `xbrl_concepts`, `taxonomy_concepts`, and `v_filing_concepts_latest`
 
-One row per QName/taxonomy version used by the filing or loaded taxonomy. Includes datatype, substitution group, period type, balance, abstract/nillable flags, labels, documentation, and extension status.
+Concept rows include datatype, substitution group, period type, balance,
+abstract/nillable flags, labels, documentation, and extension status.
+
+- `xbrl_concepts` holds each filing's **extension** concepts (per accession and
+  revision).
+- `taxonomy_concepts` holds standard concepts (us-gaap, dei, srt, ...) once per
+  `(concept_namespace, concept_name, taxonomy_version)`.
+- **Labels.** SEC filings don't load the standard label linkbases, so most labels a
+  bundle carries for a standard concept come from the filer's own label linkbase (for
+  example AAPL's terse label "Net sales"). A concept counts as filer-labelled when the
+  filing has a label arc for it in one of its own documents (`xbrl_relationships`,
+  `network_type = 'label'`, `source_document` in the extraction's
+  `source_documents`). Its full label set is stored for that filing only in
+  `xbrl_concept_labels (accession, extraction_revision, concept_qname, labels_json)`,
+  and `taxonomy_concepts` gets `labels_json = '[]'`, `labels_rank = 0` for it. Other
+  standard concepts' labels are taxonomy-owned and shared (`labels_rank = 1`;
+  `ReplacingMergeTree(labels_rank)`, so `FINAL` keeps a labelled row).
+- `v_filing_concepts_latest` lists, per accession (latest revision), its extension
+  concepts plus the standard concepts its facts use (matched on namespace and name),
+  with the filing's own labels where it has them, else the shared ones. No filer's
+  labels reach another filing.
+
+Silver Parquet keeps every concept of every filing.
 
 ### `xbrl_relationships`
 

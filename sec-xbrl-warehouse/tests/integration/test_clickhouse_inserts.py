@@ -1,6 +1,7 @@
 import os
 from datetime import date
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from uuid import UUID
 
@@ -260,7 +261,7 @@ def test_disclosures_keep_recast_filings_and_latest_revision_only(
         )
         facts = tuple(
             XbrlFact(
-                fact_id=f"{accession}{name}{revision}".ljust(64, "0")[:64],
+                fact_id=sha256(f"{accession}{name}{revision}".encode()).hexdigest(),
                 concept_namespace=namespace,
                 concept_name=name,
                 concept_qname=qname,
@@ -370,8 +371,8 @@ def test_series_rebuild_versions_priority_and_company_mirror(
 
     def canonical(accession, accepted, value, concept, raw):
         return CanonicalFact(
-            canonical_fact_id=(raw + "c" * 64)[:64],
-            raw_fact_id=(raw + "r" * 64)[:64],
+            canonical_fact_id=sha256(f"canonical-{raw}".encode()).hexdigest(),
+            raw_fact_id=sha256(f"raw-{raw}".encode()).hexdigest(),
             accession=accession,
             cik=cik,
             filed_date=accepted.date(),

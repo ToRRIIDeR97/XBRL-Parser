@@ -81,6 +81,7 @@ class _Warehouse:
                 "v_cover_pages_latest",
                 "v_segment_facts_latest",
                 "v_text_blocks_latest",
+                "v_filing_concepts_latest",
             )
         ]
 

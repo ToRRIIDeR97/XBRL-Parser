@@ -13,7 +13,7 @@ import uvicorn
 from rich.console import Console
 from rich.table import Table
 
-from sec_xbrl_warehouse.config import get_settings
+from sec_xbrl_warehouse.config import Settings, get_settings
 from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.enums import DatasetKind, JobType
 from sec_xbrl_warehouse.domain.models import BackfillPlan, DatasetArtifact, FilingRef
@@ -27,6 +27,11 @@ from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWareh
 from sec_xbrl_warehouse.infrastructure.storage.hashing import stable_json_hash
 from sec_xbrl_warehouse.infrastructure.storage.object_store import create_object_store
 from sec_xbrl_warehouse.infrastructure.storage.postgres import PostgresControlRepository
+from sec_xbrl_warehouse.infrastructure.xbrl.taxonomy_packages import (
+    TaxonomyPackageStatus,
+    package_status,
+    sync_taxonomy_packages,
+)
 from sec_xbrl_warehouse.ingestion.bulk_catalog import BulkCatalogService, filter_artifacts_by_year
 from sec_xbrl_warehouse.ingestion.orchestrator import IngestionOrchestrator
 from sec_xbrl_warehouse.logging import configure_logging
@@ -42,6 +47,7 @@ api_app = typer.Typer(help="HTTP query API.")
 worker_app = typer.Typer(help="PostgreSQL job worker.")
 filing_app = typer.Typer(help="Incremental filing discovery and ingestion.")
 mapping_app = typer.Typer(help="Canonical metric and mapping review workflows.")
+taxonomy_app = typer.Typer(help="Pinned local taxonomy packages for Arelle.")
 app.add_typer(db_app, name="db")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(backfill_app, name="backfill")
@@ -49,6 +55,7 @@ app.add_typer(api_app, name="api")
 app.add_typer(worker_app, name="worker")
 app.add_typer(filing_app, name="filing")
 app.add_typer(mapping_app, name="mapping")
+app.add_typer(taxonomy_app, name="taxonomy")
 console = Console()
 
 
@@ -56,6 +63,26 @@ console = Console()
 def main() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, json_logs=settings.env != "development")
+
+
+def _taxonomy_package_check(settings: Settings) -> tuple[str, bool, str]:
+    """Every enabled package verified; production must parse offline."""
+    try:
+        statuses = package_status(settings)
+    except Exception as exc:
+        return ("Taxonomy packages", False, str(exc))
+    problems = [
+        f"{item.package_id}={item.state}"
+        for item in statuses
+        if item.state not in {"ok", "disabled"}
+    ]
+    if settings.env == "production" and not settings.arelle_offline:
+        problems.append("XBRL_ARELLE_OFFLINE must be true in production")
+    ready = sum(item.state == "ok" for item in statuses)
+    details = "; ".join(problems) if problems else f"{ready} verified"
+    if problems and any(item.state == "missing" for item in statuses):
+        details += " (run `xbrl-warehouse taxonomy sync`)"
+    return ("Taxonomy packages", not problems, details)
 
 
 @app.command()
@@ -113,6 +140,8 @@ def doctor(skip_sec_identity: bool = False) -> None:
             f"cache={settings.arelle_cache_dir.resolve()}, packages={settings.arelle_taxonomy_packages_dir.resolve()}",
         )
     )
+
+    checks.append(_taxonomy_package_check(settings))
 
     warehouse: ClickHouseWarehouse | None = None
     try:
@@ -550,3 +579,35 @@ def _parse_cli_date(value: str | None, option: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise typer.BadParameter(f"{option} must use YYYY-MM-DD") from exc
+
+
+@taxonomy_app.command("status")
+def taxonomy_status() -> None:
+    """Verify registered taxonomy packages on disk (no network access)."""
+    settings = get_settings()
+    statuses = package_status(settings)
+    _print_taxonomy_statuses(statuses)
+    if any(item.state not in {"ok", "disabled"} for item in statuses):
+        raise typer.Exit(code=1)
+
+
+@taxonomy_app.command("sync")
+def taxonomy_sync() -> None:
+    """Download missing or corrupt enabled packages and verify their SHA-256."""
+    settings = get_settings()
+    statuses = asyncio.run(_sync_taxonomy_packages(settings))
+    _print_taxonomy_statuses(statuses)
+    if any(item.state not in {"ok", "disabled"} for item in statuses):
+        raise typer.Exit(code=1)
+
+
+async def _sync_taxonomy_packages(settings: Settings) -> list[TaxonomyPackageStatus]:
+    async with SecHttpClient(settings, allowed_hosts=settings.allowed_taxonomy_hosts) as http:
+        return await sync_taxonomy_packages(settings, http)
+
+
+def _print_taxonomy_statuses(statuses: list[TaxonomyPackageStatus]) -> None:
+    table = Table("Package", "File", "State", "Details")
+    for item in statuses:
+        table.add_row(item.package_id, item.filename, item.state, item.detail)
+    console.print(table)

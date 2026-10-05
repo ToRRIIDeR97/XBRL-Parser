@@ -468,3 +468,129 @@ def test_discovery_stores_companies_for_cik_and_daily_index_jobs() -> None:
     assert daily == {"filings_enqueued": 2, "companies_stored": 1}
     assert http.urls == ["https://data.sec.gov/submissions/CIK0000000002.json"]
     assert [company.cik for company in control.companies] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Code: 202. DB::Exception: Too many simultaneous queries", True),
+        ("Code: 210. DB::Exception: Connection reset by peer (NETWORK_ERROR)", True),
+        ("Code: 81. DB::Exception: Database xbrl does not exist (UNKNOWN_DATABASE)", False),
+        ("Code: 53. DB::Exception: Type mismatch", False),
+    ],
+)
+def test_clickhouse_codes_decide_retry(message: str, expected: bool) -> None:
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    assert is_retryable_exception(DatabaseError(message)) is expected
+
+
+def test_s3_status_and_timeouts_decide_retry() -> None:
+    from botocore.exceptions import ClientError, ReadTimeoutError
+
+    throttled = ClientError(
+        {"Error": {"Code": "Unknown"}, "ResponseMetadata": {"HTTPStatusCode": 503}}, "GetObject"
+    )
+    assert is_retryable_exception(throttled)
+    assert is_retryable_exception(ReadTimeoutError(endpoint_url="http://minio:9000"))
+    missing = ClientError(
+        {"Error": {"Code": "NoSuchKey"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "GetObject"
+    )
+    assert not is_retryable_exception(missing)
+
+
+def test_retry_delay_is_jittered_and_capped() -> None:
+    from sec_xbrl_warehouse.infrastructure.storage.postgres import retry_delay_seconds
+
+    first = {round(retry_delay_seconds(1), 6) for _ in range(50)}
+    assert len(first) > 1 and all(1.0 <= value <= 2.0 for value in first)
+    assert all(1800.0 <= retry_delay_seconds(40) <= 3600.0 for _ in range(50))
+
+
+def test_queue_collector_exports_snapshot_and_failure() -> None:
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from sec_xbrl_warehouse.domain.models import QueueSnapshot
+    from sec_xbrl_warehouse.observability.metrics import QueueCollector
+
+    registry = CollectorRegistry()
+    registry.register(
+        QueueCollector(
+            lambda: QueueSnapshot(
+                counts={("load_bulk", "pending"): 3, ("ingest_filing", "dead"): 1},
+                oldest_ready_age_seconds=42.5,
+            )
+        )
+    )
+    text = generate_latest(registry).decode()
+    assert 'xbrl_queue_jobs{job_type="load_bulk",state="pending"} 3.0' in text
+    assert 'xbrl_queue_jobs{job_type="ingest_filing",state="dead"} 1.0' in text
+    assert "xbrl_queue_oldest_ready_age_seconds 42.5" in text
+    assert "xbrl_queue_snapshot_up 1.0" in text
+
+    def broken() -> QueueSnapshot:
+        raise TimeoutError
+
+    failing = CollectorRegistry()
+    failing.register(QueueCollector(broken))
+    text = generate_latest(failing).decode()
+    assert "xbrl_queue_snapshot_up 0.0" in text and "xbrl_queue_jobs{" not in text
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(3, True), (32, True), (236, True), (394, True), (244, True), (285, True), (164, False)],
+)
+def test_clickhouse_code_list(code: int, expected: bool) -> None:
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    assert is_retryable_exception(DatabaseError(f"Code: {code}. DB::Exception: x")) is expected
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(403, True), (408, True), (429, True), (500, True), (503, True), (400, False), (404, False)],
+)
+def test_http_status_errors_retry_only_transient_statuses(status: int, expected: bool) -> None:
+    request = httpx.Request("GET", "https://www.sec.gov/x")
+    error = httpx.HTTPStatusError(
+        "status", request=request, response=httpx.Response(status, request=request)
+    )
+    assert is_retryable_exception(error) is expected
+
+
+def test_snapshot_on_loop_cancels_on_timeout() -> None:
+    import threading
+    import time
+
+    from sec_xbrl_warehouse.domain.models import QueueSnapshot
+    from sec_xbrl_warehouse.observability.metrics import snapshot_on_loop
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    cancelled = threading.Event()
+
+    async def slow() -> QueueSnapshot:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return QueueSnapshot(counts={})
+
+    async def fast() -> QueueSnapshot:
+        return QueueSnapshot(counts={("x", "pending"): 1})
+
+    try:
+        with pytest.raises(TimeoutError):
+            snapshot_on_loop(slow, loop, timeout=0.05)()
+        deadline = time.monotonic() + 2
+        while not cancelled.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert cancelled.is_set()
+        assert snapshot_on_loop(fast, loop, timeout=1)().counts == {("x", "pending"): 1}
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(2)
+        loop.close()

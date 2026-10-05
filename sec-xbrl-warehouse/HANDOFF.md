@@ -104,6 +104,7 @@ Only approved, versioned mappings produce canonical facts. Raw facts and their s
 ## Upgrade and recovery
 
 - Run `doctor` before migrations or workers.
+- Inspect and revive dead jobs with `xbrl-warehouse jobs list --state dead` and `jobs retry <id>`.
 - Review `docs/BACKUP_RESTORE.md`, take backups, and verify free space.
 - Apply Alembic, then `xbrl-warehouse db init-clickhouse` for compatible DDL.
 - If `doctor` reports incompatible ClickHouse sort keys, run `xbrl-warehouse db upgrade-clickhouse --yes`; old tables remain as timestamped backups.

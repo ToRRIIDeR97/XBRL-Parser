@@ -284,3 +284,53 @@ def test_company_show_resolves_cik_and_ticker(
     assert capsys.readouterr().out.count('"cik": 320193') == 2
     with pytest.raises(typer.Exit):
         cli.company_show("MSFT")
+
+
+def test_jobs_list_and_retry_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from uuid import uuid4
+
+    from sec_xbrl_warehouse.domain.enums import JobState, JobType
+    from sec_xbrl_warehouse.domain.models import JobRecord
+    from sec_xbrl_warehouse.exceptions import StateTransitionError
+
+    dead = JobRecord(
+        id=uuid4(),
+        job_type=JobType.INGEST_FILING,
+        state=JobState.DEAD,
+        idempotency_key="k",
+        payload={},
+        attempts=5,
+        max_attempts=5,
+        priority=100,
+        available_at=datetime.now(UTC),
+        last_error="boom",
+    )
+    calls: list[object] = []
+
+    class _Jobs:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def list_jobs(self, **kwargs):
+            calls.append(kwargs)
+            return [dead]
+
+        async def retry_job(self, job_id):
+            if job_id != dead.id:
+                raise StateTransitionError("not dead")
+            return dead.model_copy(update={"state": JobState.RETRY, "attempts": 0})
+
+        async def close(self) -> None:
+            pass
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli, "PostgresControlRepository", _Jobs)
+    cli.jobs_list(JobState.DEAD, JobType.INGEST_FILING, 10)
+    assert calls == [{"state": "dead", "job_type": "ingest_filing", "limit": 10}]
+    cli.jobs_retry(str(dead.id))
+    assert "is retry" in capsys.readouterr().out
+    with pytest.raises(typer.Exit):
+        cli.jobs_retry(str(uuid4()))

@@ -13,11 +13,43 @@
 ## Routine checks
 
 - `/health/ready` is green.
-- Job queue has no unexplained `dead` growth.
+- Job queue has no unexplained `dead` growth (`xbrl-warehouse jobs list --state dead`).
 - SEC 429/5xx and retry counts remain low.
 - Bronze object count and PostgreSQL artifact count reconcile.
 - ClickHouse disk free space exceeds the configured safety threshold.
 - Quarantine and mapping-review queues are triaged.
+
+## Job queue
+
+- **Retries.** A failed job is retried when the error is transient: network and
+  timeout errors, HTTP 403 (SEC throttling), 408, 429 and 5xx responses (other 4xx
+  are permanent), ClickHouse connection errors and server codes listed in
+  `TRANSIENT_CLICKHOUSE_CODES` (for example 252 `TOO_MANY_PARTS`, 241
+  `MEMORY_LIMIT_EXCEEDED`, 159 `TIMEOUT_EXCEEDED`), and S3/MinIO connection errors,
+  timeouts, and codes such as `SlowDown`, `ServiceUnavailable`, `InternalError`,
+  `RequestTimeout`, or HTTP 500/503. A wrapped error is classified by its cause.
+  Integrity and schema-drift errors, ClickHouse syntax or missing-table errors, and
+  S3 `AccessDenied`/`NoSuchBucket` stay permanent.
+- **Backoff.** `available_at` is database time plus 2^attempts seconds with 50-100%
+  jitter, capped at one hour; worker clocks don't affect it.
+- **Dead-lettering.** A job goes `dead` on a permanent error, after its last retry,
+  or when its lease expired on its last attempt (for example the process crashed).
+  The claim that finds the latter records the reason in `last_error` and claims the
+  next job in the same call. A worker started with `--job-type` never claims or
+  dead-letters other types.
+- **Recovery.**
+
+  ```bash
+  xbrl-warehouse jobs list --state dead [--type ingest_filing]
+  xbrl-warehouse jobs retry <job-id>   # dead -> retry, attempts reset, claimable now
+  ```
+
+  `retry` keeps the previous error in `last_error` and refuses jobs that aren't dead.
+- **Metrics.** The worker metrics endpoint exports, at scrape time,
+  `xbrl_queue_jobs{job_type,state}`, `xbrl_queue_oldest_ready_age_seconds`, and
+  `xbrl_queue_snapshot_up`, plus counters `xbrl_job_transitions_total` and
+  `xbrl_job_dead_letters_total{job_type,reason}`. `ops/alerts.yml` alerts on dead
+  jobs, new dead letters, a ready job older than an hour, and a failing snapshot.
 
 ## Taxonomy packages
 

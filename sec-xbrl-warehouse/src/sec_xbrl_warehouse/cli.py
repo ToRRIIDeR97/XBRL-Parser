@@ -15,10 +15,15 @@ from rich.table import Table
 
 from sec_xbrl_warehouse.config import Settings, get_settings
 from sec_xbrl_warehouse.config_files import load_yaml
-from sec_xbrl_warehouse.domain.enums import DatasetKind, JobType
-from sec_xbrl_warehouse.domain.models import BackfillPlan, DatasetArtifact, FilingRef
+from sec_xbrl_warehouse.domain.enums import DatasetKind, JobState, JobType
+from sec_xbrl_warehouse.domain.models import (
+    BackfillPlan,
+    DatasetArtifact,
+    FilingRef,
+)
 from sec_xbrl_warehouse.domain.ports import ControlRepository
 from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
+from sec_xbrl_warehouse.exceptions import StateTransitionError
 from sec_xbrl_warehouse.infrastructure.http.sec_client import (
     SecHttpClient,
     build_archive_directory_url,
@@ -49,6 +54,7 @@ filing_app = typer.Typer(help="Incremental filing discovery and ingestion.")
 mapping_app = typer.Typer(help="Canonical metric and mapping review workflows.")
 taxonomy_app = typer.Typer(help="Pinned local taxonomy packages for Arelle.")
 company_app = typer.Typer(help="Companies from SEC submissions data.")
+jobs_app = typer.Typer(help="Inspect and recover PostgreSQL queue jobs.")
 app.add_typer(db_app, name="db")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(backfill_app, name="backfill")
@@ -58,6 +64,7 @@ app.add_typer(filing_app, name="filing")
 app.add_typer(mapping_app, name="mapping")
 app.add_typer(taxonomy_app, name="taxonomy")
 app.add_typer(company_app, name="company")
+app.add_typer(jobs_app, name="jobs")
 console = Console()
 
 
@@ -351,17 +358,25 @@ def worker_run(
 
 
 async def _run_worker(job_types: list[JobType] | None = None) -> None:
-    from prometheus_client import start_http_server
+    from prometheus_client import REGISTRY, start_http_server
+
+    from sec_xbrl_warehouse.observability.metrics import QueueCollector, snapshot_on_loop
 
     settings = get_settings()
     metrics_server, _ = start_http_server(
         settings.worker_metrics_port, addr=settings.worker_metrics_host
     )
     control = PostgresControlRepository(settings)
+    # Scrapes run in the metrics server thread and reuse the worker's pool on its loop.
+    collector = QueueCollector(
+        snapshot_on_loop(lambda: control.queue_snapshot(), asyncio.get_running_loop(), timeout=5.0)
+    )
+    REGISTRY.register(collector)
     try:
         async with runtime_services(settings, control) as services:
             await Worker(settings, control, build_handlers(services=services), job_types).run()
     finally:
+        REGISTRY.unregister(collector)
         await control.close()
         metrics_server.shutdown()
         metrics_server.server_close()
@@ -732,3 +747,58 @@ async def _company_show(identifier: str) -> None:
         )
         raise typer.Exit(code=1)
     console.print_json(company.model_dump_json())
+
+
+@jobs_app.command("list")
+def jobs_list(
+    state: JobState | None = typer.Option(None, "--state", help="Filter by state."),
+    job_type: JobType | None = typer.Option(None, "--type", help="Filter by job type."),
+    limit: int = typer.Option(100, min=1, max=10_000),
+) -> None:
+    """List jobs, oldest first, with their last error."""
+    asyncio.run(_jobs_list(state, job_type, limit))
+
+
+async def _jobs_list(state: JobState | None, job_type: JobType | None, limit: int) -> None:
+    settings = get_settings()
+    control = PostgresControlRepository(settings)
+    try:
+        jobs = await control.list_jobs(
+            state=state.value if state else None,
+            job_type=job_type.value if job_type else None,
+            limit=limit,
+        )
+    finally:
+        await control.close()
+    table = Table("ID", "Type", "State", "Attempts", "Available at", "Last error")
+    for job in jobs:
+        table.add_row(
+            str(job.id),
+            job.job_type.value,
+            job.state.value,
+            f"{job.attempts}/{job.max_attempts}",
+            job.available_at.isoformat(),
+            (job.last_error or "")[:160],
+        )
+    console.print(table)
+
+
+@jobs_app.command("retry")
+def jobs_retry(job_id: str = typer.Argument(..., help="ID of a dead job.")) -> None:
+    """Move a dead job back to `retry` with attempts reset; claimable immediately."""
+    asyncio.run(_jobs_retry(job_id))
+
+
+async def _jobs_retry(job_id: str) -> None:
+    from uuid import UUID
+
+    settings = get_settings()
+    control = PostgresControlRepository(settings)
+    try:
+        job = await control.retry_job(UUID(job_id))
+    except StateTransitionError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=1) from exc
+    finally:
+        await control.close()
+    console.print(f"Job {job.id} ({job.job_type.value}) is {job.state.value}")

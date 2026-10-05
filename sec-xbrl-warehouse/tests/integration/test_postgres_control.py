@@ -452,6 +452,85 @@ async def test_company_round_trips_every_field(postgres_settings: Settings) -> N
         await repo.close()
 
 
+async def test_scoped_claim_never_dead_letters_other_types(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        held = await repo.enqueue_job(
+            job_type="load_bulk",
+            idempotency_key=f"scoped-held-{uuid4()}",
+            payload={},
+            priority=-50,
+            max_attempts=1,
+        )
+        async with repo.sessions.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE ingestion_jobs SET state='running', attempts=1, "
+                    "locked_at=now() - interval '2 hours', locked_by='gone' WHERE id=:id"
+                ),
+                {"id": held},
+            )
+        scoped = await repo.claim_job("scoped", 900, [JobType.RECONCILE_FILING])
+        assert scoped is None
+        (row,) = [job for job in await repo.list_jobs(job_type="load_bulk") if job.id == held]
+        assert row.state is JobState.RUNNING
+        # An unscoped claim dead-letters it with a reason (and keeps looking).
+        await repo.claim_job("any", 900, [JobType.LOAD_BULK])
+        (row,) = [job for job in await repo.list_jobs(job_type="load_bulk") if job.id == held]
+        assert row.state is JobState.DEAD and "attempts used" in (row.last_error or "")
+        snapshot = await repo.queue_snapshot()
+        assert snapshot.counts[("load_bulk", "dead")] >= 1
+    finally:
+        await repo.close()
+
+
+async def test_concurrent_claims_with_dead_letters_never_double_claim(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    others = [PostgresControlRepository(postgres_settings) for _ in range(4)]
+    try:
+        prefix = f"race-{uuid4()}"
+        exhausted = []
+        for index in range(3):
+            job_id = await repo.enqueue_job(
+                job_type="reconcile_filing",
+                idempotency_key=f"{prefix}-dead-{index}",
+                payload={},
+                priority=-100,
+                max_attempts=1,
+            )
+            exhausted.append(job_id)
+        async with repo.sessions.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE ingestion_jobs SET state='running', attempts=1, "
+                    "locked_at=now() - interval '2 hours', locked_by='gone' WHERE id = ANY(:ids)"
+                ),
+                {"ids": exhausted},
+            )
+        for index in range(8):
+            await repo.enqueue_job(
+                job_type="reconcile_filing",
+                idempotency_key=f"{prefix}-{index}",
+                payload={},
+                priority=-99,
+            )
+        claims = await asyncio.gather(
+            *[
+                worker.claim_job(f"w{n}", 900, [JobType.RECONCILE_FILING])
+                for n, worker in enumerate(others * 2)
+            ]
+        )
+        ids = [job.id for job in claims if job is not None]
+        assert len(ids) == len(set(ids)) == 8
+        assert not set(ids) & set(exhausted)
+    finally:
+        await repo.close()
+        for worker in others:
+            await worker.close()
+
+
 async def test_ticker_move_removes_matching_exchange(postgres_settings: Settings) -> None:
     from sec_xbrl_warehouse.domain.models import Company
 

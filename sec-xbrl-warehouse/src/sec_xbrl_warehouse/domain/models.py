@@ -181,6 +181,16 @@ class JobRecord(DomainModel):
     available_at: datetime
     locked_at: datetime | None = None
     locked_by: str | None = None
+    last_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class QueueSnapshot(DomainModel):
+    """Job counts by `(job_type, state)` and the age of the oldest claimable job."""
+
+    counts: dict[tuple[str, str], int]
+    oldest_ready_age_seconds: float = 0.0
 
 
 class BackfillPlan(DomainModel):

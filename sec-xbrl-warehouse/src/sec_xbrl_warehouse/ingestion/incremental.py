@@ -361,7 +361,11 @@ async def _upsert_discovered_filing(control: ControlRepository, filing: FilingRe
     doubles, older adapters) get a plain upsert; the post-extraction upsert
     rewrites the derived fields either way.
     """
-    if "keep_derived" in inspect.signature(control.upsert_filing).parameters:
+    parameters = inspect.signature(control.upsert_filing).parameters.values()
+    if any(
+        parameter.name == "keep_derived" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    ):
         await control.upsert_filing(filing, keep_derived=True)
     else:
         await control.upsert_filing(filing)

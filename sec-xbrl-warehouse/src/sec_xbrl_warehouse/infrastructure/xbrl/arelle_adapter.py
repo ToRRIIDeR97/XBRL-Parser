@@ -287,6 +287,10 @@ class ArelleExtractor:
                 status = check_package(package)
                 if status.state == "disabled":
                     continue
+                if status.state == "mapping_missing":
+                    raise XbrlExtractionError(
+                        f"Taxonomy source {package.package_id}: {status.detail}"
+                    )
                 if status.state == "checksum_mismatch":
                     raise XbrlExtractionError(
                         f"Taxonomy package checksum mismatch: {package.filename}"

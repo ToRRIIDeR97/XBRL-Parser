@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -34,7 +35,15 @@ from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, ConfigurationError
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file
 
-PackageState = Literal["ok", "missing", "checksum_mismatch", "disabled", "unsafe_path", "uncovered"]
+PackageState = Literal[
+    "ok",
+    "missing",
+    "checksum_mismatch",
+    "disabled",
+    "unsafe_path",
+    "uncovered",
+    "mapping_missing",
+]
 PackageKind = Literal["package", "archive", "file"]
 _KINDS = ("package", "archive", "file")
 
@@ -205,13 +214,30 @@ def check_package(package: TaxonomyPackage) -> TaxonomyPackageStatus:
     actual = sha256_file(package.path)
     if actual != package.sha256:
         return status("checksum_mismatch", f"expected {package.sha256}, found {actual}")
+    if package.kind == "archive":
+        missing = _missing_archive_directories(package.path, package.mappings)
+        if missing:
+            return status("mapping_missing", f"no files under {missing} in {package.filename}")
     return status("ok", str(package.path))
+
+
+def _missing_archive_directories(path: Path, mappings: tuple[tuple[str, str], ...]) -> list[str]:
+    """Mapped directories (`""` is the zip root) that contain no files in the archive."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = [name for name in archive.namelist() if not name.endswith("/")]
+    except zipfile.BadZipFile:
+        return sorted({inner or "/" for _, inner in mappings})
+    return sorted(
+        {inner or "/" for _, inner in mappings if not any(name.startswith(inner) for name in names)}
+    )
 
 
 def package_status(settings: Settings) -> list[TaxonomyPackageStatus]:
     """Report every registered package, then every required prefix with no enabled source.
 
-    Package states are ok, missing, checksum_mismatch, disabled, unsafe_path;
+    Package states are ok, missing, checksum_mismatch, disabled, unsafe_path, and
+    mapping_missing (an archive mapping points at a directory with no files);
     coverage gaps are reported as `uncovered` rows named by the prefix.
     """
     packages = registered_packages(settings)

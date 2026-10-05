@@ -17,7 +17,7 @@ def group_issues(
 
     The first occurrence keeps its message, line, column, and details; a group
     of more than one adds `details.occurrences` and up to five
-    `details.samples` (line, column, message) in input order. Fatal issues are
+    `details.samples` (line, column, message, details) in input order. Fatal issues are
     never grouped. Every returned issue is tagged with `extraction_revision`
     when one is given. Output keeps the order of each group's first occurrence.
     """
@@ -40,7 +40,12 @@ def group_issues(
                 **first.details,
                 "occurrences": len(members),
                 "samples": [
-                    {"line": item.line, "column": item.column, "message": item.message}
+                    {
+                        "line": item.line,
+                        "column": item.column,
+                        "message": item.message,
+                        "details": item.details,
+                    }
                     for item in members[:MAX_SAMPLES]
                 ],
             }

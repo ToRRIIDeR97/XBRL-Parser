@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import boto3
@@ -139,6 +140,17 @@ class LocalObjectStore:
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
+
+    def list_objects(self, prefix: str = "") -> Iterator[tuple[str, int]]:
+        """Yield `(key, size_bytes)` for every object under `prefix`, in key order."""
+        root = self.bucket_root
+        if not root.is_dir():
+            return
+        for path in sorted(root.rglob("*")):
+            if path.is_file():
+                key = path.relative_to(root).as_posix()
+                if key.startswith(prefix):
+                    yield key, path.stat().st_size
 
     @staticmethod
     def _install(source: Path, destination: Path, checksum: str, key: str) -> None:
@@ -319,6 +331,13 @@ class S3ObjectStore:
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def list_objects(self, prefix: str = "") -> Iterator[tuple[str, int]]:
+        """Yield `(key, size_bytes)` for every object under `prefix`, in key order."""
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for item in page.get("Contents", []):
+                yield str(item["Key"]), int(item["Size"])
 
     def _put_file_once(
         self, source: Path, key: str, metadata: dict[str, str], checksum: str

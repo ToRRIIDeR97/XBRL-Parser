@@ -192,7 +192,8 @@ def test_ingest_runs_pipeline(tmp_path: Path) -> None:
     assert result["extraction_revision"] == 2
     assert result["entity_counts"]["facts"] == 1
     assert control.upserts[0].accession == "0000000001-26-000001"
-    assert writer.calls == 2  # only the non-empty context and fact tables emit batches
+    # the non-empty context and fact tables, plus the one-row cover page, emit batches
+    assert writer.calls == 3
     assert warehouse.bundles[0].filing.accession == "0000000001-26-000001"
     assert store.deletes == 0
 
@@ -311,3 +312,46 @@ def test_arrow_byte_limit_includes_denormalized_filing_metadata():
     )
     with pytest.raises(WarehouseWriteError, match="row exceeds Arrow byte budget"):
         list(iter_xbrl_tables(bundle, "facts", 50, 10000))
+
+
+def test_ingestor_takes_egress_lock_before_online_extraction_only() -> None:
+    for offline, expected in ((False, 1), (True, 0)):
+        calls: list[str] = []
+
+        async def ensure(calls: list[str] = calls) -> None:
+            calls.append("lock")
+
+        ingestor = IncrementalFilingIngestor(
+            _FakeControl(),
+            _FakePackageStore(),
+            _FakeExtractor(),
+            _FakeWriter(),
+            _FakeWarehouse(),
+            settings=Settings(env="test", arelle_offline=offline),
+            ensure_sec_egress=ensure,
+        )
+        assert asyncio.run(ingestor.ingest(_filing()))["status"] == "complete"
+        assert len(calls) == expected
+
+
+def test_busy_egress_lock_records_no_diagnostics() -> None:
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
+
+    async def busy() -> None:
+        raise SecEgressBusyError("busy")
+
+    control = _FakeControl()
+    ingestor = IncrementalFilingIngestor(
+        control,
+        _FakePackageStore(),
+        _FakeExtractor(),
+        _FakeWriter(),
+        _FakeWarehouse(),
+        settings=Settings(env="test", arelle_offline=False),
+        ensure_sec_egress=busy,
+    )
+    for _ in range(3):
+        with pytest.raises(SecEgressBusyError):
+            asyncio.run(ingestor.ingest(_filing()))
+    # The validation stage runs after extraction, so a busy lock records nothing.
+    assert not hasattr(control, "issues")

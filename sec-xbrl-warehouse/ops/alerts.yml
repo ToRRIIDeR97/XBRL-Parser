@@ -15,3 +15,39 @@ groups:
           severity: warning
         annotations:
           summary: Worker metrics unavailable; check whether ingestion is deliberately paused
+  - name: job-queue
+    rules:
+      - alert: XbrlDeadJobs
+        expr: sum by (job_type) (xbrl_queue_jobs{state="dead"}) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Dead jobs need review (`xbrl-warehouse jobs list --state dead`, then `jobs retry <id>`)
+      - alert: XbrlDeadLettersIncreasing
+        expr: sum by (job_type, reason) (increase(xbrl_job_dead_letters_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Jobs moved to dead in the last hour (reason {{ $labels.reason }})
+      - alert: XbrlQueueStalled
+        expr: xbrl_queue_oldest_ready_age_seconds > 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The oldest claimable job has waited over an hour; check workers and --job-type scoping
+      - alert: XbrlQueueSnapshotFailing
+        expr: xbrl_queue_snapshot_up == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: The worker cannot read queue metrics from PostgreSQL
+      - alert: XbrlSecEgressDeferrals
+        expr: sum by (job_type) (increase(xbrl_job_transitions_total{state="deferred"}[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Jobs have been deferred on the SEC egress lock for about 30 minutes (deferrals in every 15-minute window for 15 minutes)

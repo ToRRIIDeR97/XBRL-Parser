@@ -14,6 +14,7 @@ import yaml
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact, CanonicalMetric, ConceptMapping
 from sec_xbrl_warehouse.domain.models import FilingRef
 from sec_xbrl_warehouse.domain.xbrl import XbrlFact
+from sec_xbrl_warehouse.mapping.namespaces import FAMILY_TOKENS, namespace_family
 from sec_xbrl_warehouse.normalization.dimensions import dimensions_to_json
 from sec_xbrl_warehouse.normalization.facts import (
     MONETARY_MEASURES,
@@ -56,6 +57,24 @@ class MappingDecision:
     evidence: dict[str, object]
 
 
+_MAX_REVIEW_SAMPLES = 5
+
+
+class _ConceptReview:
+    """Unmapped facts of one concept in one filing."""
+
+    def __init__(self, fact: XbrlFact, decision: MappingDecision) -> None:
+        self.fact = fact
+        self.decision = decision
+        self.fact_count = 1
+        self.sample_fact_ids = [fact.fact_id]
+
+    def add(self, fact: XbrlFact) -> None:
+        self.fact_count += 1
+        if len(self.sample_fact_ids) < _MAX_REVIEW_SAMPLES:
+            self.sample_fact_ids.append(fact.fact_id)
+
+
 class CanonicalMapper:
     """Map raw facts without destroying or mutating the as-filed layer."""
 
@@ -64,10 +83,13 @@ class CanonicalMapper:
         metrics: dict[str, CanonicalMetric],
         candidate_rules: dict[tuple[str, str], tuple[str, ...]],
         repository: MappingRepository,
+        candidate_priorities: dict[tuple[str, str], int] | None = None,
     ) -> None:
         self.metrics = metrics
         self.candidate_rules = candidate_rules
         self.repository = repository
+        # (namespace family, concept) -> priority within its metric and family (1 first).
+        self.candidate_priorities = candidate_priorities or {}
 
     @classmethod
     def load_rules(
@@ -85,17 +107,28 @@ class CanonicalMapper:
             if metric.code in metrics:
                 raise ValueError(f"Duplicate canonical metric code: {metric.code}")
             metrics[metric.code] = metric
+        for metric in metrics.values():
+            if metric.formula and metric.statement != "derived":
+                raise ValueError(f"Formula metric must use statement 'derived': {metric.code}")
         candidates: dict[tuple[str, str], list[str]] = {}
+        priorities: dict[tuple[str, str], int] = {}
         for item in seed_payload.get("mappings", []):
             code = str(item["canonical_metric"])
             if code not in metrics:
                 raise ValueError(f"Seed mapping references unknown metric: {code}")
+            if metrics[code].formula:
+                raise ValueError(f"Formula metric cannot have concept candidates: {code}")
             key = (str(item.get("namespace_hint") or ""), str(item["concept"]))
+            if key[0] not in FAMILY_TOKENS:
+                raise ValueError(f"Seed namespace hint must be one of {sorted(FAMILY_TOKENS)}")
             candidates.setdefault(key, []).append(code)
+            if "priority" in item:
+                priorities[key] = int(item["priority"])
         return cls(
             metrics=metrics,
             candidate_rules={key: tuple(value) for key, value in candidates.items()},
             repository=repository,
+            candidate_priorities=priorities,
         )
 
     async def map_fact(self, fact: XbrlFact, filing: FilingRef) -> MappingDecision:
@@ -207,6 +240,12 @@ class CanonicalMapper:
             mapping_confidence=mapping.confidence,
             mapping_explanation=decision.explanation,
             extraction_revision=extraction_revision,
+            accepted_at=filing.accepted_at,
+            concept_namespace=fact.concept_namespace,
+            concept_qname=fact.concept_qname,
+            fiscal_year=filing.fiscal_year,
+            fiscal_period=filing.fiscal_period,
+            report_date=filing.report_date,
         )
 
     async def map_batch(
@@ -239,17 +278,17 @@ class CanonicalMapper:
             raise ValueError("Mapping batch size must be positive")
         approved: dict[tuple[str, str, str | None], Sequence[ConceptMapping]] = {}
         mapped: list[CanonicalFact] = []
-        reviews: list[ReviewRequest] = []
+        # One review request per concept per filing: the first unmapped fact's
+        # decision plus a count and sample fact IDs, sent after the last batch.
+        reviews: dict[tuple[str, str], _ConceptReview] = {}
         count = size = 0
         for fact in facts:
             record_size = len(fact.model_dump_json().encode("utf-8")) + 512
             if record_size > batch_bytes:
                 raise ValueError("Single mapping record exceeds byte budget")
             if count and size + record_size > batch_bytes:
-                if reviews:
-                    await self.repository.create_reviews(filing, reviews)
                 yield tuple(mapped)
-                mapped, reviews, count, size = [], [], 0, 0
+                mapped, count, size = [], 0, 0
             size += record_size
             key = (fact.concept_namespace, fact.concept_name, fact.taxonomy_version)
             if key not in approved:
@@ -258,7 +297,12 @@ class CanonicalMapper:
                 )
             decision = self._decide(fact, approved[key])
             if decision.mapping is None:
-                reviews.append((fact, decision.candidates, self.explain_mapping(decision)))
+                concept = (fact.concept_namespace, fact.concept_name)
+                review = reviews.get(concept)
+                if review is None:
+                    reviews[concept] = _ConceptReview(fact, decision)
+                else:
+                    review.add(fact)
             else:
                 mapped.append(
                     self.to_canonical_fact(
@@ -267,14 +311,24 @@ class CanonicalMapper:
                 )
             count += 1
             if count == batch_rows:
-                if reviews:
-                    await self.repository.create_reviews(filing, reviews)
                 yield tuple(mapped)
-                mapped, reviews, count, size = [], [], 0, 0
+                mapped, count, size = [], 0, 0
         if count:
-            if reviews:
-                await self.repository.create_reviews(filing, reviews)
             yield tuple(mapped)
+        if reviews:
+            requests: list[ReviewRequest] = [
+                (
+                    review.fact,
+                    review.decision.candidates,
+                    {
+                        **self.explain_mapping(review.decision),
+                        "fact_count": review.fact_count,
+                        "sample_fact_ids": review.sample_fact_ids,
+                    },
+                )
+                for review in reviews.values()
+            ]
+            await self.repository.create_reviews(filing, requests)
 
     def explain_mapping(self, decision: MappingDecision) -> dict[str, object]:
         return {
@@ -301,11 +355,7 @@ class CanonicalMapper:
 
 
 def _namespace_hint(namespace: str) -> str:
-    lowered = namespace.lower()
-    for value in ("us-gaap", "ifrs-full", "dei", "srt"):
-        if value in lowered:
-            return value
-    return "extension"
+    return namespace_family(namespace) or "extension"
 
 
 def _incompatibility(metric: CanonicalMetric, fact: XbrlFact) -> str | None:

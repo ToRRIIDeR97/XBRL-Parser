@@ -4,6 +4,7 @@ import re
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ import pyarrow as pa
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
 from sec_xbrl_warehouse.domain.enums import SecTable
+from sec_xbrl_warehouse.domain.models import Company
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle, XbrlFact
 from sec_xbrl_warehouse.exceptions import ConfigurationError, WarehouseWriteError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
@@ -24,6 +26,17 @@ from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     xbrl_warehouse_schema,
 )
 from sec_xbrl_warehouse.infrastructure.storage.hashing import stable_json_hash
+from sec_xbrl_warehouse.normalization.disclosures import (
+    CoverPage,
+    SegmentRow,
+    cover_page,
+    segment_rows,
+)
+from sec_xbrl_warehouse.normalization.statements import (
+    StatementLine,
+    build_statement_lines,
+    classify_roles,
+)
 from sec_xbrl_warehouse.observability.metrics import ROWS_WRITTEN
 
 _SEC_TABLE_NAMES: dict[SecTable, str] = {
@@ -220,6 +233,11 @@ class ClickHouseWarehouse:
                     target_contract = self._column_contract(temporary)
                     for column, (target_type, _, _) in target_contract.items():
                         if column not in source_contract:
+                            # New Nullable columns start as NULL for existing rows.
+                            if target_type.startswith("nullable(") or (
+                                target_type.startswith("lowcardinality(nullable(")
+                            ):
+                                continue
                             if (
                                 column not in {"value_kind", "source_attributes_json"}
                                 or name != "xbrl_facts"
@@ -373,9 +391,14 @@ class ClickHouseWarehouse:
         return self._insert_arrow(target, arrow_table)
 
     def insert_xbrl_bundle(self, bundle: XbrlExtractionBundle) -> dict[str, int]:
-        """Persist all entities from one Arelle extraction at lineage level."""
+        """Persist all entities from one Arelle extraction at lineage level.
+
+        Includes the derived `roles`, `statement_lines` (primary statements as
+        presented), `cover_pages`, and `segment_facts`, so they publish with the same
+        revision marker.
+        """
         counts: dict[str, int] = {}
-        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+        for entity in XBRL_ENTITIES:
             counts[entity] = sum(
                 self._insert_arrow(f"xbrl_{entity}", table)
                 for table in iter_xbrl_tables(
@@ -412,8 +435,12 @@ class ClickHouseWarehouse:
         return written
 
     def publish_xbrl_bundle(self, bundle: XbrlExtractionBundle, counts: dict[str, int]) -> None:
-        """Verify all raw entities before exposing this immutable revision to readers."""
-        for entity in ("contexts", "concepts", "facts", "relationships", "footnotes"):
+        """Verify all raw entities before exposing this immutable revision to readers.
+
+        Entities missing from `counts` (written before the derived entities existed)
+        are not checked.
+        """
+        for entity in (entity for entity in XBRL_ENTITIES if entity in counts):
             result = self.query(
                 f"SELECT count() AS count FROM xbrl_{entity} FINAL WHERE accession = %(accession)s AND extraction_revision = %(revision)s",
                 {"accession": bundle.filing.accession, "revision": bundle.extraction_revision},
@@ -444,6 +471,41 @@ class ClickHouseWarehouse:
                 schema=schema,
             ),
         )
+
+    def command(self, sql: str, parameters: dict[str, Any] | None = None) -> Any:
+        return self.client.command(sql, parameters=parameters or {})
+
+    def insert_metric_series(self, table: pa.Table) -> int:
+        """Append one company's rebuilt series rows (see `query.series`)."""
+        return self._insert_arrow("metric_series", table)
+
+    def upsert_company_mirror(self, company: Company) -> int:
+        """Mirror a PostgreSQL company row for read-only ticker lookups in ClickHouse."""
+        table = pa.Table.from_pylist(
+            [
+                {
+                    "cik": company.cik,
+                    "name": company.name,
+                    "tickers": [ticker.upper() for ticker in company.tickers],
+                    "exchanges": list(company.exchanges),
+                    "sic": company.sic,
+                    "fiscal_year_end": company.fiscal_year_end,
+                    "updated_at": _now(),
+                }
+            ],
+            schema=pa.schema(
+                [
+                    pa.field("cik", pa.uint64(), False),
+                    pa.field("name", pa.string(), False),
+                    pa.field("tickers", pa.list_(pa.string()), False),
+                    pa.field("exchanges", pa.list_(pa.string()), False),
+                    pa.field("sic", pa.uint32()),
+                    pa.field("fiscal_year_end", pa.string()),
+                    pa.field("updated_at", pa.timestamp("ms", tz="UTC"), False),
+                ]
+            ),
+        )
+        return self._insert_arrow("companies", table)
 
     def query(self, sql: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         result = self.client.query(sql, parameters=parameters or {})
@@ -502,6 +564,10 @@ def iter_xbrl_tables(
         "facts": facts_table,
         "relationships": relationships_table,
         "footnotes": footnotes_table,
+        "roles": roles_table,
+        "statement_lines": _statement_lines_builder(bundle),
+        "cover_pages": _with_bundle(bundle, cover_pages_table),
+        "segment_facts": _with_bundle(bundle, segment_facts_table),
     }[entity]
 
     def bounded(table: pa.Table) -> Iterator[pa.Table]:
@@ -516,17 +582,207 @@ def iter_xbrl_tables(
 
     records: list[Any] = []
     size = 0
-    for record in getattr(bundle, entity):
-        record_size = len(record.model_dump_json().encode("utf-8")) + 512
+    for record in xbrl_entity_records(bundle, entity):
+        record_size = _record_size(record)
         if record_size > batch_bytes:
             raise WarehouseWriteError(f"Single {entity} record exceeds Arrow byte budget")
         if records and (len(records) >= batch_rows or size + record_size > batch_bytes):
-            yield from bounded(build(bundle.model_copy(update={entity: tuple(records)})))
+            yield from bounded(_build_chunk(build, bundle, entity, records))
             records, size = [], 0
         records.append(record)
         size += record_size
     if records:
-        yield from bounded(build(bundle.model_copy(update={entity: tuple(records)})))
+        yield from bounded(_build_chunk(build, bundle, entity, records))
+
+
+XBRL_ENTITIES = (
+    "contexts",
+    "concepts",
+    "facts",
+    "relationships",
+    "footnotes",
+    "roles",
+    "statement_lines",
+    "cover_pages",
+    "segment_facts",
+)
+# Entities derived from the bundle rather than stored on it.
+DERIVED_XBRL_ENTITIES = frozenset({"statement_lines", "cover_pages", "segment_facts"})
+
+
+def xbrl_entity_records(bundle: XbrlExtractionBundle, entity: str) -> Sequence[Any]:
+    """The records one entity table holds for a bundle."""
+    if entity == "statement_lines":
+        return build_statement_lines(bundle)
+    if entity == "cover_pages":
+        return (cover_page(bundle),)
+    if entity == "segment_facts":
+        return segment_rows(bundle)
+    return tuple(getattr(bundle, entity))
+
+
+def _record_size(record: Any) -> int:
+    if isinstance(record, StatementLine | CoverPage | SegmentRow):
+        return len(_json(asdict(record)).encode("utf-8")) + 512
+    return len(record.model_dump_json().encode("utf-8")) + 512
+
+
+def _build_chunk(
+    build: Any, bundle: XbrlExtractionBundle, entity: str, records: list[Any]
+) -> pa.Table:
+    if entity in DERIVED_XBRL_ENTITIES:
+        return build(records)
+    return build(bundle.model_copy(update={entity: tuple(records)}))
+
+
+def roles_table(bundle: XbrlExtractionBundle) -> pa.Table:
+    kinds = classify_roles(bundle) if bundle.roles else {}
+    rows = [
+        {
+            "accession": bundle.filing.accession,
+            "role_uri": role.role_uri,
+            "definition": role.definition,
+            "used_on": list(role.used_on),
+            "sort_code": role.sort_code,
+            "category": role.category,
+            "statement_kind": kinds[role.role_uri].value if role.role_uri in kinds else None,
+            "extraction_revision": bundle.extraction_revision,
+            "_row_hash": stable_json_hash(
+                {"accession": bundle.filing.accession, "role": role.model_dump(mode="json")}
+            ),
+            "_ingested_at": bundle.metadata.extracted_at,
+        }
+        for role in bundle.roles
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("roles"))
+
+
+def _statement_lines_builder(bundle: XbrlExtractionBundle) -> Any:
+    def build(lines: list[StatementLine]) -> pa.Table:
+        return statement_lines_table(bundle, lines)
+
+    return build
+
+
+def _with_bundle(bundle: XbrlExtractionBundle, build: Any) -> Any:
+    def bound(records: list[Any]) -> pa.Table:
+        return build(bundle, records)
+
+    return bound
+
+
+def cover_pages_table(
+    bundle: XbrlExtractionBundle, pages: Sequence[CoverPage] | None = None
+) -> pa.Table:
+    """The filing's cover page (one row; see `normalization.disclosures.cover_page`)."""
+    selected = (cover_page(bundle),) if pages is None else pages
+    rows = [
+        {
+            **_filing_columns(bundle),
+            "document_type": page.document_type,
+            "period_end_date": page.period_end_date,
+            "registrant_name": page.registrant_name,
+            "filer_category": page.filer_category,
+            "amendment": _optional_int(page.amendment),
+            "trading_symbol": page.trading_symbol,
+            "exchange": page.exchange,
+            "auditor_name": page.auditor_name,
+            "shares_outstanding": page.shares_outstanding,
+            "shares_outstanding_date": page.shares_outstanding_date,
+            "public_float": page.public_float,
+            "security_members": [item.member for item in page.securities],
+            "security_titles": [item.title for item in page.securities],
+            "security_symbols": [item.trading_symbol for item in page.securities],
+            "security_exchanges": [item.exchange for item in page.securities],
+            **_revision_columns(bundle, {"cover_page": asdict(page)}),
+        }
+        for page in selected
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("cover_pages"))
+
+
+def segment_facts_table(
+    bundle: XbrlExtractionBundle, segments: Sequence[SegmentRow] | None = None
+) -> pa.Table:
+    """Breakdown facts (see `normalization.disclosures.segment_rows`)."""
+    selected = segment_rows(bundle) if segments is None else segments
+    rows = [
+        {
+            **_filing_columns(bundle),
+            "fact_id": row.fact_id,
+            "concept_qname": row.concept_qname,
+            "axis": row.axis,
+            "member_label": row.member_label,
+            "member_axes": [member.axis for member in row.members],
+            "member_qnames": [member.qname for member in row.members],
+            "member_labels": [member.label for member in row.members],
+            "value": row.value,
+            "unit": row.unit,
+            "period_start": row.period_start,
+            "period_end": row.period_end,
+            "period_instant": row.period_instant,
+            "is_elimination": int(row.is_elimination),
+            **_revision_columns(bundle, {"segment_fact": asdict(row)}),
+        }
+        for row in selected
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("segment_facts"))
+
+
+def _filing_columns(bundle: XbrlExtractionBundle) -> dict[str, Any]:
+    return {
+        "accession": bundle.filing.accession,
+        "cik": bundle.filing.cik,
+        "form": bundle.filing.form,
+        "filed_date": bundle.filing.filed_date,
+    }
+
+
+def _revision_columns(bundle: XbrlExtractionBundle, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "extraction_revision": bundle.extraction_revision,
+        "_row_hash": stable_json_hash({**payload, "revision": bundle.extraction_revision}),
+        "_ingested_at": bundle.metadata.extracted_at,
+    }
+
+
+def statement_lines_table(
+    bundle: XbrlExtractionBundle, lines: Sequence[StatementLine] | None = None
+) -> pa.Table:
+    """One row per line; each line's values are parallel arrays (one entry per period)."""
+    selected = build_statement_lines(bundle) if lines is None else lines
+    rows = [
+        {
+            "accession": line.accession,
+            "cik": bundle.filing.cik,
+            "form": bundle.filing.form,
+            "filed_date": bundle.filing.filed_date,
+            "role_uri": line.role_uri,
+            "statement_kind": line.statement_kind.value,
+            "line_number": line.line_number,
+            "depth": line.depth,
+            "concept_qname": line.concept_qname,
+            "parent_concept_qname": line.parent_concept_qname,
+            "label": line.label,
+            "preferred_label_role": line.preferred_label_role,
+            "is_abstract": int(line.is_abstract),
+            "is_total": int(line.is_total),
+            "line_role": line.line_role.value,
+            "value_fact_ids": [value.fact_id for value in line.values],
+            "value_concept_qnames": [value.concept_qname or "" for value in line.values],
+            "value_period_starts": [value.period_start for value in line.values],
+            "value_period_ends": [value.period_end for value in line.values],
+            "value_period_instants": [value.period_instant for value in line.values],
+            "value_decimals": [value.value_decimal for value in line.values],
+            "extraction_revision": bundle.extraction_revision,
+            "_row_hash": stable_json_hash(
+                {"line": asdict(line), "revision": bundle.extraction_revision}
+            ),
+            "_ingested_at": bundle.metadata.extracted_at,
+        }
+        for line in selected
+    ]
+    return pa.Table.from_pylist(rows, schema=xbrl_warehouse_schema("statement_lines"))
 
 
 def contexts_table(bundle: XbrlExtractionBundle) -> pa.Table:
@@ -608,6 +864,7 @@ def facts_table(bundle: XbrlExtractionBundle) -> pa.Table:
                 bundle.extraction_revision,
                 fiscal_year=bundle.filing.fiscal_year,
                 fiscal_period=bundle.filing.fiscal_period,
+                accepted_at=bundle.filing.accepted_at,
                 ingested_at=bundle.metadata.extracted_at,
             )
         )
@@ -688,6 +945,7 @@ def fact_row(
     *,
     fiscal_year: int | None = None,
     fiscal_period: str | None = None,
+    accepted_at: datetime | None = None,
     ingested_at: datetime | None = None,
 ) -> dict[str, Any]:
     return {
@@ -699,6 +957,7 @@ def fact_row(
         "filed_date": filed_date,
         "fiscal_year": fiscal_year,
         "fiscal_period": fiscal_period,
+        "accepted_at": accepted_at,
         "concept_namespace": fact.concept_namespace,
         "concept_name": fact.concept_name,
         "concept_qname": fact.concept_qname,
@@ -771,6 +1030,12 @@ def _canonical_fact_row(fact: CanonicalFact) -> dict[str, Any]:
         "mapping_confidence": fact.mapping_confidence,
         "mapping_explanation": fact.mapping_explanation,
         "extraction_revision": fact.extraction_revision,
+        "accepted_at": fact.accepted_at,
+        "concept_namespace": fact.concept_namespace,
+        "concept_qname": fact.concept_qname,
+        "fiscal_year": fact.fiscal_year,
+        "fiscal_period": fact.fiscal_period,
+        "report_date": fact.report_date,
         "_row_hash": stable_json_hash(fact.model_dump(mode="json")),
         "_ingested_at": _now(),
     }

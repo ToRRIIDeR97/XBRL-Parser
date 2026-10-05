@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xml="http://www.w3.org/XML/1998/namespace">
+  <link:labelLink xlink:type="extended" xlink:role="http://www.xbrl.org/2003/role/link">
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_CashAndCashEquivalentsAtCarryingValue" xlink:label="loc_CashAndCashEquivalentsAtCarryingValue"/>
+    <link:label xlink:type="resource" xlink:label="lab_CashAndCashEquivalentsAtCarryingValue" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Cash and cash equivalents</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_CashAndCashEquivalentsAtCarryingValue" xlink:to="lab_CashAndCashEquivalentsAtCarryingValue"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_AccountsReceivableNetCurrent" xlink:label="loc_AccountsReceivableNetCurrent"/>
+    <link:label xlink:type="resource" xlink:label="lab_AccountsReceivableNetCurrent" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Accounts receivable, net</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_AccountsReceivableNetCurrent" xlink:to="lab_AccountsReceivableNetCurrent"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_AssetsCurrent" xlink:label="loc_AssetsCurrent"/>
+    <link:label xlink:type="resource" xlink:label="lab_AssetsCurrent" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Assets, current</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_AssetsCurrent" xlink:role="http://www.xbrl.org/2003/role/totalLabel" xml:lang="en-US">Total current assets</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_AssetsCurrent" xlink:to="lab_AssetsCurrent"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_PropertyPlantAndEquipmentNet" xlink:label="loc_PropertyPlantAndEquipmentNet"/>
+    <link:label xlink:type="resource" xlink:label="lab_PropertyPlantAndEquipmentNet" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Property, plant and equipment, net</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_PropertyPlantAndEquipmentNet" xlink:to="lab_PropertyPlantAndEquipmentNet"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_Assets" xlink:label="loc_Assets"/>
+    <link:label xlink:type="resource" xlink:label="lab_Assets" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Assets</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_Assets" xlink:role="http://www.xbrl.org/2003/role/totalLabel" xml:lang="en-US">Total assets</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_Assets" xlink:to="lab_Assets"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_Liabilities" xlink:label="loc_Liabilities"/>
+    <link:label xlink:type="resource" xlink:label="lab_Liabilities" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Total liabilities</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_Liabilities" xlink:to="lab_Liabilities"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_StockholdersEquity" xlink:label="loc_StockholdersEquity"/>
+    <link:label xlink:type="resource" xlink:label="lab_StockholdersEquity" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Total shareholders' equity</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_StockholdersEquity" xlink:to="lab_StockholdersEquity"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_LiabilitiesAndStockholdersEquity" xlink:label="loc_LiabilitiesAndStockholdersEquity"/>
+    <link:label xlink:type="resource" xlink:label="lab_LiabilitiesAndStockholdersEquity" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Liabilities and equity</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_LiabilitiesAndStockholdersEquity" xlink:role="http://www.xbrl.org/2003/role/totalLabel" xml:lang="en-US">Total liabilities and shareholders' equity</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_LiabilitiesAndStockholdersEquity" xlink:to="lab_LiabilitiesAndStockholdersEquity"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_Revenues" xlink:label="loc_Revenues"/>
+    <link:label xlink:type="resource" xlink:label="lab_Revenues" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Net sales</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_Revenues" xlink:to="lab_Revenues"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_CostOfRevenue" xlink:label="loc_CostOfRevenue"/>
+    <link:label xlink:type="resource" xlink:label="lab_CostOfRevenue" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Cost of sales</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_CostOfRevenue" xlink:to="lab_CostOfRevenue"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_GrossProfit" xlink:label="loc_GrossProfit"/>
+    <link:label xlink:type="resource" xlink:label="lab_GrossProfit" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Gross profit</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_GrossProfit" xlink:role="http://www.xbrl.org/2003/role/totalLabel" xml:lang="en-US">Gross margin</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_GrossProfit" xlink:to="lab_GrossProfit"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_NetIncomeLoss" xlink:label="loc_NetIncomeLoss"/>
+    <link:label xlink:type="resource" xlink:label="lab_NetIncomeLoss" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Net income</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_NetIncomeLoss" xlink:to="lab_NetIncomeLoss"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_EarningsPerShareDiluted" xlink:label="loc_EarningsPerShareDiluted"/>
+    <link:label xlink:type="resource" xlink:label="lab_EarningsPerShareDiluted" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Diluted earnings per share</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_EarningsPerShareDiluted" xlink:to="lab_EarningsPerShareDiluted"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_NetCashProvidedByUsedInOperatingActivities" xlink:label="loc_NetCashProvidedByUsedInOperatingActivities"/>
+    <link:label xlink:type="resource" xlink:label="lab_NetCashProvidedByUsedInOperatingActivities" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Operating cash flow</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_NetCashProvidedByUsedInOperatingActivities" xlink:role="http://www.xbrl.org/2003/role/totalLabel" xml:lang="en-US">Cash generated by operating activities</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_NetCashProvidedByUsedInOperatingActivities" xlink:to="lab_NetCashProvidedByUsedInOperatingActivities"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_PaymentsToAcquirePropertyPlantAndEquipment" xlink:label="loc_PaymentsToAcquirePropertyPlantAndEquipment"/>
+    <link:label xlink:type="resource" xlink:label="lab_PaymentsToAcquirePropertyPlantAndEquipment" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Payments for acquisition of property, plant and equipment</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_PaymentsToAcquirePropertyPlantAndEquipment" xlink:to="lab_PaymentsToAcquirePropertyPlantAndEquipment"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_CommonStockSharesAuthorized" xlink:label="loc_CommonStockSharesAuthorized"/>
+    <link:label xlink:type="resource" xlink:label="lab_CommonStockSharesAuthorized" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Common stock, shares authorized</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_CommonStockSharesAuthorized" xlink:to="lab_CommonStockSharesAuthorized"/>
+    <link:loc xlink:type="locator" xlink:href="fs-20251231.xsd#fs_RevenueFromProducts" xlink:label="loc_RevenueFromProducts"/>
+    <link:label xlink:type="resource" xlink:label="lab_RevenueFromProducts" xlink:role="http://www.xbrl.org/2003/role/label" xml:lang="en-US">Products</link:label>
+    <link:labelArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label" xlink:from="loc_RevenueFromProducts" xlink:to="lab_RevenueFromProducts"/>
+  </link:labelLink>
+</link:linkbase>

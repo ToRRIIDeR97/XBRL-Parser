@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema"
+        targetNamespace="http://example.com/dei-filing/2024"
+        elementFormDefault="qualified">
+  <import namespace="http://xbrl.sec.gov/dei/2024"
+          schemaLocation="https://xbrl.sec.gov/dei/2024/dei-2024.xsd"/>
+</schema>

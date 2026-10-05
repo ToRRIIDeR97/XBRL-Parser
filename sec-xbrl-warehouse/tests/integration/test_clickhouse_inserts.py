@@ -239,6 +239,124 @@ def test_statement_lines_are_replay_safe_and_latest_revision_only(
     assert {row["statement_kind"] for row in roles} == {"balance_sheet"}
 
 
+def test_disclosures_keep_recast_filings_and_latest_revision_only(
+    warehouse: ClickHouseWarehouse,
+) -> None:
+    from sec_xbrl_warehouse.domain.enums import FactValueKind, PeriodKind
+    from sec_xbrl_warehouse.domain.xbrl import (
+        DimensionMember,
+        XbrlDocumentMetadata,
+        XbrlExtractionBundle,
+        XbrlFact,
+        XbrlUnit,
+    )
+
+    def bundle(accession: str, value: int, revision: int) -> XbrlExtractionBundle:
+        segment = DimensionMember(
+            axis_namespace="http://fasb.org/us-gaap/2025",
+            axis_name="StatementBusinessSegmentsAxis",
+            member_namespace="http://example.com/2025",
+            member_name="CloudSegmentMember",
+        )
+        facts = tuple(
+            XbrlFact(
+                fact_id=f"{accession}{name}{revision}".ljust(64, "0")[:64],
+                concept_namespace=namespace,
+                concept_name=name,
+                concept_qname=qname,
+                context_id="c",
+                context_hash="0" * 64,
+                unit=XbrlUnit(unit_id="u", numerator_measures=("iso4217:USD",))
+                if numeric
+                else None,
+                value_kind=FactValueKind.NUMERIC if numeric else FactValueKind.TEXT,
+                raw_value=str(raw),
+                value_decimal=Decimal(raw) if numeric else None,
+                value_text=None if numeric else str(raw),
+                period_kind=PeriodKind.DURATION,
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 12, 31),
+                entity_scheme="http://www.sec.gov/CIK",
+                entity_identifier="0000000011",
+                dimensions=dims,
+                dimension_hash="0" * 64,
+                duplicate_set_hash="0" * 64,
+                source_document="x.htm",
+            )
+            for namespace, name, qname, raw, numeric, dims in (
+                (
+                    "http://xbrl.sec.gov/dei/2025",
+                    "DocumentType",
+                    "dei:DocumentType",
+                    "10-K",
+                    False,
+                    (),
+                ),
+                (
+                    "http://fasb.org/us-gaap/2025",
+                    "Revenues",
+                    "us-gaap:Revenues",
+                    value,
+                    True,
+                    (segment,),
+                ),
+            )
+        )
+        return XbrlExtractionBundle(
+            filing=FilingRef(
+                accession=accession,
+                cik=11,
+                company_name="Segments Corp",
+                form="10-K",
+                filed_date=date(2026, 2, 15),
+                archive_directory_url="https://www.sec.gov/Archives/edgar/data/11/11",
+            ),
+            metadata=XbrlDocumentMetadata(
+                entrypoint="x.htm",
+                document_type="inline",
+                taxonomy_namespaces=(),
+                source_documents=("x.htm",),
+                software_name="arelle",
+                software_version="test",
+            ),
+            contexts=(),
+            concepts=(),
+            facts=facts,
+            relationships=(),
+            footnotes=(),
+            validation_issues=(),
+            extraction_revision=revision,
+        )
+
+    original = bundle("0000000011-26-000001", 100, 1)
+    recast = bundle("0000000011-27-000001", 90, 1)
+    for item in (original, recast, original):  # the second `original` is a replay
+        counts = warehouse.insert_xbrl_bundle(item)
+        assert (counts["cover_pages"], counts["segment_facts"]) == (1, 1)
+        warehouse.publish_xbrl_bundle(item, counts)
+    revised = bundle("0000000011-26-000001", 101, 2)
+    warehouse.insert_xbrl_bundle(revised)  # unpublished: readers keep revision 1
+    query = (
+        "SELECT accession, extraction_revision, member_label, value FROM v_segment_facts_latest "
+        "WHERE cik = 11 ORDER BY accession"
+    )
+    rows = warehouse.query(query)
+    assert [(row["accession"], row["member_label"], row["value"]) for row in rows] == [
+        ("0000000011-26-000001", "CloudSegment", Decimal(100)),
+        ("0000000011-27-000001", "CloudSegment", Decimal(90)),
+    ]
+    warehouse.publish_xbrl_bundle(revised, warehouse.insert_xbrl_bundle(revised))
+    rows = warehouse.query(query)
+    assert [(row["extraction_revision"], row["value"]) for row in rows] == [
+        (2, Decimal(101)),
+        (1, Decimal(90)),
+    ]
+    covers = warehouse.query(
+        "SELECT count() AS n FROM v_cover_pages_latest WHERE cik = 11 AND document_type = '10-K'"
+    )
+    assert covers[0]["n"] == 2
+
+
 def test_series_rebuild_versions_priority_and_company_mirror(
     warehouse: ClickHouseWarehouse,
 ) -> None:

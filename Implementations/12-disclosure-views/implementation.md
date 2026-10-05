@@ -135,3 +135,24 @@ existing tables without error.
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- `normalization/disclosures.py`: `cover_page` and `segment_rows` (`CoverPage`,
+  `SegmentRow`, `SegmentMember` with `axis` = breakdown kind). Axes match by name and
+  standard namespace family, so look-alike namespaces never qualify. Several values for
+  one cover field: first in document order. Share classes: one value per class member
+  at the latest instant. Eliminations: members named `…Elimination(s)Member`.
+  Duplicate facts (ordinal > 1) and nil facts are skipped, as in statement lines.
+- `sql/clickhouse/027_disclosure_tables.sql` (`xbrl_cover_pages`,
+  `xbrl_segment_facts`, ReplacingMergeTree by revision) and three views in
+  `040_views.sql`. `cover_pages` and `segment_facts` are derived `XBRL_ENTITIES`, so
+  they get silver checkpoints, ClickHouse inserts, and publish row-count checks with
+  the bundle. Completed jobs without these checkpoints still resume.
+- Revision: no bump (the single `CURRENT_EXTRACTION_REVISION = 3` policy); filings
+  extracted at revision 3 get the new rows, older completed extractions get them on
+  re-extraction.
+- `doctor` expects the three views; SECURITY.md lists the `xbrl_api` grants;
+  DATA_MODEL.md and ARCHITECTURE.md document the tables and example queries.
+- Optional API endpoints were not added.
+- Operator check (step 5) is pending a revision-3 AAPL extraction.

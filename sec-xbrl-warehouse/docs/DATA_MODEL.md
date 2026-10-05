@@ -215,6 +215,54 @@ WHERE accession = '0000320193-25-000079' AND statement_kind = 'balance_sheet'
 ORDER BY role_uri, line_number;
 ```
 
+### Cover pages, breakdowns, and text blocks
+
+Derived by `normalization/disclosures.py` from the extraction's facts and written with
+the bundle (silver checkpoints `cover_pages` and `segment_facts`, same revision
+marker). Raw facts are unchanged; every row is rebuildable from silver. Filings
+completed before these entities existed have no rows until they are re-extracted.
+
+- **`xbrl_cover_pages` / `v_cover_pages_latest`.** One row per filing:
+  `document_type`, `period_end_date`, `registrant_name`, `filer_category`,
+  `amendment`, `trading_symbol`, `exchange`, `auditor_name`, `shares_outstanding`,
+  `shares_outstanding_date`, `public_float`. Only non-dimensional dei facts count; with
+  several values the first in document order wins; a missing fact gives NULL. Shares
+  outstanding sums one value per `StatementClassOfStockAxis` member at the latest
+  instant when no non-dimensional value exists. Facts on any other axis, including
+  co-registrants on `dei:LegalEntityAxis`, are ignored.
+- **`xbrl_segment_facts` / `v_segment_facts_latest`.** One row per numeric,
+  first-ordinal fact whose dimensions are **all** on these axes: `us-gaap:
+  StatementBusinessSegmentsAxis` (`segment`), `srt:ProductOrServiceAxis` (`product`),
+  `srt:StatementGeographicalAxis` (`geography`), `srt:ConsolidationItemsAxis`
+  (`consolidation`). Consolidated facts and facts with any other axis (for example
+  `RestatementAxis`) are excluded. `axis`/`member_label` describe the first member in
+  that order; `member_axes`, `member_qnames`, `member_labels` list every member. Labels
+  are the member's standard label, else its local name without `Member`
+  (`USMember` → `US`); a member without a concept in the bundle has a Clark-notation
+  `member_qname` unless its namespace is a standard family. `is_elimination` marks
+  `…Elimination(s)Member` members (for example `srt:IntersegmentEliminationMember`).
+  Recast segments stay visible: each filing keeps its own rows.
+- **`v_text_blocks_latest`.** Every `…TextBlock` fact of the latest revision from
+  `v_xbrl_facts_latest`, HTML as filed in `value_text`, with `is_policy` for
+  `…PolicyTextBlock` concepts.
+- The `_latest` views filter by each accession's latest published revision only,
+  never across filings.
+
+```sql
+-- Apple FY2025 revenue by segment
+SELECT member_label, value
+FROM xbrl.v_segment_facts_latest
+WHERE accession = '0000320193-25-000079' AND axis = 'segment' AND length(member_axes) = 1
+  AND concept_qname = 'us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax'
+  AND period_end = '2025-09-27' AND period_start = '2024-09-29';
+
+-- Cover page and accounting policies of one filing
+SELECT document_type, registrant_name, shares_outstanding, shares_outstanding_date
+FROM xbrl.v_cover_pages_latest WHERE accession = '0000320193-25-000079';
+SELECT concept_name, value_text
+FROM xbrl.v_text_blocks_latest WHERE accession = '0000320193-25-000079' AND is_policy;
+```
+
 ## Canonical layer
 
 ### `canonical_metrics` in PostgreSQL

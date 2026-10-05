@@ -46,7 +46,7 @@ from sec_xbrl_warehouse.validation.issue_grouping import group_issues
 from sec_xbrl_warehouse.validation.xbrl_validation import reject_configured_issues
 
 # Silver entities older completed jobs may lack.
-_ENTITIES_ADDED_LATER = frozenset({"roles", "statement_lines"})
+_ENTITIES_ADDED_LATER = frozenset({"roles", "statement_lines", "cover_pages", "segment_facts"})
 
 
 class IncrementalFilingIngestor:
@@ -91,7 +91,7 @@ class IncrementalFilingIngestor:
                 checkpoint = await self._checkpoint(job_id, f"silver:{entity}")
                 if checkpoint is None:
                     if entity in _ENTITIES_ADDED_LATER:
-                        continue  # completed before roles and statement lines existed
+                        continue  # completed before the derived entities existed
                     raise XbrlExtractionError("Completed filing has no silver checkpoint")
                 await asyncio.to_thread(
                     verify_checkpoint_objects, checkpoint, self.object_store, self.settings

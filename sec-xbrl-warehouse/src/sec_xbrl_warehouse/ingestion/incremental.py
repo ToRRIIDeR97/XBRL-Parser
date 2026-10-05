@@ -29,6 +29,7 @@ from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha2
 from sec_xbrl_warehouse.infrastructure.storage.parquet import verify_checkpoint_objects
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
 from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
+from sec_xbrl_warehouse.normalization.fiscal_focus import derive_fiscal_focus
 from sec_xbrl_warehouse.observability.metrics import (
     ROWS_PARSED,
     ROWS_WRITTEN,
@@ -152,6 +153,18 @@ class IncrementalFilingIngestor:
                         )
                         await self._save(job_id, "extract", {"object_key": key, "sha256": checksum})
 
+                # Filing-level fiscal fields come from the bundle's dei facts. This
+                # runs on fresh and checkpointed extractions alike, so replay
+                # derives the same values; the saved extraction stays as extracted.
+                enriched, fiscal_issues = derive_fiscal_focus(bundle)
+                bundle = bundle.model_copy(
+                    update={
+                        "filing": enriched,
+                        "validation_issues": (*bundle.validation_issues, *fiscal_issues),
+                    }
+                )
+                filing = enriched
+                await self.control.upsert_filing(filing)
                 if await self._checkpoint(job_id, "validation") is None:
                     await self.control.record_validation_issues(bundle.validation_issues)
                     for issue in bundle.validation_issues:

@@ -20,6 +20,7 @@ from sec_xbrl_warehouse.exceptions import (
     SecRetryDeferred,
     StateTransitionError,
 )
+from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.postgres import (
     PostgresControlRepository,
     checkpoint_lease,
@@ -37,6 +38,7 @@ async def runtime_services(
 ) -> AsyncIterator[dict[str, Any]]:
     """Own the network clients used by every worker stage."""
     from sec_xbrl_warehouse.config_files import load_yaml
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressLock
     from sec_xbrl_warehouse.infrastructure.http.sec_client import SecHttpClient
     from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWarehouse
     from sec_xbrl_warehouse.infrastructure.storage.object_store import create_object_store
@@ -61,7 +63,7 @@ async def runtime_services(
     await asyncio.to_thread(store.ensure_bucket)
     warehouse = await asyncio.to_thread(ClickHouseWarehouse, settings)
     try:
-        async with SecHttpClient(settings) as http:
+        async with SecHttpClient(settings, egress_lock=SecEgressLock(settings)) as http:
             repository = PostgresMappingRepository(settings, engine=control.engine)
             mapper = CanonicalMapper.load_rules(
                 settings.config_dir / "canonical_metrics.yml",
@@ -105,6 +107,7 @@ async def runtime_services(
                     settings=settings,
                     object_store=store,
                     mapper=mapper,
+                    ensure_sec_egress=http.ensure_egress,
                 ),
             }
     finally:
@@ -193,15 +196,34 @@ class Worker:
             JOB_TRANSITIONS.labels(state="lease_lost", job_type=job.job_type.value).inc()
         except asyncio.CancelledError:
             raise
+        except SecEgressBusyError as exc:
+            # Another process is sending SEC traffic: defer without spending an attempt.
+            logger.warning("sec_egress_busy", job_id=str(job.id), job_type=job.job_type.value)
+            try:
+                await self.control.fail_job(
+                    job.id,
+                    str(exc),
+                    retryable=True,
+                    defer_seconds=self.settings.sec_egress_busy_retry_seconds,
+                    worker_id=self.settings.worker_id,
+                    attempt=job.attempts,
+                )
+            except StateTransitionError:
+                JOB_TRANSITIONS.labels(state="lease_lost", job_type=job.job_type.value).inc()
+            else:
+                JOB_TRANSITIONS.labels(state="deferred", job_type=job.job_type.value).inc()
         except Exception as exc:
             logger.exception("job_failed", job_id=str(job.id), job_type=job.job_type.value)
             retryable = is_retryable_exception(exc)
+            deferral: dict[str, Any] = (
+                {"retry_at": exc.retry_at} if isinstance(exc, SecRetryDeferred) else {}
+            )
             try:
                 await self.control.fail_job(
                     job.id,
                     str(exc),
                     retryable=retryable,
-                    **({"retry_at": exc.retry_at} if isinstance(exc, SecRetryDeferred) else {}),
+                    **deferral,
                     worker_id=self.settings.worker_id,
                     attempt=job.attempts,
                 )
@@ -414,6 +436,7 @@ def is_retryable_exception(exc: BaseException) -> bool:
     if isinstance(
         exc,
         (
+            SecEgressBusyError,
             DiskReserveError,
             SecRetryDeferred,
             TimeoutError,

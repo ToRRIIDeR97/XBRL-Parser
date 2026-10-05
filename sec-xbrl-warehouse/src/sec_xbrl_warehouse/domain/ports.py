@@ -153,6 +153,7 @@ class ControlRepository(Protocol):
         worker_id: str | None = None,
         attempt: int | None = None,
         retry_at: datetime | None = None,
+        defer_seconds: float | None = None,
     ) -> None: ...
 
     async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:

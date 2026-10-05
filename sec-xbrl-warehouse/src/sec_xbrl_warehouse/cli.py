@@ -25,6 +25,7 @@ from sec_xbrl_warehouse.domain.models import (
 from sec_xbrl_warehouse.domain.ports import ControlRepository
 from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.exceptions import StateTransitionError
+from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressLock
 from sec_xbrl_warehouse.infrastructure.http.sec_client import (
     SecHttpClient,
     build_archive_directory_url,
@@ -275,7 +276,7 @@ async def _sync_catalog(dataset: DatasetKind) -> tuple[DatasetArtifact, ...]:
     sources = load_yaml(settings.config_dir / "sources.yml")
     raw_urls = sources["sec"]["catalog_pages"]
     urls = {DatasetKind(key): value for key, value in raw_urls.items()}
-    async with SecHttpClient(settings) as http:
+    async with SecHttpClient(settings, egress_lock=SecEgressLock(settings)) as http:
         return await BulkCatalogService(http, urls).sync(dataset)
 
 
@@ -717,7 +718,11 @@ def taxonomy_sync() -> None:
 
 
 async def _sync_taxonomy_packages(settings: Settings) -> list[TaxonomyPackageStatus]:
-    async with SecHttpClient(settings, allowed_hosts=settings.allowed_taxonomy_hosts) as http:
+    async with SecHttpClient(
+        settings,
+        allowed_hosts=settings.allowed_taxonomy_hosts,
+        egress_lock=SecEgressLock(settings),
+    ) as http:
         return await sync_taxonomy_packages(settings, http)
 
 

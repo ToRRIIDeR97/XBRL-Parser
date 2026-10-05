@@ -17,6 +17,7 @@ import httpx
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, SecAccessError, SecRetryDeferred
+from sec_xbrl_warehouse.infrastructure.http.egress_lock import EgressLock
 from sec_xbrl_warehouse.infrastructure.http.rate_limiter import AsyncRateLimiter
 from sec_xbrl_warehouse.logging import get_logger
 from sec_xbrl_warehouse.observability.metrics import SEC_REQUESTS, SOURCE_BYTES
@@ -35,9 +36,15 @@ class SecHttpClient:
         client: httpx.AsyncClient | None = None,
         *,
         allowed_hosts: Iterable[str] | None = None,
+        egress_lock: EgressLock | None = None,
     ) -> None:
         settings.assert_sec_identity()
         self.settings = settings
+        # Taken once, right before the first request that passes URL validation;
+        # released on exit. None keeps the client lock-free (tests, non-SEC use).
+        self.egress_lock = egress_lock
+        self._egress_held = False
+        self._egress_guard = asyncio.Lock()
         # Taxonomy package sync passes the taxonomy host allowlist; everything
         # else uses the SEC hosts. Rate limits, identity, and byte limits apply alike.
         self.allowed_hosts = (
@@ -66,8 +73,22 @@ class SecHttpClient:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-        if self._owns_client:
-            await self.client.aclose()
+        try:
+            if self._owns_client:
+                await self.client.aclose()
+        finally:
+            if self.egress_lock is not None and self._egress_held:
+                self._egress_held = False
+                await self.egress_lock.release()
+
+    async def ensure_egress(self) -> None:
+        """Hold the SEC egress lock before the first request (no-op without a lock)."""
+        if self.egress_lock is None or self._egress_held:
+            return
+        async with self._egress_guard:
+            if not self._egress_held:
+                await self.egress_lock.acquire()
+                self._egress_held = True
 
     def _validate_url(self, url: str) -> None:
         try:
@@ -107,6 +128,7 @@ class SecHttpClient:
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         self.settings.assert_sec_identity()
         self._validate_url(url)
+        await self.ensure_egress()
         kwargs["follow_redirects"] = False
         retryable_statuses = {429, 500, 502, 503, 504}
         last_error: Exception | None = None
@@ -211,6 +233,7 @@ class SecHttpClient:
         """
         self._validate_url(url)
         self.settings.assert_sec_identity()
+        await self.ensure_egress()
         byte_limit = (
             min(max_bytes, self.settings.download_max_bytes)
             if max_bytes is not None

@@ -678,7 +678,14 @@ class PostgresControlRepository:
         worker_id: str | None = None,
         attempt: int | None = None,
         retry_at: datetime | None = None,
+        defer_seconds: float | None = None,
     ) -> None:
+        """Record a failure: retry with backoff, or dead when out of attempts/permanent.
+
+        `defer_seconds` marks a deferral, not a failure (for example the SEC egress
+        lock is busy): the job returns to `retry` after that delay and the attempt
+        isn't counted.
+        """
         async with self.sessions.begin() as session:
             row = await session.scalar(
                 select(IngestionJobRow).where(IngestionJobRow.id == job_id).with_for_update()
@@ -691,6 +698,15 @@ class PostgresControlRepository:
                 or (attempt is not None and row.attempts != attempt)
             ):
                 raise StateTransitionError(f"Cannot fail a job no longer owned: {job_id}")
+            if defer_seconds is not None:
+                row.state = JobState.RETRY.value
+                row.attempts = max(0, row.attempts - 1)
+                row.available_at = func.now() + timedelta(seconds=max(0.0, defer_seconds))
+                row.last_error = error[:16_000]
+                row.locked_at = None
+                row.locked_by = None
+                row.heartbeat_at = None
+                return
             can_retry = retryable and row.attempts < row.max_attempts
             row.state = JobState.RETRY.value if can_retry else JobState.DEAD.value
             # Database time plus jittered exponential backoff, capped at one hour,

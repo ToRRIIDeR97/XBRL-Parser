@@ -89,6 +89,8 @@ class Settings(BaseSettings):
 
     worker_id: str = "local-worker"
     worker_poll_seconds: float = Field(default=2.0, gt=0)
+    # A job that finds the SEC egress lock held elsewhere is retried after this delay.
+    sec_egress_busy_retry_seconds: float = Field(default=60.0, gt=0)
     # Daily-index discovery refetches a stored company older than this.
     company_refresh_days: int = Field(default=30, ge=1)
     worker_lock_timeout_seconds: int = Field(default=900, gt=30)

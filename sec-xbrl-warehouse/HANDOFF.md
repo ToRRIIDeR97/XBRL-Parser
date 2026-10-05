@@ -8,7 +8,9 @@ transform changes (extraction revision 3, selection policy 2): re-extract the 42
 `xmlSchema:syntax` counts, and fact counts against revision 2. Confirm
 `SELECT countIf(fiscal_year IS NULL) FROM xbrl.v_xbrl_facts_latest` returns 0. Confirm
 `SELECT count() FROM xbrl.v_xbrl_facts_latest WHERE value_text = '(ixTransformValueError)'`
-returns 0. Use the per-revision diagnostics query in INGESTION_RUNBOOK.md to confirm
+returns 0. Revision 3 also fixes fact `taxonomy_version` (it was `2001` for every fact). Then run
+`mapping import-metrics`, `mapping approve-seeds` (dry run first), `mapping remap`, and
+`worker run --job-type map_canonical`, and confirm AAPL canonical facts. Use the per-revision diagnostics query in INGESTION_RUNBOOK.md to confirm
 which issues belong to the live revision. Before that, run
 `xbrl-warehouse taxonomy sync` (50 pinned FASB and SEC sources; `taxonomy status` must
 show no `uncovered` rows), set
@@ -87,6 +89,10 @@ The overlapping discovery range is deliberate and idempotent. Schedule only the 
 
 ```bash
 xbrl-warehouse mapping import-metrics
+xbrl-warehouse mapping approve-seeds --reviewer <name> --rationale <text> --dry-run
+xbrl-warehouse mapping approve-seeds --reviewer <name> --rationale <text>
+xbrl-warehouse mapping remap --epoch <date>
+xbrl-warehouse worker run --job-type map_canonical
 xbrl-warehouse mapping reviews
 xbrl-warehouse mapping approve --help
 ```

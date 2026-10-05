@@ -156,9 +156,20 @@ Defines the stable metric code, expected statement, period type, unit family, an
 Append-only/versioned mapping decisions. A mapping can be:
 
 - exact taxonomy version + QName;
-- namespace + local name with validity range;
+- namespace + local name with validity range, where the namespace is an exact URI or
+  a family token (`us-gaap`, `ifrs-full`, `dei`, `srt`) covering every standard year;
 - filing-specific extension mapping;
 - rule-based candidate requiring review.
+
+Specificity order: CIK, taxonomy version, exact namespace URI, family. See
+CANONICAL_MAPPING.md.
+
+### Fact `taxonomy_version`
+
+`xbrl_facts.taxonomy_version` is the date or year in the concept's namespace
+(`http://fasb.org/us-gaap/2025` gives `2025`). Before extraction revision 3 it was
+read from the namespace of the concept's XML Schema declaration, so every fact
+showed `2001`; facts and reviews written at revisions 1–2 carry that value.
 
 ### `canonical_facts` in ClickHouse
 

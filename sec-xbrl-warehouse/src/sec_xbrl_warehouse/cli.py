@@ -554,6 +554,84 @@ async def _mapping_approve(
         await control.close()
 
 
+@mapping_app.command("approve-seeds")
+def mapping_approve_seeds(
+    reviewer: str = typer.Option(..., help="Person approving the reviewed seed list."),
+    rationale: str = typer.Option(..., help="Why these seeds are approved."),
+    metric: Annotated[
+        list[str] | None, typer.Option("--metric", help="Limit to these metrics (repeatable).")
+    ] = None,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report only; write nothing."),
+) -> None:
+    """Approve seed candidates as family mappings (`us-gaap`, `ifrs-full`, `dei`, `srt`)."""
+    asyncio.run(_mapping_approve_seeds(reviewer, rationale, metric, dry_run))
+
+
+async def _mapping_approve_seeds(
+    reviewer: str, rationale: str, metrics: list[str] | None, dry_run: bool
+) -> None:
+    from sec_xbrl_warehouse.mapping.seed_approval import approve_seed_candidates
+
+    settings = get_settings()
+    control = PostgresControlRepository(settings)
+    repository = PostgresMappingRepository(settings, engine=control.engine)
+    try:
+        mapper = CanonicalMapper.load_rules(
+            settings.config_dir / "canonical_metrics.yml",
+            settings.config_dir / "concept_seed.yml",
+            repository,
+        )
+        results = await approve_seed_candidates(
+            mapper,
+            repository,
+            reviewer=reviewer,
+            rationale=rationale,
+            metrics=set(metrics) if metrics else None,
+            dry_run=dry_run,
+        )
+        table = Table("Metric", "Namespace", "Concept", "Result")
+        for item in results:
+            if item.created:
+                outcome = "approved"
+            elif item.would_create:
+                outcome = "would approve"
+            else:
+                outcome = "already approved"
+            table.add_row(item.metric, item.namespace, item.concept_name, outcome)
+        console.print(table)
+        if dry_run:
+            pending = sum(item.would_create for item in results)
+            console.print(f"Dry run: {len(results)} candidates, {pending} would be approved")
+        else:
+            created = sum(item.created for item in results)
+            console.print(f"{len(results)} candidates, {created} approved now")
+    finally:
+        await control.close()
+
+
+@mapping_app.command("remap")
+def mapping_remap(
+    epoch: str = typer.Option(..., help="Label for this set of approvals, e.g. 2026-10-05."),
+    accession: Annotated[
+        list[str] | None, typer.Option("--accession", help="Limit to these filings (repeatable).")
+    ] = None,
+) -> None:
+    """Enqueue one map_canonical job per published filing for this epoch."""
+    asyncio.run(_mapping_remap(epoch, accession))
+
+
+async def _mapping_remap(epoch: str, accessions: list[str] | None) -> None:
+    from sec_xbrl_warehouse.mapping.remap import enqueue_canonical_remap
+
+    settings = get_settings()
+    control = PostgresControlRepository(settings)
+    try:
+        created = await enqueue_canonical_remap(control, epoch=epoch, accessions=accessions)
+        console.print(f"Enqueued {created} map_canonical jobs for epoch {epoch}")
+    finally:
+        await control.close()
+
+
 @mapping_app.command("reviews")
 def mapping_reviews(
     limit: int = typer.Option(100, min=1, max=10_000),

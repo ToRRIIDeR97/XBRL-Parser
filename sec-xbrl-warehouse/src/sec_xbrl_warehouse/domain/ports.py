@@ -88,6 +88,24 @@ class ControlRepository(Protocol):
         max_attempts: int = 5,
     ) -> UUID: ...
 
+    async def enqueue_job_if_absent(
+        self,
+        *,
+        job_type: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        priority: int = 100,
+        max_attempts: int = 5,
+    ) -> UUID | None: ...
+
+    async def published_filing_revisions(
+        self, accessions: Sequence[str] | None = None
+    ) -> list[tuple[str, int]]: ...
+
+    async def extraction_checkpoint(
+        self, accession: str, revision: int
+    ) -> dict[str, Any] | None: ...
+
     async def claim_job(
         self,
         worker_id: str,

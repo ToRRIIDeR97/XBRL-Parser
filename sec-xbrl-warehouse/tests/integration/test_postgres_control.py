@@ -383,3 +383,39 @@ async def test_deferred_retry_preserves_server_deadline_and_fence(postgres_setti
         assert saved >= deadline
     finally:
         await repo.close()
+
+
+async def test_extraction_checkpoint_finds_completed_ingest(postgres_settings: Settings) -> None:
+    from sec_xbrl_warehouse.infrastructure.storage.postgres import checkpoint_lease
+
+    repo = PostgresControlRepository(postgres_settings)
+    accession = "0000000001-26-000777"
+    try:
+        await repo.enqueue_job(
+            job_type="ingest_filing",
+            idempotency_key=f"filing:{accession}:3",
+            priority=0,
+            payload={"filing": {"accession": accession}, "extraction_revision": 3},
+        )
+        job = await repo.claim_job("remap-worker", 900, [JobType.INGEST_FILING])
+        assert job is not None and job.payload["filing"]["accession"] == accession
+        pointer = {"object_key": "silver/x.json", "sha256": "a" * 64}
+        with checkpoint_lease(job):
+            await repo.save_checkpoint(job.id, "extract", pointer)
+        assert await repo.extraction_checkpoint(accession, 3) is None  # not complete yet
+        await repo.complete_job(
+            job.id, {"status": "complete"}, worker_id="remap-worker", attempt=job.attempts
+        )
+        assert await repo.extraction_checkpoint(accession, 3) == pointer
+        assert await repo.extraction_checkpoint(accession, 2) is None
+        assert await repo.enqueue_job_if_absent(
+            job_type="map_canonical", idempotency_key="remap-x", payload={}
+        )
+        assert (
+            await repo.enqueue_job_if_absent(
+                job_type="map_canonical", idempotency_key="remap-x", payload={}
+            )
+            is None
+        )
+    finally:
+        await repo.close()

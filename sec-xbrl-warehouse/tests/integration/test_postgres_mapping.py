@@ -146,3 +146,81 @@ async def test_mapping_specificity_and_review_workflow(postgres_settings: Settin
         assert revenue["latest_accession"] == later.accession
     finally:
         await repository.close()
+
+
+async def test_approval_is_idempotent_and_family_mappings_resolve_reviews(
+    postgres_settings: Settings,
+) -> None:
+    repository = PostgresMappingRepository(postgres_settings)
+    metric = CanonicalMetric(
+        code="idempotent_net_income",
+        name="Net Income",
+        statement="income_statement",
+        period_type="duration",
+        unit_family="monetary",
+    )
+    try:
+        await repository.seed_metrics((metric,))
+        arguments = {
+            "metric": metric.code,
+            "namespace": "us-gaap",
+            "concept_name": "NetIncomeLossIdempotent",
+            "explanation": "family approval",
+            "created_by": "integration",
+        }
+        first, created = await repository.approve_mapping_once(**arguments)
+        again, created_again = await repository.approve_mapping_once(**arguments)
+        assert created and not created_again
+        assert (again.id, again.version) == (first.id, 1)
+        reviewed, created_new = await repository.approve_mapping_once(
+            **{**arguments, "explanation": "re-reviewed"}
+        )
+        assert created_new and reviewed.version == 2
+        assert not await repository.identical_approval_exists(**arguments)
+        assert await repository.identical_approval_exists(
+            **{**arguments, "explanation": "re-reviewed"}
+        )
+        found = await repository.approved_mappings_for_concept(
+            "http://fasb.org/us-gaap/2018-01-31",
+            "NetIncomeLossIdempotent",
+            "2018-01-31",
+            1,
+            date(2018, 5, 1),
+        )
+        assert [item.version for item in found] == [2]
+
+        filing = FilingRef(
+            accession="0000000001-26-000123",
+            cik=1,
+            company_name="Example Corp",
+            form="10-K",
+            filed_date=date(2026, 2, 15),
+            archive_directory_url="https://www.sec.gov/Archives/edgar/data/1/123",
+        )
+        fact = XbrlFact(
+            fact_id="n" * 64,
+            concept_namespace="http://fasb.org/us-gaap/2025",
+            concept_name="NetIncomeLossIdempotent",
+            concept_qname="us-gaap:NetIncomeLossIdempotent",
+            taxonomy_version="2025",
+            context_id="c1",
+            context_hash="c" * 64,
+            unit=XbrlUnit(unit_id="USD", numerator_measures=("iso4217:USD",)),
+            value_kind=FactValueKind.NUMERIC,
+            raw_value="1",
+            value_decimal=Decimal("1"),
+            period_kind=PeriodKind.DURATION,
+            period_start=date(2025, 1, 1),
+            period_end=date(2025, 12, 31),
+            entity_scheme="https://www.sec.gov/CIK",
+            entity_identifier="1",
+            dimension_hash="d" * 64,
+            duplicate_set_hash="s" * 64,
+            source_document="filing.htm",
+        )
+        review = await repository.create_review(
+            filing=filing, fact=fact, candidates=(metric.code,), evidence={}
+        )
+        await repository.resolve_review(review, reviewed)
+    finally:
+        await repository.close()

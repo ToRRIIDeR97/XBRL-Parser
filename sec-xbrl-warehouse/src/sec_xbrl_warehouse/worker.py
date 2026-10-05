@@ -77,6 +77,7 @@ async def runtime_services(
             yield {
                 "control": control,
                 "warehouse": warehouse,
+                "object_store": store,
                 "mapper": mapper,
                 "forms": sources["default_forms"],
                 "discovery": SecDailyIndexDiscovery(
@@ -283,22 +284,29 @@ def build_handlers(
     if mapper is not None:
 
         async def _map_canonical(job: JobRecord) -> dict[str, Any] | None:
-            from sec_xbrl_warehouse.domain.models import FilingRef
-            from sec_xbrl_warehouse.domain.xbrl import XbrlFact
+            from sec_xbrl_warehouse.mapping.remap import load_published_extraction
 
-            filing = FilingRef.model_validate(job.payload["filing"])
-            payload_facts = job.payload.get("facts", [])
-            facts = (XbrlFact.model_validate(item) for item in payload_facts)
+            accession = str(job.payload["accession"])
+            revision = int(job.payload["extraction_revision"])
+            run_settings = settings or Settings()
+            bundle = await load_published_extraction(
+                services["control"], services["object_store"], run_settings, accession, revision
+            )
             mapped = 0
             async for canonical in mapper.map_batches(
-                facts,
-                filing,
-                extraction_revision=int(job.payload.get("extraction_revision", 1)),
-                batch_bytes=(settings or Settings()).arrow_batch_bytes,
+                bundle.facts,
+                bundle.filing,
+                extraction_revision=revision,
+                batch_bytes=run_settings.arrow_batch_bytes,
             ):
                 await asyncio.to_thread(services["warehouse"].insert_canonical_facts, canonical)
                 mapped += len(canonical)
-            return {"mapped": mapped, "unmapped": len(payload_facts) - mapped}
+            return {
+                "accession": accession,
+                "extraction_revision": revision,
+                "mapped": mapped,
+                "unmapped": len(bundle.facts) - mapped,
+            }
 
         handlers[JobType.MAP_CANONICAL] = _map_canonical
     if services.get("discovery") is not None:

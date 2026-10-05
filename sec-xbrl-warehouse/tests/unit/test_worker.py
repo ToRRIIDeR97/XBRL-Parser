@@ -535,3 +535,62 @@ def test_queue_collector_exports_snapshot_and_failure() -> None:
     failing.register(QueueCollector(broken))
     text = generate_latest(failing).decode()
     assert "xbrl_queue_snapshot_up 0.0" in text and "xbrl_queue_jobs{" not in text
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(3, True), (32, True), (236, True), (394, True), (244, True), (285, True), (164, False)],
+)
+def test_clickhouse_code_list(code: int, expected: bool) -> None:
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    assert is_retryable_exception(DatabaseError(f"Code: {code}. DB::Exception: x")) is expected
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [(403, True), (408, True), (429, True), (500, True), (503, True), (400, False), (404, False)],
+)
+def test_http_status_errors_retry_only_transient_statuses(status: int, expected: bool) -> None:
+    request = httpx.Request("GET", "https://www.sec.gov/x")
+    error = httpx.HTTPStatusError(
+        "status", request=request, response=httpx.Response(status, request=request)
+    )
+    assert is_retryable_exception(error) is expected
+
+
+def test_snapshot_on_loop_cancels_on_timeout() -> None:
+    import threading
+    import time
+
+    from sec_xbrl_warehouse.domain.models import QueueSnapshot
+    from sec_xbrl_warehouse.observability.metrics import snapshot_on_loop
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    cancelled = threading.Event()
+
+    async def slow() -> QueueSnapshot:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return QueueSnapshot(counts={})
+
+    async def fast() -> QueueSnapshot:
+        return QueueSnapshot(counts={("x", "pending"): 1})
+
+    try:
+        with pytest.raises(TimeoutError):
+            snapshot_on_loop(slow, loop, timeout=0.05)()
+        deadline = time.monotonic() + 2
+        while not cancelled.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert cancelled.is_set()
+        assert snapshot_on_loop(fast, loop, timeout=1)().counts == {("x", "pending"): 1}
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(2)
+        loop.close()

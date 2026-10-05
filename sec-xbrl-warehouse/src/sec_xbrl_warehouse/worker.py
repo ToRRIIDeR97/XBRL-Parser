@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import signal
 from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from typing import Any
@@ -11,6 +12,7 @@ import httpx
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import JobType
 from sec_xbrl_warehouse.domain.models import JobRecord
+from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.exceptions import (
     ArtifactIntegrityError,
     DiskReserveError,
@@ -18,6 +20,7 @@ from sec_xbrl_warehouse.exceptions import (
     SecRetryDeferred,
     StateTransitionError,
 )
+from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.postgres import (
     PostgresControlRepository,
     checkpoint_lease,
@@ -35,6 +38,7 @@ async def runtime_services(
 ) -> AsyncIterator[dict[str, Any]]:
     """Own the network clients used by every worker stage."""
     from sec_xbrl_warehouse.config_files import load_yaml
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressLock
     from sec_xbrl_warehouse.infrastructure.http.sec_client import SecHttpClient
     from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWarehouse
     from sec_xbrl_warehouse.infrastructure.storage.object_store import create_object_store
@@ -42,7 +46,10 @@ async def runtime_services(
     from sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter import ArelleExtractor
     from sec_xbrl_warehouse.ingestion.bulk_downloader import BulkArtifactDownloader
     from sec_xbrl_warehouse.ingestion.bulk_loader import BulkArtifactLoader
-    from sec_xbrl_warehouse.ingestion.filing_discovery import SecDailyIndexDiscovery
+    from sec_xbrl_warehouse.ingestion.filing_discovery import (
+        SecDailyIndexDiscovery,
+        SecSubmissionsDiscovery,
+    )
     from sec_xbrl_warehouse.ingestion.filing_downloader import FilingPackageDownloader
     from sec_xbrl_warehouse.ingestion.incremental import IncrementalFilingIngestor
     from sec_xbrl_warehouse.ingestion.orchestrator import IngestionOrchestrator
@@ -56,7 +63,7 @@ async def runtime_services(
     await asyncio.to_thread(store.ensure_bucket)
     warehouse = await asyncio.to_thread(ClickHouseWarehouse, settings)
     try:
-        async with SecHttpClient(settings) as http:
+        async with SecHttpClient(settings, egress_lock=SecEgressLock(settings)) as http:
             repository = PostgresMappingRepository(settings, engine=control.engine)
             mapper = CanonicalMapper.load_rules(
                 settings.config_dir / "canonical_metrics.yml",
@@ -76,11 +83,15 @@ async def runtime_services(
             yield {
                 "control": control,
                 "warehouse": warehouse,
+                "object_store": store,
                 "mapper": mapper,
                 "forms": sources["default_forms"],
                 "discovery": SecDailyIndexDiscovery(
                     http, sources["daily_index_base"], sources["archive_base"], object_store=store
                 ),
+                "submissions": SecSubmissionsDiscovery(http, sources["data_api_base"]),
+                "http": http,
+                "data_api_base": sources["data_api_base"],
                 "orchestrator": IngestionOrchestrator(
                     control,
                     downloader=BulkArtifactDownloader(settings, http, store),
@@ -96,6 +107,7 @@ async def runtime_services(
                     settings=settings,
                     object_store=store,
                     mapper=mapper,
+                    ensure_sec_egress=http.ensure_egress,
                 ),
             }
     finally:
@@ -184,15 +196,34 @@ class Worker:
             JOB_TRANSITIONS.labels(state="lease_lost", job_type=job.job_type.value).inc()
         except asyncio.CancelledError:
             raise
+        except SecEgressBusyError as exc:
+            # Another process is sending SEC traffic: defer without spending an attempt.
+            logger.warning("sec_egress_busy", job_id=str(job.id), job_type=job.job_type.value)
+            try:
+                await self.control.fail_job(
+                    job.id,
+                    str(exc),
+                    retryable=True,
+                    defer_seconds=self.settings.sec_egress_busy_retry_seconds,
+                    worker_id=self.settings.worker_id,
+                    attempt=job.attempts,
+                )
+            except StateTransitionError:
+                JOB_TRANSITIONS.labels(state="lease_lost", job_type=job.job_type.value).inc()
+            else:
+                JOB_TRANSITIONS.labels(state="deferred", job_type=job.job_type.value).inc()
         except Exception as exc:
             logger.exception("job_failed", job_id=str(job.id), job_type=job.job_type.value)
             retryable = is_retryable_exception(exc)
+            deferral: dict[str, Any] = (
+                {"retry_at": exc.retry_at} if isinstance(exc, SecRetryDeferred) else {}
+            )
             try:
                 await self.control.fail_job(
                     job.id,
                     str(exc),
                     retryable=retryable,
-                    **({"retry_at": exc.retry_at} if isinstance(exc, SecRetryDeferred) else {}),
+                    **deferral,
                     worker_id=self.settings.worker_id,
                     attempt=job.attempts,
                 )
@@ -282,64 +313,153 @@ def build_handlers(
     if mapper is not None:
 
         async def _map_canonical(job: JobRecord) -> dict[str, Any] | None:
-            from sec_xbrl_warehouse.domain.models import FilingRef
-            from sec_xbrl_warehouse.domain.xbrl import XbrlFact
+            from sec_xbrl_warehouse.mapping.remap import load_published_extraction
 
-            filing = FilingRef.model_validate(job.payload["filing"])
-            payload_facts = job.payload.get("facts", [])
-            facts = (XbrlFact.model_validate(item) for item in payload_facts)
+            accession = str(job.payload["accession"])
+            revision = int(job.payload["extraction_revision"])
+            run_settings = settings or Settings()
+            bundle = await load_published_extraction(
+                services["control"], services["object_store"], run_settings, accession, revision
+            )
             mapped = 0
             async for canonical in mapper.map_batches(
-                facts,
-                filing,
-                extraction_revision=int(job.payload.get("extraction_revision", 1)),
-                batch_bytes=(settings or Settings()).arrow_batch_bytes,
+                bundle.facts,
+                bundle.filing,
+                extraction_revision=revision,
+                batch_bytes=run_settings.arrow_batch_bytes,
             ):
                 await asyncio.to_thread(services["warehouse"].insert_canonical_facts, canonical)
                 mapped += len(canonical)
-            return {"mapped": mapped, "unmapped": len(payload_facts) - mapped}
+            return {
+                "accession": accession,
+                "extraction_revision": revision,
+                "mapped": mapped,
+                "unmapped": len(bundle.facts) - mapped,
+            }
 
         handlers[JobType.MAP_CANONICAL] = _map_canonical
     if services.get("discovery") is not None:
 
         async def _discover(job: JobRecord) -> dict[str, Any] | None:
-            from datetime import date
 
-            filings = await services["discovery"].discover_range(
-                date.fromisoformat(job.payload["filed_from"]),
-                date.fromisoformat(job.payload["filed_to"]),
-                job.payload.get("forms", services["forms"]),
-            )
+            from sec_xbrl_warehouse.ingestion.filing_discovery import enrich_companies
+
+            forms = job.payload.get("forms", services["forms"])
+            filed_from = _payload_date(job.payload.get("filed_from"))
+            filed_to = _payload_date(job.payload.get("filed_to"))
+            result: dict[str, Any] = {}
+            if job.payload.get("cik") is not None:
+                # One issuer from its submissions JSON: the same request yields the company.
+                company, filings = await services["submissions"].discover_with_company(
+                    int(job.payload["cik"]), forms=forms, filed_from=filed_from, filed_to=filed_to
+                )
+                await services["control"].upsert_company(company)
+                result["companies_stored"] = 1
+            else:
+                if filed_from is None or filed_to is None:
+                    raise ValueError("Daily-index discovery needs filed_from and filed_to")
+                filings = await services["discovery"].discover_range(filed_from, filed_to, forms)
+                if services.get("http") is not None:
+                    # Daily indexes carry no company data: fetch submissions once per new CIK.
+                    result["companies_stored"] = await enrich_companies(
+                        services["control"],
+                        services["http"],
+                        ciks=[filing.cik for filing in filings],
+                        as_of=filed_to,
+                        data_api_base=services.get("data_api_base", "https://data.sec.gov"),
+                        max_age_days=(settings or Settings()).company_refresh_days,
+                    )
             for filing in filings:
                 await services["control"].enqueue_job(
                     job_type=JobType.INGEST_FILING.value,
-                    idempotency_key=f"filing:{filing.accession}:1",
-                    payload={"filing": filing.model_dump(mode="json"), "extraction_revision": 1},
+                    idempotency_key=f"filing:{filing.accession}:{CURRENT_EXTRACTION_REVISION}",
+                    payload={
+                        "filing": filing.model_dump(mode="json"),
+                        "extraction_revision": CURRENT_EXTRACTION_REVISION,
+                    },
                 )
-            return {"filings_enqueued": len(filings)}
+            return {"filings_enqueued": len(filings), **result}
 
         handlers[JobType.DISCOVER_FILINGS] = _discover
     return handlers
 
 
-def is_retryable_exception(exc: Exception) -> bool:
-    """Classify network/timeout/temporary DB failures explicitly."""
+def _payload_date(value: Any) -> Any:
+    from datetime import date
+
+    return date.fromisoformat(str(value)) if value else None
+
+
+# ClickHouse server error codes that clear on their own (load, merges, restarts).
+# 164 READONLY is a permission/settings error and stays permanent.
+TRANSIENT_CLICKHOUSE_CODES = frozenset(
+    {
+        3,  # UNEXPECTED_END_OF_FILE (connection dropped mid-read)
+        32,  # ATTEMPT_TO_READ_AFTER_EOF (connection dropped mid-read)
+        159,  # TIMEOUT_EXCEEDED
+        202,  # TOO_MANY_SIMULTANEOUS_QUERIES
+        203,  # NO_FREE_CONNECTION
+        209,  # SOCKET_TIMEOUT
+        210,  # NETWORK_ERROR
+        236,  # ABORTED
+        241,  # MEMORY_LIMIT_EXCEEDED
+        242,  # TABLE_IS_READ_ONLY (replica temporarily read-only)
+        244,  # UNEXPECTED_ZOOKEEPER_ERROR
+        252,  # TOO_MANY_PARTS
+        285,  # TOO_FEW_LIVE_REPLICAS
+        319,  # UNKNOWN_STATUS_OF_INSERT
+        394,  # QUERY_WAS_CANCELLED
+        425,  # SYSTEM_ERROR
+        999,  # KEEPER_EXCEPTION
+    }
+)
+# S3/MinIO error codes worth retrying; others (AccessDenied, NoSuchBucket) are permanent.
+TRANSIENT_S3_CODES = frozenset(
+    {
+        "SlowDown",
+        "ServiceUnavailable",
+        "InternalError",
+        "RequestTimeout",
+        "RequestTimeTooSkewed",
+        "Throttling",
+        "ThrottlingException",
+        "503",
+        "500",
+    }
+)
+RETRYABLE_HTTP_STATUSES = frozenset({403, 408, 429})
+_CLICKHOUSE_CODE = re.compile(r"\bCode:\s*(\d+)")
+
+
+def is_retryable_exception(exc: BaseException) -> bool:
+    """Classify network, timeout, and temporary storage failures as retryable.
+
+    Wrapped errors (for example a `WarehouseWriteError` raised from a ClickHouse
+    or S3 error) are classified by their `__cause__`. Integrity, schema drift,
+    ClickHouse syntax/missing-table, and S3 permission/bucket errors stay permanent.
+    """
+    if isinstance(exc, (ArtifactIntegrityError, SchemaDriftError)):
+        return False
     if isinstance(
         exc,
         (
+            SecEgressBusyError,
             DiskReserveError,
             SecRetryDeferred,
             TimeoutError,
             ConnectionError,
             httpx.TimeoutException,
             httpx.TransportError,
-            httpx.HTTPStatusError,
         ),
     ):
         return True
-    if isinstance(exc, (ArtifactIntegrityError, SchemaDriftError)):
-        return False
-    if exc.__cause__ is not None and isinstance(exc.__cause__, Exception):
+    if isinstance(exc, httpx.HTTPStatusError):
+        # SEC throttling answers 403; 408/429/5xx are transient; other 4xx aren't.
+        status = exc.response.status_code
+        return status in RETRYABLE_HTTP_STATUSES or status >= 500
+    if _is_transient_storage_error(exc):
+        return True
+    if exc.__cause__ is not None:
         return is_retryable_exception(exc.__cause__)
     # PostgreSQL transient error classes surface through SQLAlchemy.
     module = type(exc).__module__
@@ -349,4 +469,36 @@ def is_retryable_exception(exc: Exception) -> bool:
             marker in text
             for marker in ("timeout", "connection", "locked", "deadlock", "serialization")
         )
+    return False
+
+
+def _is_transient_storage_error(exc: BaseException) -> bool:
+    module = type(exc).__module__
+    if module.startswith("clickhouse_connect"):
+        from clickhouse_connect.driver.exceptions import DatabaseError, OperationalError
+
+        if isinstance(exc, OperationalError):
+            return True  # connection refused/reset, HTTP timeouts
+        if isinstance(exc, DatabaseError):
+            match = _CLICKHOUSE_CODE.search(str(exc))
+            return match is not None and int(match.group(1)) in TRANSIENT_CLICKHOUSE_CODES
+        return False
+    if module.startswith(("botocore", "boto3")):
+        from botocore.exceptions import (
+            ClientError,
+            ConnectionClosedError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ReadTimeoutError,
+        )
+
+        if isinstance(
+            exc,
+            (EndpointConnectionError, ConnectionClosedError, ReadTimeoutError, ConnectTimeoutError),
+        ):
+            return True
+        if isinstance(exc, ClientError):
+            error = exc.response.get("Error", {})
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            return str(error.get("Code")) in TRANSIENT_S3_CODES or status in {500, 503}
     return False

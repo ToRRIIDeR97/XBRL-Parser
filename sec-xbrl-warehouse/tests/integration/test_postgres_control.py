@@ -292,8 +292,70 @@ async def test_upsert_filing_and_validation_issues(postgres_settings: Settings) 
             message="test message",
             accession=accession,
             line=12,
+            extraction_revision=3,
         )
         await repo.record_validation_issues([issue])
+        from sqlalchemy import select
+
+        from sec_xbrl_warehouse.infrastructure.storage.postgres_models import ValidationIssueRow
+
+        async with repo.sessions() as session:
+            revisions = (
+                await session.scalars(
+                    select(ValidationIssueRow.extraction_revision).where(
+                        ValidationIssueRow.accession == accession
+                    )
+                )
+            ).all()
+        assert revisions == [3]
+    finally:
+        await repo.close()
+
+
+async def test_discovery_upsert_keeps_stored_fiscal_fields_over_nulls(
+    postgres_settings: Settings,
+) -> None:
+    from sqlalchemy import select
+
+    from sec_xbrl_warehouse.infrastructure.storage.postgres_models import FilingRow
+
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        accession = "0000000001-26-000002"
+        enriched = _filing(accession).model_copy(
+            update={
+                "fiscal_year": 2025,
+                "fiscal_period": "FY",
+                "report_date": datetime(2025, 12, 31).date(),
+            }
+        )
+        await repo.upsert_filing(enriched)
+        await repo.upsert_filing(
+            _filing(accession).model_copy(update={"form": "10-K/A"}), keep_derived=True
+        )
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert (row.fiscal_year, row.fiscal_period, row.report_date) == (
+            2025,
+            "FY",
+            datetime(2025, 12, 31).date(),
+        )
+        assert row.form == "10-K/A"
+        await repo.upsert_filing(enriched.model_copy(update={"fiscal_period": "Q4"}))
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert row.fiscal_period == "Q4"
+        # A later extraction that derives NULL (conflicting dei values) clears it.
+        await repo.upsert_filing(enriched.model_copy(update={"fiscal_year": None}))
+        async with repo.sessions() as session:
+            row = (
+                await session.execute(select(FilingRow).where(FilingRow.accession == accession))
+            ).scalar_one()
+        assert row.fiscal_year is None
     finally:
         await repo.close()
 
@@ -319,5 +381,215 @@ async def test_deferred_retry_preserves_server_deadline_and_fence(postgres_setti
                 text("SELECT available_at FROM ingestion_jobs WHERE id = :id"), {"id": job.id}
             )
         assert saved >= deadline
+    finally:
+        await repo.close()
+
+
+async def test_extraction_checkpoint_finds_completed_ingest(postgres_settings: Settings) -> None:
+    from sec_xbrl_warehouse.infrastructure.storage.postgres import checkpoint_lease
+
+    repo = PostgresControlRepository(postgres_settings)
+    accession = "0000000001-26-000777"
+    try:
+        await repo.enqueue_job(
+            job_type="ingest_filing",
+            idempotency_key=f"filing:{accession}:3",
+            priority=0,
+            payload={"filing": {"accession": accession}, "extraction_revision": 3},
+        )
+        job = await repo.claim_job("remap-worker", 900, [JobType.INGEST_FILING])
+        assert job is not None and job.payload["filing"]["accession"] == accession
+        pointer = {"object_key": "silver/x.json", "sha256": "a" * 64}
+        with checkpoint_lease(job):
+            await repo.save_checkpoint(job.id, "extract", pointer)
+        assert await repo.extraction_checkpoint(accession, 3) is None  # not complete yet
+        await repo.complete_job(
+            job.id, {"status": "complete"}, worker_id="remap-worker", attempt=job.attempts
+        )
+        assert await repo.extraction_checkpoint(accession, 3) == pointer
+        assert await repo.extraction_checkpoint(accession, 2) is None
+        assert await repo.enqueue_job_if_absent(
+            job_type="map_canonical", idempotency_key="remap-x", payload={}
+        )
+        assert (
+            await repo.enqueue_job_if_absent(
+                job_type="map_canonical", idempotency_key="remap-x", payload={}
+            )
+            is None
+        )
+    finally:
+        await repo.close()
+
+
+async def test_company_round_trips_every_field(postgres_settings: Settings) -> None:
+    from datetime import date
+
+    from sec_xbrl_warehouse.domain.models import Company, FormerName
+
+    company = Company(
+        cik=987654,
+        name="Round Trip Corp",
+        entity_type="operating",
+        sic=3571,
+        sic_description="Electronic Computers",
+        tickers=("RTC", "RTC-W"),
+        exchanges=("Nasdaq", "Nasdaq"),
+        fiscal_year_end="0630",
+        state_of_incorporation="DE",
+        filer_category="Large accelerated filer",
+        former_names=(FormerName(name="OLD RTC", valid_from=date(2001, 1, 2), valid_to=None),),
+        source_checksum="c" * 64,
+        fetched_at=datetime(2026, 10, 5, 12, 0, tzinfo=UTC),
+    )
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.upsert_company(company)
+        assert await repo.get_company(987654) == company
+        assert await repo.find_company_by_ticker("rtc-w") == company
+        assert await repo.known_company_ciks([987654, 1]) == {987654}
+        assert await repo.known_company_ciks([]) == set()
+    finally:
+        await repo.close()
+
+
+async def test_scoped_claim_never_dead_letters_other_types(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        held = await repo.enqueue_job(
+            job_type="load_bulk",
+            idempotency_key=f"scoped-held-{uuid4()}",
+            payload={},
+            priority=-50,
+            max_attempts=1,
+        )
+        async with repo.sessions.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE ingestion_jobs SET state='running', attempts=1, "
+                    "locked_at=now() - interval '2 hours', locked_by='gone' WHERE id=:id"
+                ),
+                {"id": held},
+            )
+        scoped = await repo.claim_job("scoped", 900, [JobType.RECONCILE_FILING])
+        assert scoped is None
+        (row,) = [job for job in await repo.list_jobs(job_type="load_bulk") if job.id == held]
+        assert row.state is JobState.RUNNING
+        # An unscoped claim dead-letters it with a reason (and keeps looking).
+        await repo.claim_job("any", 900, [JobType.LOAD_BULK])
+        (row,) = [job for job in await repo.list_jobs(job_type="load_bulk") if job.id == held]
+        assert row.state is JobState.DEAD and "attempts used" in (row.last_error or "")
+        snapshot = await repo.queue_snapshot()
+        assert snapshot.counts[("load_bulk", "dead")] >= 1
+    finally:
+        await repo.close()
+
+
+async def test_concurrent_claims_with_dead_letters_never_double_claim(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    others = [PostgresControlRepository(postgres_settings) for _ in range(4)]
+    try:
+        prefix = f"race-{uuid4()}"
+        exhausted = []
+        for index in range(3):
+            job_id = await repo.enqueue_job(
+                job_type="reconcile_filing",
+                idempotency_key=f"{prefix}-dead-{index}",
+                payload={},
+                priority=-100,
+                max_attempts=1,
+            )
+            exhausted.append(job_id)
+        async with repo.sessions.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE ingestion_jobs SET state='running', attempts=1, "
+                    "locked_at=now() - interval '2 hours', locked_by='gone' WHERE id = ANY(:ids)"
+                ),
+                {"ids": exhausted},
+            )
+        for index in range(8):
+            await repo.enqueue_job(
+                job_type="reconcile_filing",
+                idempotency_key=f"{prefix}-{index}",
+                payload={},
+                priority=-99,
+            )
+        claims = await asyncio.gather(
+            *[
+                worker.claim_job(f"w{n}", 900, [JobType.RECONCILE_FILING])
+                for n, worker in enumerate(others * 2)
+            ]
+        )
+        ids = [job.id for job in claims if job is not None]
+        assert len(ids) == len(set(ids)) == 8
+        assert not set(ids) & set(exhausted)
+    finally:
+        await repo.close()
+        for worker in others:
+            await worker.close()
+
+
+async def test_ticker_move_removes_matching_exchange(postgres_settings: Settings) -> None:
+    from sec_xbrl_warehouse.domain.models import Company
+
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.upsert_company(
+            Company(
+                cik=555001,
+                name="Holder A",
+                tickers=("AAA", "MOVE", "aaa"),
+                exchanges=("NYSE", "Nasdaq", "NYSE"),
+                fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        )
+        stored = await repo.get_company(555001)
+        assert stored is not None
+        assert (stored.tickers, stored.exchanges) == (("AAA", "MOVE"), ("NYSE", "Nasdaq"))
+        await repo.upsert_company(
+            Company(
+                cik=555002,
+                name="Holder B",
+                tickers=("MOVE",),
+                exchanges=("CboeBZX",),
+                fetched_at=datetime(2026, 10, 1, tzinfo=UTC),
+            )
+        )
+        old = await repo.get_company(555001)
+        assert old is not None and (old.tickers, old.exchanges) == (("AAA",), ("NYSE",))
+        stale = await repo.stale_company_ciks(
+            [555001, 555002, 999], datetime(2026, 6, 1, tzinfo=UTC)
+        )
+        assert stale == {555001}
+    finally:
+        await repo.close()
+
+
+async def test_deferred_failure_returns_job_without_spending_an_attempt(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        job_id = await repo.enqueue_job(
+            job_type="reconcile_filing",
+            idempotency_key=f"defer-{uuid4()}",
+            payload={},
+            priority=-200,
+            max_attempts=1,
+        )
+        job = await repo.claim_job("w-defer", 900, [JobType.RECONCILE_FILING])
+        assert job is not None and job.id == job_id and job.attempts == 1
+        await repo.fail_job(
+            job.id,
+            "another process holds the SEC egress lock",
+            retryable=True,
+            defer_seconds=0,
+            worker_id="w-defer",
+            attempt=job.attempts,
+        )
+        again = await repo.claim_job("w-defer", 900, [JobType.RECONCILE_FILING])
+        assert again is not None and again.id == job_id and again.attempts == 1
     finally:
         await repo.close()

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schema xmlns="http://www.w3.org/2001/XMLSchema"
+        xmlns:xbrli="http://www.xbrl.org/2003/instance"
+        xmlns:ex="http://example.com/2026"
+        targetNamespace="http://example.com/2026"
+        elementFormDefault="qualified">
+  <import namespace="http://www.xbrl.org/2003/instance"
+          schemaLocation="http://www.xbrl.org/2003/xbrl-instance-2003-12-31.xsd"/>
+  <element name="AnnualReport" id="ex_AnnualReport" type="xbrli:booleanItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="QuarterlyReport" id="ex_QuarterlyReport" type="xbrli:booleanItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="StateOfIncorporation" id="ex_StateOfIncorporation" type="xbrli:stringItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="CountryOfIncorporation" id="ex_CountryOfIncorporation" type="xbrli:stringItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="SecurityExchange" id="ex_SecurityExchange" type="xbrli:stringItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+  <element name="Shares" id="ex_Shares" type="xbrli:sharesItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="instant" nillable="true"/>
+  <element name="Bogus" id="ex_Bogus" type="xbrli:stringItemType"
+           substitutionGroup="xbrli:item" xbrli:periodType="duration" nillable="true"/>
+</schema>

@@ -25,13 +25,83 @@ xbrl-warehouse worker run
 1. Discover the latest daily XBRL index.
 2. Normalize and upsert filing references.
 3. Enqueue accessions not already complete for the current extraction revision.
-4. Download each filing directory manifest and package.
+4. Download each filing directory index and the package files Arelle needs (see the
+   bronze section of ARCHITECTURE.md). A filing whose index lists only the `.txt`
+   submission and `<accession>-xbrl.zip` is expanded from the ZIP.
 5. Run Arelle extraction and validation.
 6. Write silver Parquet and ClickHouse.
 7. Run filing-level reconciliation and quality checks.
 8. Mark complete or retry/quarantine.
 
+New filing jobs default to the current extraction revision
+(`CURRENT_EXTRACTION_REVISION` in `domain/xbrl.py`, now 3). To re-extract a filing
+already loaded at an older revision, enqueue it again; the new revision gets its own
+job idempotency key, and older lineage is retained:
+
+```bash
+xbrl-warehouse filing enqueue --accession <accession> --cik <cik> \
+  --company-name <name> --form <form> --filed-date <YYYY-MM-DD> \
+  --primary-document <file>
+xbrl-warehouse worker run --job-type ingest_filing
+```
+
+### Diagnostics per extraction revision
+
+Filing diagnostics carry the revision that raised them, and repeated ones are grouped:
+
+```sql
+SELECT extraction_revision, code, severity,
+       count(*) AS rows,
+       sum(coalesce((details->>'occurrences')::int, 1)) AS occurrences
+FROM validation_issues
+WHERE accession = '<accession>'
+GROUP BY 1, 2, 3
+ORDER BY 1 DESC, occurrences DESC;
+```
+
+Rows with a NULL `extraction_revision` predate the revision tag.
+
+### Canonical facts after approving mappings
+
+```bash
+xbrl-warehouse mapping import-metrics
+xbrl-warehouse mapping approve-seeds --reviewer <name> --rationale <text> --dry-run
+xbrl-warehouse mapping approve-seeds --reviewer <name> --rationale <text>
+xbrl-warehouse mapping remap --epoch <date>
+xbrl-warehouse worker run --job-type map_canonical
+```
+
+`map_canonical` needs the saved extraction of a completed `ingest_filing` job for that
+revision; filings without one fail with "No saved extraction" and need re-ingestion.
+
+### Companies
+
+```bash
+xbrl-warehouse filing discover --cik 320193   # queue one issuer; the worker stores its company row
+xbrl-warehouse worker run --job-type discover_filings
+xbrl-warehouse company show AAPL               # or a CIK; reads PostgreSQL only
+```
+
+Daily-index discovery (`filing discover --filed-from ... --filed-to ...`) also stores
+companies: after a run, the worker fetches the submissions JSON once for each
+discovered CIK without a company row, or whose row is older than
+`XBRL_COMPANY_REFRESH_DAYS` (default 30), through the same rate-limited client.
+
+The first daily-index run on an empty `companies` table fetches one submissions
+document per filer in the range: thousands of requests for a busy week, at the
+configured SEC rate (about 10 minutes per 5,000 CIKs at 8 requests/second). Start with
+a short range, or seed known issuers with `--cik` first.
+
+`filing discover --cik <cik> --refresh` queues a new job for an issuer already
+discovered (a fresh idempotency key), which refetches its submissions and company row.
+
 ## Recovery
+
+### Dead jobs
+
+List them with `xbrl-warehouse jobs list --state dead`, fix the cause recorded in
+`last_error`, then `xbrl-warehouse jobs retry <job-id>`. The job keeps its idempotency
+key and checkpoints, so it resumes from the last completed stage.
 
 ### Download interrupted
 

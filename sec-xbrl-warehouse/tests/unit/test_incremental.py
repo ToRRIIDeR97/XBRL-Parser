@@ -311,3 +311,23 @@ def test_arrow_byte_limit_includes_denormalized_filing_metadata():
     )
     with pytest.raises(WarehouseWriteError, match="row exceeds Arrow byte budget"):
         list(iter_xbrl_tables(bundle, "facts", 50, 10000))
+
+
+def test_ingestor_takes_egress_lock_before_online_extraction_only() -> None:
+    for offline, expected in ((False, 1), (True, 0)):
+        calls: list[str] = []
+
+        async def ensure(calls: list[str] = calls) -> None:
+            calls.append("lock")
+
+        ingestor = IncrementalFilingIngestor(
+            _FakeControl(),
+            _FakePackageStore(),
+            _FakeExtractor(),
+            _FakeWriter(),
+            _FakeWarehouse(),
+            settings=Settings(env="test", arelle_offline=offline),
+            ensure_sec_egress=ensure,
+        )
+        assert asyncio.run(ingestor.ingest(_filing()))["status"] == "complete"
+        assert len(calls) == expected

@@ -1,0 +1,42 @@
+{
+  "cik": "320193",
+  "entityType": "operating",
+  "sic": "3571",
+  "sicDescription": "Electronic Computers",
+  "insiderTransactionForOwnerExists": 0,
+  "insiderTransactionForIssuerExists": 1,
+  "name": "Apple Inc.",
+  "tickers": ["AAPL"],
+  "exchanges": ["Nasdaq"],
+  "ein": "942404110",
+  "description": "",
+  "website": "",
+  "investorWebsite": "",
+  "category": "Large accelerated filer",
+  "fiscalYearEnd": "0927",
+  "stateOfIncorporation": "CA",
+  "stateOfIncorporationDescription": "CA",
+  "addresses": {
+    "mailing": {"street1": "ONE APPLE PARK WAY", "city": "CUPERTINO", "stateOrCountry": "CA", "zipCode": "95014"},
+    "business": {"street1": "ONE APPLE PARK WAY", "city": "CUPERTINO", "stateOrCountry": "CA", "zipCode": "95014"}
+  },
+  "phone": "(408) 996-1010",
+  "flags": "",
+  "formerNames": [
+    {"name": "APPLE INC", "from": "2007-01-10T05:00:00.000Z", "to": "2019-08-05T04:00:00.000Z"},
+    {"name": "APPLE COMPUTER INC", "from": "1994-01-26T05:00:00.000Z", "to": "2007-01-04T05:00:00.000Z"}
+  ],
+  "filings": {
+    "recent": {
+      "accessionNumber": ["0000320193-25-000079"],
+      "filingDate": ["2025-10-31"],
+      "reportDate": ["2025-09-27"],
+      "acceptanceDateTime": ["2025-10-31T06:01:26.000Z"],
+      "form": ["10-K"],
+      "primaryDocument": ["aapl-20250927.htm"],
+      "isXBRL": [1],
+      "isInlineXBRL": [1]
+    },
+    "files": []
+  }
+}

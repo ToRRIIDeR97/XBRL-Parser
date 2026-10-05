@@ -9,10 +9,12 @@ from uuid import UUID
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
 from sec_xbrl_warehouse.domain.enums import ArtifactState, JobType, SecTable
 from sec_xbrl_warehouse.domain.models import (
+    Company,
     DatasetArtifact,
     FilingPackageManifest,
     FilingRef,
     JobRecord,
+    QueueSnapshot,
     SourceArtifactRef,
     StoredObject,
     ValidationIssue,
@@ -88,6 +90,44 @@ class ControlRepository(Protocol):
         max_attempts: int = 5,
     ) -> UUID: ...
 
+    async def list_jobs(
+        self, *, state: str | None = None, job_type: str | None = None, limit: int = 100
+    ) -> list[JobRecord]: ...
+
+    async def retry_job(self, job_id: UUID) -> JobRecord: ...
+
+    async def queue_snapshot(self) -> QueueSnapshot: ...
+
+    async def enqueue_job_if_absent(
+        self,
+        *,
+        job_type: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        priority: int = 100,
+        max_attempts: int = 5,
+    ) -> UUID | None: ...
+
+    async def published_filing_revisions(
+        self, accessions: Sequence[str] | None = None
+    ) -> list[tuple[str, int]]: ...
+
+    async def upsert_company(self, company: Company) -> None: ...
+
+    async def get_company(self, cik: int) -> Company | None: ...
+
+    async def find_company_by_ticker(self, ticker: str) -> Company | None: ...
+
+    async def known_company_ciks(self, ciks: Sequence[int]) -> set[int]: ...
+
+    async def stale_company_ciks(
+        self, ciks: Sequence[int], fetched_before: datetime
+    ) -> set[int]: ...
+
+    async def extraction_checkpoint(
+        self, accession: str, revision: int
+    ) -> dict[str, Any] | None: ...
+
     async def claim_job(
         self,
         worker_id: str,
@@ -113,9 +153,16 @@ class ControlRepository(Protocol):
         worker_id: str | None = None,
         attempt: int | None = None,
         retry_at: datetime | None = None,
+        defer_seconds: float | None = None,
     ) -> None: ...
 
-    async def upsert_filing(self, filing: FilingRef) -> None: ...
+    async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
+        """Insert or update a filing row.
+
+        With `keep_derived`, stored `fiscal_year`, `fiscal_period`, and
+        `report_date` are not replaced by NULL (discovery metadata lacks them).
+        """
+        ...
 
     async def update_filing_package(
         self, manifest: FilingPackageManifest, revision: int | None = None

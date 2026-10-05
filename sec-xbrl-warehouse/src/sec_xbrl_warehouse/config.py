@@ -80,13 +80,19 @@ class Settings(BaseSettings):
     arelle_cache_dir: Path = Path("data/cache/arelle")
     arelle_taxonomy_packages_dir: Path = Path("data/taxonomy-packages")
     arelle_offline: bool = False
-    arelle_allowed_taxonomy_hosts: str = "www.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org"
+    arelle_allowed_taxonomy_hosts: str = (
+        "www.sec.gov,xbrl.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org"
+    )
     arelle_timeout_seconds: float = Field(default=600, gt=0)
     arelle_memory_limit_bytes: int = Field(default=2 * 1024**3, gt=0)
     extraction_max_bytes: int = Field(default=512 * 1024**2, gt=0)
 
     worker_id: str = "local-worker"
     worker_poll_seconds: float = Field(default=2.0, gt=0)
+    # A job that finds the SEC egress lock held elsewhere is retried after this delay.
+    sec_egress_busy_retry_seconds: float = Field(default=60.0, gt=0)
+    # Daily-index discovery refetches a stored company older than this.
+    company_refresh_days: int = Field(default=30, ge=1)
     worker_lock_timeout_seconds: int = Field(default=900, gt=30)
     worker_max_attempts: int = Field(default=5, ge=1)
     worker_metrics_host: str = "127.0.0.1"

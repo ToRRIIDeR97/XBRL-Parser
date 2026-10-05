@@ -19,9 +19,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("filings", sa.Column("manifest_object_key", sa.Text(), nullable=True))
-    op.add_column(
-        "filings", sa.Column("manifest_checksum_sha256", sa.String(64), nullable=True)
-    )
+    op.add_column("filings", sa.Column("manifest_checksum_sha256", sa.String(64), nullable=True))
 
 
 def downgrade() -> None:

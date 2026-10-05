@@ -37,6 +37,35 @@ checks its lock connection at most every `XBRL_SEC_EGRESS_CHECK_SECONDS` (defaul
 before SEC requests; if the connection dropped (which releases the lock), it
 re-acquires the lock or stops with `SecEgressBusyError` instead of sending.
 
+## Fetch and parse workers
+
+`fetch_filing`, `ingest_filing`, `discover_filings`, and `download_bulk` send SEC
+traffic (`requires_sec`). A worker builds the SEC client and egress lock only when its
+`--job-type` set includes one of them (or has no filter). A worker scoped to
+`parse_filing` (and other non-SEC types) builds no SEC client, so it can run beside the
+SEC-active worker:
+
+```bash
+xbrl-warehouse worker run --job-type fetch_filing --job-type discover_filings
+XBRL_WORKER_CONCURRENCY=4 xbrl-warehouse worker run --job-type parse_filing
+```
+
+- **Offline Arelle (recommended for parse workers).** With `XBRL_ARELLE_OFFLINE=true`
+  a parse worker never touches the SEC or the egress lock. In online mode Arelle may
+  resolve taxonomies from SEC hosts, so a parse worker takes the egress lock lazily
+  before its first extraction and holds it until it stops, exactly like a SEC-active
+  worker; a second online parse worker then defers its jobs as busy.
+- **Concurrency.** `XBRL_WORKER_CONCURRENCY` (default 1, at most 32) is how many jobs
+  one worker runs at once. It claims a job only when a slot is free; each job has its
+  own lease, heartbeat, and checkpoint ownership (`FOR UPDATE SKIP LOCKED` still
+  prevents double claims). Each running extraction is an Arelle child process, so
+  `XBRL_WORKER_CONCURRENCY x XBRL_ARELLE_MEMORY_LIMIT_BYTES` must fit the container
+  memory limit; `doctor` reports "Worker memory" and fails when it doesn't. On stop, a
+  worker lets its running jobs finish.
+- Compose: `docker compose --profile parse up -d worker-parse` starts an offline
+  parse-only worker (`XBRL_PARSE_WORKER_CONCURRENCY`, default 2;
+  `WORKER_PARSE_MEMORY_LIMIT`, default 8g).
+
 ## Job queue
 
 - **Retries.** A failed job is retried when the error is transient: network and
@@ -58,7 +87,7 @@ re-acquires the lock or stops with `SecEgressBusyError` instead of sending.
 - **Recovery.**
 
   ```bash
-  xbrl-warehouse jobs list --state dead [--type ingest_filing]
+  xbrl-warehouse jobs list --state dead [--type parse_filing]
   xbrl-warehouse jobs retry <job-id>   # dead -> retry, attempts reset, claimable now
   ```
 
@@ -181,6 +210,10 @@ Stop producers first, then wait for active jobs to checkpoint. Stop workers only
 - Mapping error: create a new mapping version; never mutate historical mapping lineage in place.
 
 ## Capacity tuning
+
+Benchmark (operator follow-up): re-ingest the AAPL filings with one fetch worker and
+one parse worker at concurrency 4; compare `xbrl_stage_latency_seconds` per stage and
+the total wall time with the 43-minute serial baseline (2 October 2026).
 
 1. Start with one worker and one recent artifact while measuring RSS, temporary disk, object throughput, ClickHouse insert latency, and SEC throttle time.
 2. Set `XBRL_ARROW_BATCH_ROWS` so one batch plus conversion overhead fits comfortably inside the worker memory limit; 50,000 is only a starting point.

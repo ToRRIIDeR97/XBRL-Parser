@@ -19,6 +19,17 @@ show no `uncovered` rows), set
 `XBRL_ARELLE_OFFLINE=true` for the re-extraction, and confirm no `webCache:*` issues.
 Until then the live data stays at revisions 1 and 2.
 
+Pending after plans 12-15 (none run against live data): apply Alembic to 0006
+(`filings.manifest_object_key`), run `db upgrade-clickhouse --yes` (binary hashes,
+`taxonomy_concepts`, `xbrl_concept_labels`, disclosure tables; backups are kept as
+`<table>__backup_<timestamp>_<token>`), grant `xbrl_api` the new objects (SECURITY.md),
+and run `storage report` before any retention decision. Filings are now
+`fetch_filing` → `parse_filing` jobs: run one SEC-active worker with
+`--job-type fetch_filing --job-type discover_filings` and a parse worker with
+`XBRL_ARELLE_OFFLINE=true XBRL_WORKER_CONCURRENCY=N --job-type parse_filing` (compose
+profile `parse`). Then benchmark the AAPL re-ingest against the 43-minute serial
+baseline (OPERATIONS.md, capacity tuning).
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.
@@ -84,7 +95,8 @@ Canary one artifact before enqueuing the full range. Source ZIPs, Parquet, stage
 xbrl-warehouse filing discover-latest --lookback-days 3
 xbrl-warehouse filing discover --cik 320193   # one issuer, stores its company row
 xbrl-warehouse company show AAPL
-xbrl-warehouse worker run
+xbrl-warehouse worker run --job-type fetch_filing --job-type discover_filings
+XBRL_ARELLE_OFFLINE=true XBRL_WORKER_CONCURRENCY=4 xbrl-warehouse worker run --job-type parse_filing
 ```
 
 The overlapping discovery range is deliberate and idempotent. Schedule only the discovery command; long-running workers consume the resulting PostgreSQL jobs.
@@ -106,7 +118,7 @@ Only approved, versioned mappings produce canonical facts. Raw facts and their s
 ## Upgrade and recovery
 
 - Run `doctor` before migrations or workers.
-- Only one process can send SEC traffic at a time; a second one fails fast on the SEC egress lock (docs/SEC_ACCESS.md).
+- Only one process can send SEC traffic at a time; a second one fails fast on the SEC egress lock (docs/SEC_ACCESS.md). Parse-only workers (`--job-type parse_filing`, offline Arelle) build no SEC client and can run beside it.
 - Inspect and revive dead jobs with `xbrl-warehouse jobs list --state dead` and `jobs retry <id>`.
 - Review `docs/BACKUP_RESTORE.md`, take backups, and verify free space.
 - Apply Alembic, then `xbrl-warehouse db init-clickhouse` for compatible DDL.

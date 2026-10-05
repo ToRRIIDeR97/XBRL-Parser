@@ -132,3 +132,51 @@ From `sec-xbrl-warehouse/`:
 To be filled in by the implementer and the reviewer. The plan author wrote both test
 sets. If the same agent implements this plan, the verification set isn't
 independently authored.
+
+### Implementer record (5 October 2026)
+
+- **Job types.** `JobType.FETCH_FILING`, `JobType.PARSE_FILING`; `ingest_filing` stays
+  as the legacy one-job path.
+- **Ingestor.** `fetch(filing, *, job_id)` downloads (or reuses the job's package
+  checkpoint), archives a pre-plan-13 cached manifest if needed, and records the
+  package and manifest pointers (`update_filing_package`). `parse(accession, *,
+  extraction_revision, job_id, manifest=None)` loads the manifest from the argument,
+  the job's package checkpoint, or `control.get_filing_manifest`; none →
+  non-retryable `ArtifactIntegrityError` ("No stored package ... run fetch_filing
+  first"). It never calls `download_package`. `ingest` = completed-checkpoint check,
+  `fetch`, then `parse`. Failure diagnostics are shared (`_record_failure`).
+- **Manifest pointer.** Migration `0006_filing_manifest_pointer` adds
+  `filings.manifest_object_key` and `manifest_checksum_sha256`;
+  `PostgresControlRepository.get_filing_manifest` reads and checksum-verifies the
+  stored manifest through the object store `runtime_services` attaches.
+  `extraction_checkpoint` also finds completed `parse_filing` jobs (payload
+  `accession`), so `map_canonical`/remap work after the split.
+- **Worker.** `FETCH_FILING` handler enqueues one `PARSE_FILING` (`parse:{acc}:{rev}`);
+  `PARSE_FILING` handler parses and rebuilds the company's series (the parse result
+  carries `cik`); discovery and `filing enqueue` queue `fetch:{acc}:{rev}`.
+  `requires_sec(job_types)`; `runtime_services(settings, control, job_types)` builds
+  the SEC client and egress lock only when needed. A parse-capable worker without an
+  SEC client in online Arelle mode gets a `LazyEgress` (lock taken before the first
+  extraction, released on exit); with offline Arelle it never touches the lock.
+  `FilingPackageDownloader` accepts no SEC client and raises `SecAccessError` if
+  asked to download. `Worker` runs up to `worker_concurrency` jobs (Field 1..32),
+  claiming only when a slot is free; each job keeps its own lease, heartbeat, and
+  checkpoint ownership; stop waits for running jobs. PostgreSQL pool size grows
+  with concurrency.
+- **Doctor** "Worker memory": `worker_concurrency x arelle_memory_limit_bytes` vs the
+  cgroup memory limit (passes with a note when none is found).
+- **Compose** optional `worker-parse` service (profile `parse`, offline Arelle,
+  `--job-type parse_filing`). Docs: OPERATIONS, INGESTION_RUNBOOK, DEPLOYMENT,
+  DATA_MODEL, HANDOFF, root AGENTS.md.
+- **Tests.** Unit: discovery key (`fetch:<acc>:3`), fetch → parse handlers and series
+  rebuild, per-job lease and heartbeat at concurrency 2, parse-only services build no
+  SEC client (offline) or only the lazy lock (online), doctor memory check, `filing
+  enqueue`. Integration: two workers at concurrency 3 run 12 queued parse jobs exactly
+  once (peak > 1), and the manifest pointer plus parse-job extraction checkpoint.
+- **Plan test conflict (reported, not edited).**
+  `verification/test_ac5_discovery_enqueues_fetch_jobs` expects the key
+  `fetch:<acc>:1`, but discovery uses `CURRENT_EXTRACTION_REVISION` (3, the plan 01
+  revision policy) as the plan text `fetch:{accession}:{revision}` requires; the test
+  was written against the baseline revision 1. It fails on that assertion only.
+- Operator follow-up: Alembic 0006; benchmark one fetch worker plus one parse worker at
+  concurrency 4 against the 43-minute baseline.

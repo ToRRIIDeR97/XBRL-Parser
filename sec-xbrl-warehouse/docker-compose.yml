@@ -162,6 +162,44 @@ services:
     logging: *bounded-logging
     restart: unless-stopped
 
+  # Optional parse-only worker (profile "parse"): runs Arelle, validation, and loading
+  # for parse_filing jobs. It builds no SEC client and, with offline Arelle, never takes
+  # the SEC egress lock, so it can run beside the SEC-active worker. Memory:
+  # XBRL_WORKER_CONCURRENCY x XBRL_ARELLE_MEMORY_LIMIT_BYTES must fit mem_limit
+  # (`doctor` checks this).
+  worker-parse:
+    profiles: ["parse"]
+    mem_limit: ${WORKER_PARSE_MEMORY_LIMIT:-8g}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    env_file: .env
+    environment:
+      XBRL_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-xbrl}:${POSTGRES_PASSWORD:-xbrl_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
+      XBRL_CLICKHOUSE_HOST: clickhouse
+      XBRL_CLICKHOUSE_PORT: 8123
+      XBRL_OBJECT_STORE_ENDPOINT: http://minio:9000
+      XBRL_WORKER_ID: worker-parse
+      XBRL_WORKER_CONCURRENCY: ${XBRL_PARSE_WORKER_CONCURRENCY:-2}
+      XBRL_ARELLE_OFFLINE: "true"
+      XBRL_WORKER_METRICS_HOST: 0.0.0.0
+    volumes:
+      - app_data:/app/data
+    command: ["worker", "run", "--job-type", "parse_filing"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    logging: *bounded-logging
+    restart: unless-stopped
+
   prometheus:
     profiles: ["monitoring"]
     image: prom/prometheus@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038

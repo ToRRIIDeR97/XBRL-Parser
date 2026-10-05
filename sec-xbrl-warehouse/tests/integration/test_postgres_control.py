@@ -678,3 +678,129 @@ async def test_egress_lock_verify_reacquires_after_dropped_connection(
         await admin.close()
         await other.release()
         await holder.release()
+
+
+async def test_concurrent_workers_run_each_parse_job_exactly_once(
+    postgres_settings: Settings,
+) -> None:
+    """Two workers at concurrency 3 share one queue: no job runs twice, all complete."""
+    from sec_xbrl_warehouse.worker import Worker
+
+    prefix = f"parse-{uuid4()}"
+    seed = PostgresControlRepository(postgres_settings)
+    settings = postgres_settings.model_copy(
+        update={"worker_concurrency": 3, "worker_poll_seconds": 0.05}
+    )
+    repos = [PostgresControlRepository(settings) for _ in range(2)]
+    try:
+        for index in range(12):
+            await seed.enqueue_job(
+                job_type=JobType.PARSE_FILING.value,
+                idempotency_key=f"{prefix}-{index}",
+                payload={"accession": f"{prefix}-{index}"},
+            )
+        runs: list[str] = []
+        state = {"running": 0, "peak": 0}
+
+        async def handler(job):
+            state["running"] += 1
+            state["peak"] = max(state["peak"], state["running"])
+            runs.append(job.payload["accession"])
+            await asyncio.sleep(0.05)
+            state["running"] -= 1
+            return {"ok": True}
+
+        workers = [
+            Worker(
+                settings.model_copy(update={"worker_id": f"w{index}"}),
+                repo,
+                {JobType.PARSE_FILING: handler},
+                [JobType.PARSE_FILING],
+            )
+            for index, repo in enumerate(repos)
+        ]
+        tasks = [asyncio.create_task(worker.run()) for worker in workers]
+
+        async def all_complete() -> bool:
+            async with seed.sessions() as session:
+                pending = await session.scalar(
+                    text(
+                        "SELECT count(*) FROM ingestion_jobs WHERE idempotency_key LIKE :p "
+                        "AND state <> 'complete'"
+                    ),
+                    {"p": f"{prefix}-%"},
+                )
+            return pending == 0
+
+        for _ in range(400):  # poll the queue for up to 20 s
+            if await all_complete():
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("parse jobs did not complete")
+        for worker in workers:
+            worker.stop()
+        await asyncio.gather(*tasks)
+        assert sorted(runs) == sorted(f"{prefix}-{index}" for index in range(12))
+        assert 1 < state["peak"] <= 6
+    finally:
+        await seed.close()
+        for repo in repos:
+            await repo.close()
+
+
+async def test_manifest_pointer_and_parse_job_extraction_checkpoint(
+    postgres_settings: Settings, tmp_path
+) -> None:
+    from sec_xbrl_warehouse.domain.models import FilingPackageManifest
+    from sec_xbrl_warehouse.infrastructure.storage.object_store import LocalObjectStore
+
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    repo = PostgresControlRepository(postgres_settings, object_store=store)
+    filing = FilingRef(
+        accession="0000000001-26-000888",
+        cik=1,
+        company_name="Example Corp",
+        form="10-K",
+        filed_date=datetime(2026, 2, 15).date(),
+        archive_directory_url="https://www.sec.gov/Archives/edgar/data/1/1",
+    )
+    try:
+        await repo.upsert_filing(filing)
+        assert await repo.get_filing_manifest(filing.accession) is None  # never fetched
+        manifest = FilingPackageManifest(
+            filing=filing,
+            members=(),
+            acquired_at=datetime.now(UTC),
+            package_object_key="bronze/package.zip",
+            package_checksum_sha256="b" * 64,
+        )
+        data = manifest.model_dump_json().encode()
+        stored = store.put_bytes(data, "manifests/sec/filings/x/manifest.json")
+        await repo.update_filing_package(
+            manifest.model_copy(
+                update={
+                    "manifest_object_key": stored.key,
+                    "manifest_checksum_sha256": stored.checksum_sha256,
+                }
+            )
+        )
+        loaded = await repo.get_filing_manifest(filing.accession)
+        assert loaded is not None
+        assert loaded.package_object_key == "bronze/package.zip"
+        assert loaded.manifest_object_key == stored.key
+
+        await repo.enqueue_job(
+            job_type=JobType.PARSE_FILING.value,
+            idempotency_key=f"parse:{filing.accession}:3",
+            payload={"accession": filing.accession, "extraction_revision": 3},
+        )
+        job = await repo.claim_job("parse-worker", 900, [JobType.PARSE_FILING])
+        assert job is not None
+        pointer = {"object_key": "silver/x.json.zst", "sha256": "c" * 64}
+        with checkpoint_lease(job):
+            await repo.save_checkpoint(job.id, "extract", pointer)
+        await repo.complete_job(job.id, {}, worker_id="parse-worker", attempt=job.attempts)
+        assert await repo.extraction_checkpoint(filing.accession, 3) == pointer
+    finally:
+        await repo.close()

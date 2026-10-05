@@ -19,15 +19,18 @@ The application defaults to 8 requests per second and a concurrency of 4, leavin
 ## One SEC-active process (enforced)
 
 Only one process may send SEC traffic at a time. Every `SecHttpClient` the worker
-and the CLI build for real SEC traffic (`worker run`, `catalog sync`, `taxonomy sync`)
-carries a `SecEgressLock`: a PostgreSQL session-level advisory lock
+and the CLI build for real SEC traffic (`worker run` for SEC job types, `catalog sync`,
+`taxonomy sync`) carries a `SecEgressLock`: a PostgreSQL session-level advisory lock
 (`pg_try_advisory_lock(hashtextextended('xbrl:sec-egress', 0))`) on a dedicated
 connection.
 
 - The lock is taken lazily, right before the first request that passes URL
   validation and the user-agent check, and released when the client closes. A
-  worker that only runs non-SEC jobs (for example `--job-type reconcile_filing`)
-  never takes it and can run alongside the SEC-active process.
+  worker that only runs non-SEC jobs (for example `--job-type reconcile_filing` or
+  `--job-type parse_filing` with `XBRL_ARELLE_OFFLINE=true`) builds no SEC client,
+  never takes it, and can run alongside the SEC-active process. A parse worker in
+  online Arelle mode takes the lock before its first extraction (Arelle may fetch
+  taxonomies from SEC hosts) and holds it until it stops.
 - A second process fails fast on its first SEC request with `SecEgressBusyError`
   ("another process holds the SEC egress lock"); nothing is sent. A worker defers
   such a job by `XBRL_SEC_EGRESS_BUSY_RETRY_SECONDS` (default 60) without spending

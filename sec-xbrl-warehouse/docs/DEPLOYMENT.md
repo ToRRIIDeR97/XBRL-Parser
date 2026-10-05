@@ -51,7 +51,11 @@ A small deployment can retain the same service topology on one protected host, b
 - CPU/memory limits, log rotation, and alerts;
 - a scheduler that only enqueues idempotent jobs;
 - one SEC-active worker (the SEC egress lock enforces this per control database; extra
-  replicas run non-SEC jobs only);
+  replicas run non-SEC jobs only), for example the `worker` service for
+  `fetch_filing`/discovery/bulk downloads plus the optional `worker-parse` service
+  (profile `parse`) for `parse_filing` with offline Arelle and
+  `XBRL_WORKER_CONCURRENCY` sized so concurrency x `XBRL_ARELLE_MEMORY_LIMIT_BYTES`
+  fits its memory limit;
 - pinned taxonomy packages installed with `taxonomy sync`, and `XBRL_ARELLE_OFFLINE=true`.
 
 Before starting workers on a production host, run `xbrl-warehouse taxonomy sync`

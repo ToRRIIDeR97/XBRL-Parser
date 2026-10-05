@@ -41,7 +41,7 @@ class _Connection:
         return None
 
     async def scalar(self, statement: object) -> str:
-        return "0005_job_deferral"
+        return "0006_filing_manifest_pointer"
 
 
 class _Engine:

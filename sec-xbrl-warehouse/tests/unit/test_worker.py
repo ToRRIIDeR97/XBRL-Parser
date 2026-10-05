@@ -1,11 +1,12 @@
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime
 
 import httpx
 import pytest
 
 from sec_xbrl_warehouse.domain.enums import JobType
 from sec_xbrl_warehouse.domain.models import FilingRef, JobRecord
+from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.exceptions import (
     ArtifactIntegrityError,
     SchemaDriftError,
@@ -333,7 +334,9 @@ def test_build_handlers_wires_incremental_mapping_and_discovery(tmp_path) -> Non
         )
     )
     assert discovered == {"filings_enqueued": 1}
-    assert control.jobs[0]["idempotency_key"] == "filing:0000000001-26-000001:3"
+    # Discovery fans out fetch jobs at the current extraction revision.
+    assert control.jobs[0]["job_type"] == JobType.FETCH_FILING.value
+    assert control.jobs[0]["idempotency_key"] == "fetch:0000000001-26-000001:3"
 
 
 def test_worker_handles_missing_handler_and_stops_while_idle() -> None:
@@ -713,3 +716,191 @@ def test_series_rebuild_runs_after_ingest_and_failures_do_not_fail_the_job() -> 
     warehouse.fail = True
     result = asyncio.run(handlers[JobType.INGEST_FILING](job))
     assert result["series"]["status"] == "failed" and "clickhouse down" in result["series"]["error"]
+
+
+def test_concurrent_jobs_each_keep_their_own_heartbeat_and_lease() -> None:
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.infrastructure.storage.postgres import current_checkpoint_lease
+    from sec_xbrl_warehouse.worker import Worker
+
+    jobs = [_job(JobType.PARSE_FILING, {"accession": f"0000000001-26-00000{i}"}) for i in range(3)]
+
+    class _Control:
+        def __init__(self) -> None:
+            self.queue = list(jobs)
+            self.claims = 0
+            self.heartbeats: list[tuple[object, int | None]] = []
+            self.completed: list[tuple[object, object]] = []
+            self.done = asyncio.Event()
+
+        async def claim_job(self, worker_id, lock_timeout_seconds, job_types=None):
+            self.claims += 1
+            return self.queue.pop(0) if self.queue else None
+
+        async def heartbeat_job(self, job_id, worker_id, attempt=None):
+            self.heartbeats.append((job_id, attempt))
+
+        async def complete_job(self, job_id, result=None, *, worker_id=None, attempt=None):
+            self.completed.append((job_id, result["lease"]))
+            if len(self.completed) == len(jobs):
+                self.done.set()
+
+        async def fail_job(self, *args, **kwargs):
+            raise AssertionError("no job should fail")
+
+    async def handler(record):
+        lease = current_checkpoint_lease()
+        await asyncio.sleep(0.08)
+        # Each task keeps its own job's lease while others run.
+        return {"lease": lease.id if lease is not None else None}
+
+    control = _Control()
+    settings = Settings(
+        env="test", worker_poll_seconds=0.01, worker_lock_timeout_seconds=60, worker_concurrency=2
+    )
+    worker = Worker(settings, control, {JobType.PARSE_FILING: handler})
+
+    async def heartbeat(job) -> None:
+        while True:
+            await control.heartbeat_job(job.id, settings.worker_id, job.attempts)
+            await asyncio.sleep(0.01)
+
+    worker._heartbeat = heartbeat  # type: ignore[method-assign]
+
+    async def run() -> None:
+        task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(control.done.wait(), 5)
+        worker.stop()
+        await asyncio.wait_for(task, 2)
+
+    asyncio.run(run())
+    assert sorted(str(job_id) for job_id, lease in control.completed) == sorted(
+        str(job.id) for job in jobs
+    )
+    assert all(job_id == lease for job_id, lease in control.completed)
+    assert {job_id for job_id, _ in control.heartbeats} == {job.id for job in jobs}
+
+
+def test_fetch_enqueues_parse_and_parse_rebuilds_series() -> None:
+    from sec_xbrl_warehouse.domain.models import FilingPackageManifest
+
+    manifest = FilingPackageManifest(
+        filing=_filing(),
+        members=(),
+        acquired_at=datetime.now(UTC),
+        package_object_key="bronze/package.zip",
+    )
+
+    class _Ingestor:
+        async def fetch(self, filing, *, job_id=None):
+            return manifest
+
+        async def parse(self, accession, *, extraction_revision, job_id=None):
+            return {"accession": accession, "cik": 1, "status": "complete"}
+
+    class _Control:
+        def __init__(self) -> None:
+            self.jobs: list[dict] = []
+
+        async def enqueue_job(self, **kwargs):
+            self.jobs.append(kwargs)
+            return None
+
+    rebuilt: list[int] = []
+
+    class _Warehouse:
+        def insert_metric_series(self, table):
+            return 0
+
+    import sec_xbrl_warehouse.query.series as series
+
+    original = series.rebuild_metric_series
+    series.rebuild_metric_series = lambda warehouse, cik, **kwargs: rebuilt.append(cik) or 0  # type: ignore[assignment]
+    try:
+        control = _Control()
+        handlers = build_handlers(
+            services={"ingestor": _Ingestor(), "control": control, "warehouse": _Warehouse()}
+        )
+        fetched = asyncio.run(
+            handlers[JobType.FETCH_FILING](
+                _job(JobType.FETCH_FILING, {"filing": _filing().model_dump(mode="json")})
+            )
+        )
+        parsed = asyncio.run(
+            handlers[JobType.PARSE_FILING](
+                _job(JobType.PARSE_FILING, {"accession": _filing().accession})
+            )
+        )
+    finally:
+        series.rebuild_metric_series = original  # type: ignore[assignment]
+    assert fetched["package_object_key"] == "bronze/package.zip"
+    assert [job["job_type"] for job in control.jobs] == [JobType.PARSE_FILING.value]
+    assert control.jobs[0]["payload"]["extraction_revision"] == CURRENT_EXTRACTION_REVISION
+    assert parsed["series"]["status"] == "rebuilt"
+    assert rebuilt == [1]
+
+
+def test_requires_sec_and_parse_only_services_have_no_sec_client(monkeypatch, tmp_path) -> None:
+
+    import sec_xbrl_warehouse.infrastructure.http.egress_lock as egress
+    import sec_xbrl_warehouse.infrastructure.http.sec_client as sec_client
+    import sec_xbrl_warehouse.infrastructure.storage.clickhouse as clickhouse
+    import sec_xbrl_warehouse.mapping.postgres_repository as mapping_repository
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.worker import requires_sec, runtime_services
+
+    assert requires_sec([JobType.PARSE_FILING, JobType.MAP_CANONICAL]) is False
+    assert requires_sec([JobType.FETCH_FILING]) is True
+    assert requires_sec(None) is True
+
+    built: list[str] = []
+
+    class _Client:
+        def __init__(self, *args, **kwargs) -> None:
+            built.append("sec-client")
+
+    class _Lock:
+        def __init__(self, *args, **kwargs) -> None:
+            built.append("egress-lock")
+
+    class _Warehouse:
+        def __init__(self, settings) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class _Repository:
+        def __init__(self, settings, engine=None) -> None:
+            pass
+
+        async def seed_metrics(self, metrics) -> None:
+            pass
+
+    class _Control:
+        engine = None
+        object_store = None
+
+    monkeypatch.setattr(sec_client, "SecHttpClient", _Client)
+    monkeypatch.setattr(egress, "SecEgressLock", _Lock)
+    monkeypatch.setattr(clickhouse, "ClickHouseWarehouse", _Warehouse)
+    monkeypatch.setattr(mapping_repository, "PostgresMappingRepository", _Repository)
+
+    async def services(offline: bool) -> dict:
+        settings = Settings(
+            env="test",
+            data_dir=tmp_path / "data",
+            temp_dir=tmp_path / "tmp",
+            arelle_offline=offline,
+            object_store_backend="local",
+        )
+        async with runtime_services(settings, _Control(), [JobType.PARSE_FILING]) as found:
+            return found
+
+    offline = asyncio.run(services(True))
+    assert built == []
+    assert "http" not in offline and "discovery" not in offline
+    assert offline["ingestor"].ensure_sec_egress is None
+    online = asyncio.run(services(False))
+    assert built == ["egress-lock"], "online parse takes the egress lock lazily, no SEC client"
+    assert online["ingestor"].ensure_sec_egress is not None

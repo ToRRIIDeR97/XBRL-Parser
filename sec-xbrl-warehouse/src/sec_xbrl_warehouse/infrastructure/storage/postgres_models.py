@@ -90,6 +90,9 @@ class FilingRow(TimestampMixin, Base):
     is_inline_xbrl: Mapped[bool | None] = mapped_column(Boolean)
     package_object_key: Mapped[str | None] = mapped_column(Text)
     package_checksum_sha256: Mapped[str | None] = mapped_column(String(64))
+    # The stored package manifest (`manifests/...`) that parse jobs load.
+    manifest_object_key: Mapped[str | None] = mapped_column(Text)
+    manifest_checksum_sha256: Mapped[str | None] = mapped_column(String(64))
     latest_extraction_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 

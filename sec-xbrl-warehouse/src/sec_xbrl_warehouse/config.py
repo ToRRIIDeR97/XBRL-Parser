@@ -89,6 +89,9 @@ class Settings(BaseSettings):
 
     worker_id: str = "local-worker"
     worker_poll_seconds: float = Field(default=2.0, gt=0)
+    # Jobs one worker process runs at once (each with its own lease and heartbeat).
+    # worker_concurrency x arelle_memory_limit_bytes must fit the container limit.
+    worker_concurrency: int = Field(default=1, ge=1, le=32)
     # A job that finds the SEC egress lock held elsewhere is retried after this delay.
     sec_egress_busy_retry_seconds: float = Field(default=60.0, gt=0)
     # A job deferred this long (from its first deferral) on a busy lock goes dead.

@@ -23,7 +23,7 @@ from sec_xbrl_warehouse.domain.ports import (
     XbrlExtractor,
 )
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
-from sec_xbrl_warehouse.exceptions import XbrlExtractionError
+from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, XbrlExtractionError
 from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     XBRL_ENTITIES,
@@ -80,38 +80,104 @@ class IncrementalFilingIngestor:
     async def ingest(
         self, filing: FilingRef, *, extraction_revision: int = 1, job_id: UUID | None = None
     ) -> dict[str, Any]:
-        if extraction_revision < 1:
-            raise ValueError("Extraction revisions start at 1")
-        if job_id and self.object_store is None:
-            raise ValueError("Checkpointed extraction requires object storage")
-        completed = await self._checkpoint(job_id, "complete")
-        if completed is not None and self.object_store is not None:
-            self.settings.ensure_directories()
-            for entity in XBRL_ENTITIES:
-                checkpoint = await self._checkpoint(job_id, f"silver:{entity}")
-                if checkpoint is None:
-                    if entity in _ENTITIES_ADDED_LATER:
-                        continue  # completed before the derived entities existed
-                    raise XbrlExtractionError("Completed filing has no silver checkpoint")
-                await asyncio.to_thread(
-                    verify_checkpoint_objects, checkpoint, self.object_store, self.settings
-                )
+        """Legacy one-job path (`ingest_filing`): `fetch` then `parse`."""
+        self._check_arguments(extraction_revision, job_id)
+        completed = await self._completed(job_id)
+        if completed is not None:
             return completed
+        manifest = await self.fetch(filing, job_id=job_id, extraction_revision=extraction_revision)
+        return await self.parse(
+            filing.accession,
+            extraction_revision=extraction_revision,
+            job_id=job_id,
+            manifest=manifest,
+        )
+
+    async def fetch(
+        self,
+        filing: FilingRef,
+        *,
+        job_id: UUID | None = None,
+        extraction_revision: int | None = None,
+    ) -> FilingPackageManifest:
+        """Download the filing package (SEC) and store it as one archive.
+
+        Records the package and manifest pointers on the filing row so a later
+        `parse` can find them. A resumed job reuses its saved package checkpoint.
+        """
         self.settings.ensure_directories()
         await _upsert_discovered_filing(self.control, filing)
         try:
+            saved = await self._checkpoint(job_id, "package")
+            manifest = (
+                FilingPackageManifest.model_validate(saved)
+                if saved
+                else await self.package_store.download_package(filing)
+            )
+            if not manifest.package_object_key:
+                # A manifest cached before archive-only bronze: archive it now.
+                with tempfile.TemporaryDirectory(
+                    prefix="filing-", dir=self.settings.temp_dir
+                ) as directory:
+                    staging = Path(directory)
+                    await asyncio.to_thread(
+                        self.package_store.materialize_package, manifest, staging
+                    )
+                    manifest = await asyncio.to_thread(
+                        self.package_store.archive_package, manifest, staging
+                    )
+            await self.control.update_filing_package(manifest)
+            await self._save(job_id, "package", manifest.model_dump(mode="json"))
+            return manifest
+        except SecEgressBusyError:
+            raise
+        except Exception as exc:
+            await self._record_failure(filing.accession, exc, extraction_revision)
+            raise
+
+    async def parse(
+        self,
+        accession: str,
+        *,
+        extraction_revision: int = 1,
+        job_id: UUID | None = None,
+        manifest: FilingPackageManifest | None = None,
+    ) -> dict[str, Any]:
+        """Extract, validate, write, and publish a fetched filing; never downloads.
+
+        The package comes from `manifest`, the job's saved package checkpoint, or
+        the filing's stored manifest (`control.get_filing_manifest`). Without one
+        it raises a permanent `ArtifactIntegrityError`. Online Arelle may still
+        resolve taxonomies from SEC hosts; it then takes the SEC egress lock first.
+        """
+        self._check_arguments(extraction_revision, job_id)
+        completed = await self._completed(job_id)
+        if completed is not None:
+            return completed
+        self.settings.ensure_directories()
+        try:
+            saved = await self._checkpoint(job_id, "package")
+            if manifest is None:
+                manifest = (
+                    FilingPackageManifest.model_validate(saved)
+                    if saved
+                    else await self.control.get_filing_manifest(accession)
+                )
+            if manifest is None:
+                raise ArtifactIntegrityError(
+                    f"No stored package for {accession}; run fetch_filing first"
+                )
+            if manifest.filing.accession != accession:
+                raise ArtifactIntegrityError(
+                    f"Stored manifest belongs to {manifest.filing.accession}, not {accession}"
+                )
+            if saved is None:
+                await self._save(job_id, "package", manifest.model_dump(mode="json"))
+            filing = manifest.filing
             with tempfile.TemporaryDirectory(
                 prefix="filing-", dir=self.settings.temp_dir
             ) as directory:
                 staging = Path(directory)
-                saved = await self._checkpoint(job_id, "package")
-                manifest = (
-                    FilingPackageManifest.model_validate(saved)
-                    if saved
-                    else await self.package_store.download_package(filing)
-                )
-                if saved is None:
-                    await self._save(job_id, "package", manifest.model_dump(mode="json"))
                 extracted = await self._checkpoint(job_id, "extract")
                 if extracted and self.object_store is not None:
                     # Plain `.json` (legacy) or `.json.zst`; `read_bundle` detects which.
@@ -231,6 +297,7 @@ class IncrementalFilingIngestor:
                 reconciliation = await self.reconcile(filing.accession)
                 result = {
                     "accession": filing.accession,
+                    "cik": filing.cik,
                     "extraction_revision": extraction_revision,
                     "entity_counts": counts,
                     "validation_issue_count": len(bundle.validation_issues),
@@ -244,34 +311,62 @@ class IncrementalFilingIngestor:
             # diagnostics here (they would repeat on every deferral).
             raise
         except Exception as exc:
-            details = {
-                "error": str(exc),
-                "traceback": traceback.format_exc(),
-                "extraction_revision": extraction_revision,
-            }
-            if self.object_store is not None:
-                payload = json.dumps(details, sort_keys=True).encode()
-                key = f"quarantine/filing/{filing.accession}/sha256={sha256_bytes(payload)}.json"
-                await asyncio.to_thread(self.object_store.put_bytes, payload, key)
-                details = {"diagnostic_object_key": key, "extraction_revision": extraction_revision}
-            engine_issues = getattr(exc, "validation_issues", ())
-            await self.control.record_validation_issues(
-                group_issues(
-                    (
-                        *engine_issues,
-                        ValidationIssue(
-                            source="filing",
-                            code=type(exc).__name__,
-                            severity=Severity.ERROR,
-                            accession=filing.accession,
-                            message=str(exc)[:16000],
-                            details=details,
-                        ),
-                    ),
-                    extraction_revision=extraction_revision,
-                )
-            )
+            await self._record_failure(accession, exc, extraction_revision)
             raise
+
+    def _check_arguments(self, extraction_revision: int, job_id: UUID | None) -> None:
+        if extraction_revision < 1:
+            raise ValueError("Extraction revisions start at 1")
+        if job_id and self.object_store is None:
+            raise ValueError("Checkpointed extraction requires object storage")
+
+    async def _completed(self, job_id: UUID | None) -> dict[str, Any] | None:
+        """A completed job's result, after verifying its silver checkpoints."""
+        completed = await self._checkpoint(job_id, "complete")
+        if completed is None or self.object_store is None:
+            return None
+        self.settings.ensure_directories()
+        for entity in XBRL_ENTITIES:
+            checkpoint = await self._checkpoint(job_id, f"silver:{entity}")
+            if checkpoint is None:
+                if entity in _ENTITIES_ADDED_LATER:
+                    continue  # completed before the derived entities existed
+                raise XbrlExtractionError("Completed filing has no silver checkpoint")
+            await asyncio.to_thread(
+                verify_checkpoint_objects, checkpoint, self.object_store, self.settings
+            )
+        return completed
+
+    async def _record_failure(
+        self, accession: str, exc: Exception, extraction_revision: int | None
+    ) -> None:
+        details: dict[str, Any] = {
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+            "extraction_revision": extraction_revision,
+        }
+        if self.object_store is not None:
+            payload = json.dumps(details, sort_keys=True).encode()
+            key = f"quarantine/filing/{accession}/sha256={sha256_bytes(payload)}.json"
+            await asyncio.to_thread(self.object_store.put_bytes, payload, key)
+            details = {"diagnostic_object_key": key, "extraction_revision": extraction_revision}
+        engine_issues = getattr(exc, "validation_issues", ())
+        await self.control.record_validation_issues(
+            group_issues(
+                (
+                    *engine_issues,
+                    ValidationIssue(
+                        source="filing",
+                        code=type(exc).__name__,
+                        severity=Severity.ERROR,
+                        accession=accession,
+                        message=str(exc)[:16000],
+                        details=details,
+                    ),
+                ),
+                extraction_revision=extraction_revision,
+            )
+        )
 
     async def _checkpoint(self, job_id: UUID | None, stage: str) -> dict[str, Any] | None:
         return await self.control.get_checkpoint(job_id, stage) if job_id else None

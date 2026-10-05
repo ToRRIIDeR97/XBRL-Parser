@@ -19,7 +19,7 @@ from sec_xbrl_warehouse.domain.models import (
     PackageMember,
 )
 from sec_xbrl_warehouse.domain.ports import ObjectStore
-from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError
+from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, SecAccessError
 from sec_xbrl_warehouse.infrastructure.http.sec_client import SecHttpClient
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha256_file
 from sec_xbrl_warehouse.ingestion.bulk_downloader import validate_zip_integrity
@@ -38,14 +38,25 @@ _ARCHIVE_MANIFEST = "manifest.json"
 class FilingPackageDownloader:
     """Acquire a lossless local package for one accession."""
 
-    def __init__(self, settings: Settings, http: SecHttpClient, object_store: ObjectStore) -> None:
+    def __init__(
+        self, settings: Settings, http: SecHttpClient | None, object_store: ObjectStore
+    ) -> None:
+        # `http` is None in parse-only workers: they materialize and archive stored
+        # packages but never download.
         self.settings = settings
         self.http = http
         self.object_store = object_store
 
+    def _sec(self) -> SecHttpClient:
+        if self.http is None:
+            raise SecAccessError(
+                "This worker has no SEC client; run fetch_filing on a SEC-enabled worker"
+            )
+        return self.http
+
     async def fetch_index(self, filing: FilingRef) -> dict[str, Any]:
         """Fetch and validate the accession directory index JSON."""
-        return await self.http.get_json(f"{filing.archive_directory_url}/index.json")
+        return await self._sec().get_json(f"{filing.archive_directory_url}/index.json")
 
     def select_xbrl_entrypoints(
         self, index_payload: dict[str, Any], filing: FilingRef
@@ -182,7 +193,7 @@ class FilingPackageDownloader:
         url = f"{filing.archive_directory_url}/{name}"
         destination = staging / _safe_package_name(name)
         async with semaphore:
-            _, checksum, size, headers = await self.http.download(
+            _, checksum, size, headers = await self._sec().download(
                 url, destination, max_bytes=budget.remaining
             )
         budget.consume(size)

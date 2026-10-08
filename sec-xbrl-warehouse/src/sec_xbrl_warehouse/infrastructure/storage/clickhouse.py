@@ -101,7 +101,7 @@ class ClickHouseWarehouse:
             if read_only
             else {}
         )
-        connection = {
+        connection: dict[str, Any] = {
             "host": settings.clickhouse_host,
             "port": settings.clickhouse_port,
             "username": (settings.api_clickhouse_username or settings.clickhouse_username)

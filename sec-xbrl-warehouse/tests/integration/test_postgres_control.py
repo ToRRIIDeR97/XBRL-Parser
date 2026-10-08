@@ -837,3 +837,28 @@ async def test_series_rebuild_requests_coalesce_per_company(postgres_settings: S
         assert claimed == {running.id, follow_up}
     finally:
         await repo.close()
+
+
+async def test_legacy_extraction_pointers_are_repointed(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    accession = "0000000001-26-000007"
+    old = f"silver/xbrl/extractions/accession={accession}/revision=2/sha256=aa.json"
+    try:
+        await repo.enqueue_job(
+            job_type="parse_filing",
+            idempotency_key=f"parse:{accession}:2",
+            payload={"accession": accession, "extraction_revision": 2},
+        )
+        job = await repo.claim_job("w1", 900, [JobType.PARSE_FILING])
+        assert job is not None
+        with checkpoint_lease(job):
+            await repo.save_checkpoint(job.id, "extract", {"object_key": old, "sha256": "aa"})
+        await repo.complete_job(job.id, {}, worker_id="w1", attempt=job.attempts)
+
+        assert await repo.legacy_extraction_pointers() == [{"object_key": old, "sha256": "aa"}]
+        new = old.replace("sha256=aa.json", "sha256=bb.json.zst")
+        assert await repo.repoint_extraction_checkpoints(old, new, "bb") == 1
+        assert await repo.legacy_extraction_pointers() == []
+        assert await repo.extraction_checkpoint(accession, 2) == {"object_key": new, "sha256": "bb"}
+    finally:
+        await repo.close()

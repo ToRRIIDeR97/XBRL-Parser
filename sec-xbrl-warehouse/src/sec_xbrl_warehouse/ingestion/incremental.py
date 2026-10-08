@@ -27,6 +27,7 @@ from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, XbrlExtraction
 from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     XBRL_ENTITIES,
+    iter_shared_concept_tables,
     iter_xbrl_tables,
     xbrl_entity_records,
 )
@@ -407,6 +408,10 @@ class IncrementalFilingIngestor:
                 destination_prefix=prefix,
                 partition_values={},
             )
+            if entity == "concepts":
+                # Standard concepts are stored once per taxonomy version and shared
+                # by every filing that loads it; the checkpoint lists those objects.
+                objects += await asyncio.to_thread(self._write_shared_concepts, bundle)
             count = len(xbrl_entity_records(bundle, entity))
             ROWS_WRITTEN.labels(storage="parquet", table=entity).inc(count)
             await self._save(
@@ -425,6 +430,16 @@ class IncrementalFilingIngestor:
         counts = await asyncio.to_thread(self.warehouse.insert_xbrl_bundle, bundle)
         await self._save(job_id, "gold", counts)
         return counts
+
+    def _write_shared_concepts(self, bundle: XbrlExtractionBundle) -> tuple[Any, ...]:
+        objects: list[Any] = []
+        for prefix, table in iter_shared_concept_tables(
+            bundle, self.settings.arrow_batch_rows, self.settings.arrow_batch_bytes
+        ):
+            objects += self.parquet_writer.write_batches(
+                (table,), destination_prefix=prefix, partition_values={}
+            )
+        return tuple(objects)
 
     async def reconcile(self, accession: str, cik: int | None = None) -> dict[str, Any]:
         # ponytail: comparison holds one bounded filing; stream/partition if this ceiling is reached.

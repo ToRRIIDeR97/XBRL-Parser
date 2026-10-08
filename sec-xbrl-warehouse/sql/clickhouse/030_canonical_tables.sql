@@ -1,3 +1,8 @@
+-- One row per (raw fact, metric, extraction revision): the sort key leaves out the
+-- mapping, so a remap's row replaces the older mapping's row on merge
+-- (ReplacingMergeTree keeps the highest mapping_version), the same row readers
+-- pick with `ORDER BY mapping_version DESC LIMIT 1 BY`. Mapping history stays in
+-- PostgreSQL `concept_mappings`.
 CREATE TABLE IF NOT EXISTS {{database}}.canonical_facts
 (
     canonical_fact_id FixedString(32),
@@ -33,5 +38,5 @@ CREATE TABLE IF NOT EXISTS {{database}}.canonical_facts
 )
 ENGINE = ReplacingMergeTree(mapping_version)
 PARTITION BY toYear(filed_date)
-ORDER BY (cik, canonical_metric, ifNull(period_end, toDate('1970-01-01')), ifNull(period_instant, toDate('1970-01-01')), accession, extraction_revision, raw_fact_id, mapping_id, mapping_version)
+ORDER BY (cik, canonical_metric, ifNull(period_end, toDate('1970-01-01')), ifNull(period_instant, toDate('1970-01-01')), accession, extraction_revision, raw_fact_id)
 SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';

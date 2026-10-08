@@ -21,7 +21,7 @@ from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
 from sec_xbrl_warehouse.domain.enums import FactValueKind, RelationshipType, SecTable
 from sec_xbrl_warehouse.domain.models import Company
-from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle, XbrlFact
+from sec_xbrl_warehouse.domain.xbrl import XbrlConcept, XbrlExtractionBundle, XbrlFact
 from sec_xbrl_warehouse.exceptions import ConfigurationError, WarehouseWriteError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     canonical_fact_schema,
@@ -832,20 +832,17 @@ def iter_xbrl_tables(
     }[entity]
 
     def bounded(table: pa.Table) -> Iterator[pa.Table]:
-        if table.nbytes <= batch_bytes:
-            yield table
-        elif table.num_rows == 1:
-            raise WarehouseWriteError(f"Single {entity} row exceeds Arrow byte budget")
-        else:
-            middle = table.num_rows // 2
-            yield from bounded(table.slice(0, middle))
-            yield from bounded(table.slice(middle))
+        return _bounded(table, batch_bytes, entity)
 
     selected = xbrl_entity_records(bundle, entity)
     if clickhouse and entity == "concepts":
         # Only extension concepts go to `xbrl_concepts`; filter before building and
         # hashing rows instead of building the whole DTS and discarding most of it.
         selected = tuple(concept for concept in selected if concept.is_extension)
+    elif entity == "concepts":
+        # Silver keeps the filing's own concepts here; the shared standard ones are
+        # written once per taxonomy version (`iter_shared_concept_tables`).
+        selected = filing_concepts(bundle)
     records: list[Any] = []
     size = 0
     for record in selected:
@@ -894,6 +891,60 @@ def xbrl_entity_records(bundle: XbrlExtractionBundle, entity: str) -> Sequence[A
     if entity == "segment_facts":
         return segment_rows(bundle)
     return tuple(getattr(bundle, entity))
+
+
+def filing_concepts(bundle: XbrlExtractionBundle) -> tuple[XbrlConcept, ...]:
+    """Concepts whose silver rows belong to this filing: extensions, and standard
+    concepts the filing labels itself (their labels are the filer's)."""
+    filer = filer_labelled_concepts(bundle)
+    return tuple(
+        concept for concept in bundle.concepts if concept.is_extension or concept.qname in filer
+    )
+
+
+SHARED_CONCEPTS_PREFIX = "silver/xbrl/taxonomy_concepts"
+
+
+def iter_shared_concept_tables(
+    bundle: XbrlExtractionBundle, batch_rows: int, batch_bytes: int
+) -> Iterator[tuple[str, pa.Table]]:
+    """`(prefix, table)` for the bundle's shared standard concepts, per taxonomy.
+
+    Rows are `taxonomy_concepts` rows without an ingest time, sorted by name, under
+    a prefix per namespace and taxonomy version. Filings that load the same
+    taxonomy produce the same bytes and so the same content-addressed object,
+    stored once. Together with `filing_concepts` they cover every concept.
+    """
+    filer = filer_labelled_concepts(bundle)
+    groups: dict[tuple[str, str], list[XbrlConcept]] = {}
+    for concept in bundle.concepts:
+        if not concept.is_extension and concept.qname not in filer:
+            key = (concept.namespace, concept.taxonomy_version or "")
+            groups.setdefault(key, []).append(concept)
+    for (namespace, version), concepts in sorted(groups.items()):
+        prefix = (
+            f"{SHARED_CONCEPTS_PREFIX}/namespace_sha256="
+            f"{hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:16]}"
+            f"/taxonomy_version={version or 'none'}"
+        )
+        ordered = tuple(sorted(concepts, key=lambda item: (item.name, item.qname)))
+        table = taxonomy_concepts_table(bundle.model_copy(update={"concepts": ordered}))
+        table = table.drop_columns(["_ingested_at"])
+        for start in range(0, table.num_rows, batch_rows):
+            for chunk in _bounded(table.slice(start, batch_rows), batch_bytes, "concepts"):
+                yield prefix, chunk
+
+
+def _bounded(table: pa.Table, batch_bytes: int, entity: str) -> Iterator[pa.Table]:
+    """`table` split in halves until every piece fits `batch_bytes`."""
+    if table.nbytes <= batch_bytes:
+        yield table
+    elif table.num_rows == 1:
+        raise WarehouseWriteError(f"Single {entity} row exceeds Arrow byte budget")
+    else:
+        middle = table.num_rows // 2
+        yield from _bounded(table.slice(0, middle), batch_bytes, entity)
+        yield from _bounded(table.slice(middle), batch_bytes, entity)
 
 
 def _record_size(record: Any) -> int:

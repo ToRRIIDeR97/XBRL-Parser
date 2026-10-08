@@ -526,6 +526,43 @@ class PostgresControlRepository:
             payload = await session.scalar(statement)
         return dict(payload) if payload else None
 
+    async def legacy_extraction_pointers(self) -> list[dict[str, str]]:
+        """Distinct saved-extraction pointers of completed jobs that are plain `.json`."""
+        statement = (
+            select(JobCheckpointRow.payload)
+            .join(IngestionJobRow, IngestionJobRow.id == JobCheckpointRow.job_id)
+            .where(
+                JobCheckpointRow.stage == "extract",
+                IngestionJobRow.state == JobState.COMPLETE.value,
+                JobCheckpointRow.payload["object_key"].astext.like("%.json"),
+            )
+        )
+        async with self.sessions() as session:
+            payloads = (await session.scalars(statement)).all()
+        unique = {
+            (str(payload["object_key"]), str(payload["sha256"])): None for payload in payloads
+        }
+        return [{"object_key": key, "sha256": sha} for key, sha in unique]
+
+    async def repoint_extraction_checkpoints(
+        self, old_key: str, new_key: str, new_sha256: str
+    ) -> int:
+        """Point every saved-extraction checkpoint at `old_key` to a replacement object."""
+        async with self.sessions.begin() as session:
+            result = await session.execute(
+                update(JobCheckpointRow)
+                .where(
+                    JobCheckpointRow.stage == "extract",
+                    JobCheckpointRow.payload["object_key"].astext == old_key,
+                )
+                .values(
+                    payload=JobCheckpointRow.payload.op("||")(
+                        func.jsonb_build_object("object_key", new_key, "sha256", new_sha256)
+                    )
+                )
+            )
+            return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
     async def claim_job(
         self,
         worker_id: str,

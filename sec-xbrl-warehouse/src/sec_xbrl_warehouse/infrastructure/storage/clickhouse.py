@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 import clickhouse_connect
 import pyarrow as pa
+from clickhouse_connect.driver.exceptions import ProgrammingError
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
@@ -100,20 +101,31 @@ class ClickHouseWarehouse:
             if read_only
             else {}
         )
-        self.client = client or clickhouse_connect.get_client(
-            host=settings.clickhouse_host,
-            port=settings.clickhouse_port,
-            username=(settings.api_clickhouse_username or settings.clickhouse_username)
+        connection = {
+            "host": settings.clickhouse_host,
+            "port": settings.clickhouse_port,
+            "username": (settings.api_clickhouse_username or settings.clickhouse_username)
             if read_only
             else settings.clickhouse_username,
-            password=settings.api_clickhouse_password.get_secret_value()
+            "password": settings.api_clickhouse_password.get_secret_value()
             if read_only and settings.api_clickhouse_password is not None
             else settings.clickhouse_password.get_secret_value(),
-            database=settings.clickhouse_database,
-            secure=settings.clickhouse_secure,
-            autogenerate_session_id=False,
-            settings=query_settings,
-        )
+            "database": settings.clickhouse_database,
+            "secure": settings.clickhouse_secure,
+            "autogenerate_session_id": False,
+        }
+        if client is not None:
+            self.client = client
+        else:
+            try:
+                self.client = clickhouse_connect.get_client(**connection, settings=query_settings)
+            except ProgrammingError as exc:
+                if not read_only or "readonly" not in str(exc):
+                    raise
+                # A `readonly = 1` reader profile fixes every setting, so the budgets
+                # can't be sent per query; the check below confirms the profile
+                # enforces them instead.
+                self.client = clickhouse_connect.get_client(**connection)
         if read_only:
             try:
                 effective = {

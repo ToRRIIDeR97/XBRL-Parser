@@ -62,3 +62,21 @@ def test_api_environment_excludes_writer_and_object_store_secrets():
     assert "POSTGRES_PASSWORD" not in api["environment"]["XBRL_POSTGRES_DSN"]
     assert "XBRL_CLICKHOUSE_PASSWORD" not in api["environment"]
     assert api["logging"]["options"]["max-file"] == "3"
+
+
+def test_workers_use_least_privilege_identities_and_parse_has_no_internet():
+    config = yaml.safe_load(Path("docker-compose.yml").read_text())
+    services = config["services"]
+    for name in ("worker", "worker-parse"):
+        environment = services[name]["environment"]
+        assert environment["XBRL_POSTGRES_DSN"].startswith("postgresql+asyncpg://xbrl_worker:")
+        assert environment["XBRL_CLICKHOUSE_USERNAME"] == "xbrl_writer"
+        assert environment["XBRL_OBJECT_STORE_ACCESS_KEY"].startswith("${XBRL_WORKER_")
+        # `.env` holds owner and root credentials; the workers' environment blanks them.
+        for secret in ("POSTGRES_PASSWORD", "CLICKHOUSE_PASSWORD", "MINIO_ROOT_PASSWORD"):
+            assert environment[secret] == ""
+    assert services["worker-parse"]["networks"] == ["backend"]
+    assert config["networks"]["backend"]["internal"] is True
+    assert "env_file" in services["admin"] and services["admin"]["profiles"] == ["admin"]
+    init = services["minio-init"]["entrypoint"][2]
+    assert "mc version enable" in init and "s3:DeleteObject" not in init

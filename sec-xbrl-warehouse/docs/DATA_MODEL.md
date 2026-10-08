@@ -96,7 +96,7 @@ Required identity and lineage:
 - source document, source fact ID, extraction revision.
 
 **ClickHouse encoding.** Silver Parquet keeps every value as extracted (hex hashes,
-every raw value, every concept). ClickHouse stores the same data more compactly; the
+every raw value, every concept; standard concepts in shared files, see below). ClickHouse stores the same data more compactly; the
 `v_*` views and `QueryService` return it in the original form:
 
 - **Hashes.** Identity hashes (`fact_id`, `context_hash`, `dimension_hash`,
@@ -176,7 +176,19 @@ abstract/nillable flags, labels, documentation, and extension status.
   with the filing's own labels where it has them, else the shared ones. No filer's
   labels reach another filing.
 
-Silver Parquet keeps every concept of every filing.
+Silver Parquet holds every concept of every filing, each stored once:
+
+- The filing's `silver/xbrl/concepts/.../accession=<a>/revision=<r>/` objects hold
+  its extension concepts and the standard concepts it labels itself (with the
+  filer's labels), one row per concept as before.
+- Every other standard concept is stored as a `taxonomy_concepts` row (no accession,
+  no ingest time, rows sorted by name) under
+  `silver/xbrl/taxonomy_concepts/namespace_sha256=<first 16 hex of the namespace's
+  SHA-256>/taxonomy_version=<v>/`. The objects are content-addressed, so filings that
+  load the same taxonomy share one object.
+- The filing's `silver:concepts` checkpoint lists both sets, and its row count is
+  the filing's concept count. The saved extraction keeps the full concept list too.
+- Filings written before this change keep a full per-filing copy.
 
 ### `xbrl_relationships`
 
@@ -201,6 +213,19 @@ document), and `fetched_at`. EIN, phone, and addresses are not stored.
   filings) and, for daily-index discovery, from one submissions request per CIK not
   yet stored or fetched more than `XBRL_COMPANY_REFRESH_DAYS` (default 30) days ago
   (wall-clock time, so backfills of old dates refresh too). `--cik` discoveries always refresh the row.
+
+## Extraction records
+
+`xbrl_extractions` has one row per published `(accession, extraction_revision)`, written
+last: `entity_counts_json` and `metadata_json` (the bundle's document metadata). The
+Arelle validation log (about 1 MB per filing) isn't copied into `metadata_json`; its
+provenance keeps `validation_log_records`, the record count. The full log stays in the
+saved extraction, and its issues are grouped in `validation_issues`. Rows written
+before this change still embed the log.
+
+`storage retire-revisions` can delete the `xbrl_*` and `canonical_facts` rows of
+revisions older than the published one (OPERATIONS.md); their `xbrl_extractions` row,
+silver Parquet, and saved extraction stay.
 
 ## Validation issues
 
@@ -344,6 +369,12 @@ showed `2001`; facts and reviews written at revisions 1–2 carry that value.
 
 ### `canonical_facts` in ClickHouse
 
+One row per raw fact, metric, and extraction revision. The sort key leaves out the
+mapping, so after `mapping remap` the new mapping's row replaces the older one on
+merge (`ReplacingMergeTree(mapping_version)` keeps the highest version), the same row
+readers pick with `ORDER BY mapping_version DESC LIMIT 1 BY`. Mapping history stays
+in PostgreSQL `concept_mappings`.
+
 Contains:
 
 - raw fact ID;
@@ -397,9 +428,10 @@ Standardized series rebuilt per company from `canonical_facts` by
   row is written whenever a point changes (`known_from` = that time). A query takes the
   newest `built_at` for the company and, per point, the newest version with
   `known_from <= as_of`.
-- **Rebuilds.** The worker rebuilds a company after a completed `parse_filing` (or
-  legacy `ingest_filing`) or
-  `map_canonical` (a failure is reported in the job result, not retried);
+- **Rebuilds.** A completed `parse_filing` (or legacy `ingest_filing`) or
+  `map_canonical` queues the company's `rebuild_series` job, which runs after
+  `XBRL_SERIES_REBUILD_DELAY_SECONDS`; requests in the meantime share one rebuild, and
+  a failed rebuild retries like any job (OPERATIONS.md).
   `xbrl-warehouse series rebuild --cik <cik>` rebuilds on demand. The table is a
   `ReplacingMergeTree(built_at)`, so merges replace older builds' rows without a delete
   mutation per rebuild; readers only use the newest build.

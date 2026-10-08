@@ -14,11 +14,23 @@ Assign an internal schema version to every silver dataset. Additive nullable fie
 - Create new tables/views for incompatible key or precision changes.
 - Do not rely on background `ReplacingMergeTree` merges for query correctness.
 - Keep DDL numbered and idempotent.
-- `xbrl-warehouse db upgrade-clickhouse --yes` (through the `worker` service) rebuilds
+- `xbrl-warehouse db upgrade-clickhouse --yes` (through the `admin` service) rebuilds
   each table whose column types or sort key changed: it creates the new table, copies
   every physical row with merges stopped, checks row counts, swaps the tables, and
   keeps the old one as `<table>__backup_<UTC timestamp>_<token>`. Backups are never
   dropped automatically; drop them only after verifying the upgrade.
+
+### Storage settings and canonical sort key (storage audit, October 2026)
+
+- `050_storage_settings.sql` sets `default_compression_codec = 'ZSTD(3)'` on every
+  MergeTree table and adds bloom-filter indexes (`xbrl_facts.accession`,
+  `canonical_facts.accession`, `sec_numeric_facts.adsh`, `sec_text_facts.adsh`). These
+  are metadata changes that `db init-clickhouse` applies in place (no drift); build the
+  indexes for existing parts with `MATERIALIZE INDEX` (OPERATIONS.md).
+- `canonical_facts` drops `mapping_id, mapping_version` from its sort key, so
+  `doctor` reports drift and `db upgrade-clickhouse --yes` rebuilds it (the old table
+  stays as a backup). After merges each raw fact, metric, and revision keeps one row,
+  the highest mapping version, which is the row readers already selected.
 
 ### Binary hashes and concept split (plan 14)
 

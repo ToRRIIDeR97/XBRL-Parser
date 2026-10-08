@@ -4,13 +4,50 @@
 
 1. PostgreSQL
 2. ClickHouse
-3. MinIO/object storage
-4. Alembic migration
-5. ClickHouse DDL
-6. worker
-7. API
+3. MinIO/object storage, then `minio-init` (bucket, versioning, worker user)
+4. Alembic migration (`admin` service)
+5. ClickHouse DDL (`admin` service)
+6. Identities: `ops/provision/provision_identities.sh`
+7. worker
+8. API
 
-![UML deployment view of the Compose services: worker, worker-parse, and api containers reach postgres, minio, and clickhouse over the default network; prometheus and grafana in the monitoring profile](diagrams/deployment-compose.svg)
+![UML deployment view of the Compose services: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker-parse has no other network; prometheus and grafana in the monitoring profile](diagrams/deployment-compose.svg)
+
+## Identities and the admin service
+
+Each Compose service connects with the least privilege its job needs:
+
+| Service | PostgreSQL | ClickHouse | Object store |
+| --- | --- | --- | --- |
+| `worker`, `worker-parse` | `xbrl_worker`: DML on the control tables | `xbrl_writer`: SELECT, INSERT | `xbrl_worker`: get, put, list (no delete) |
+| `api` | `xbrl_api`: CONNECT only | `xbrl_api`: SELECT, `xbrl_api_profile` budgets | none |
+| `admin` (on demand) | owner (`POSTGRES_USER`) | admin (`CLICKHOUSE_USER`) | root |
+
+- `minio-init` (every `up`) creates the bucket, keeps it private, turns on
+  versioning with a 30-day expiry for noncurrent versions, and creates the
+  `xbrl_worker` object-store user with the `xbrl-worker` policy.
+- `ops/provision/provision_identities.sh` creates or updates the PostgreSQL and
+  ClickHouse identities and the `xbrl_api_profile` settings profile (readonly with the
+  API query budgets, see SECURITY.md). Run it after the migrations and again after
+  changing a password. Passwords come from the environment or `.env`
+  (`XBRL_WORKER_POSTGRES_PASSWORD`, `XBRL_API_POSTGRES_PASSWORD`,
+  `XBRL_WRITER_CLICKHOUSE_PASSWORD`, `XBRL_API_CLICKHOUSE_PASSWORD`,
+  `XBRL_WORKER_OBJECT_STORE_SECRET_KEY`); the defaults are development values that
+  `XBRL_ENV=production` rejects.
+- The worker services read `.env` for their settings, but Compose blanks the owner,
+  admin, root, and API secrets in their environment.
+- Migrations, `db init-clickhouse`, `db upgrade-clickhouse`, `taxonomy sync`,
+  `doctor`, and the `storage` maintenance commands run through the `admin` service,
+  which holds the owner credentials and runs only on demand:
+
+  ```bash
+  docker compose run --rm --entrypoint alembic admin upgrade head
+  docker compose run --rm admin db init-clickhouse
+  ./ops/provision/provision_identities.sh
+  ```
+
+  Operator commands that only queue or read jobs (`filing`, `backfill`, `mapping`,
+  `company`, `jobs`, `catalog`) work through either service.
 
 ## Routine checks
 
@@ -48,9 +85,22 @@ traffic (`requires_sec`). A worker builds the SEC client and egress lock only wh
 SEC-active worker:
 
 ```bash
-xbrl-warehouse worker run --job-type fetch_filing --job-type discover_filings
+XBRL_WORKER_CONCURRENCY=4 xbrl-warehouse worker run --job-type fetch_filing --job-type discover_filings
 XBRL_WORKER_CONCURRENCY=4 xbrl-warehouse worker run --job-type parse_filing
 ```
+
+- **SEC worker concurrency.** One filing fetch is three sequential stages (index,
+  `FilingSummary.xml`, members), so at concurrency 1 the rate limiter is idle between
+  them. The limiter, `XBRL_SEC_MAX_CONCURRENCY`, and the egress lock are shared by all
+  jobs of the process, so `XBRL_WORKER_CONCURRENCY=3` or `4` on the fetch worker stays
+  within the SEC limit. Keep Arelle off that worker (no `parse_filing`), or size its
+  memory for the parse jobs too.
+- **Series rebuilds.** A completed `parse_filing`, `ingest_filing`, or `map_canonical`
+  queues the company's `rebuild_series` job (`series:<cik>`), which runs
+  `XBRL_SERIES_REBUILD_DELAY_SECONDS` (default 60) later. Requests for the same company
+  in the meantime share that one rebuild; a request while it runs queues one
+  follow-up. A worker whose `--job-type` set includes one of those job types also
+  claims `rebuild_series`. A failed rebuild retries like any job.
 
 - **Offline Arelle (recommended for parse workers).** With `XBRL_ARELLE_OFFLINE=true`
   a parse worker never touches the SEC or the egress lock. In online mode Arelle may
@@ -64,6 +114,14 @@ XBRL_WORKER_CONCURRENCY=4 xbrl-warehouse worker run --job-type parse_filing
   `XBRL_WORKER_CONCURRENCY x XBRL_ARELLE_MEMORY_LIMIT_BYTES` must fit the container
   memory limit; `doctor` reports "Worker memory" and fails when it doesn't. On stop, a
   worker lets its running jobs finish.
+- **Warm Arelle children.** An Arelle child process serves up to
+  `XBRL_ARELLE_CHILD_MAX_TASKS` (default 20) successful extractions before it is
+  replaced, so Arelle, its plugins, and the taxonomy package checks load once per child
+  rather than once per filing. Every filing still gets a new Arelle controller and
+  model, and Arelle's global plugin and package registries are reset between
+  filings. A child that fails, times out, or crashes is never reused. Set it to 1 for
+  a new process per filing. The child gets no database, object-store, or API
+  credentials.
 - Compose: `docker compose --profile parse up -d worker-parse` starts an offline
   parse-only worker (`XBRL_PARSE_WORKER_CONCURRENCY`, default 2;
   `WORKER_PARSE_MEMORY_LIMIT`, default 8g).
@@ -127,7 +185,8 @@ xbrl-warehouse taxonomy sync     # download missing or corrupt enabled packages
   `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`). It downloads through the rate-limited client
   with the configured user agent and byte limits, verifies the SHA-256, and only then
   renames the file into place. Verified packages aren't downloaded again.
-- Every extraction verifies each enabled package again. A checksum mismatch or an
+- Every Arelle child verifies each enabled package before its first extraction and
+  again whenever the file's size, modification time, or inode changes. A checksum mismatch or an
   unsafe filename stops extraction. A missing package stops it when
   `XBRL_ARELLE_OFFLINE=true` or `XBRL_ENV=production`. Elsewhere, extraction records a
   `warehouse:taxonomyPackageMissing` warning and resolves that taxonomy through the
@@ -181,10 +240,9 @@ Example cron entry:
 
 Run workers as supervised long-lived services. Do not schedule parallel worker launches or pass `--refresh` in a routine schedule.
 
-## Object-store inventory
+## Object-store inventory and storage maintenance
 
-`xbrl-warehouse storage report [--keys-file PATH]` (run through the `worker`
-service) lists every object and prints JSON: objects and bytes per kind (package
+`xbrl-warehouse storage report [--keys-file PATH]` lists every object and prints JSON: objects and bytes per kind (package
 archives, legacy loose members, manifests, `.json` and `.json.zst` extraction
 checkpoints, silver Parquet, quarantine) and the reclaimable legacy objects:
 
@@ -198,6 +256,22 @@ keys locally, one per line. Deleting them is a separate, operator-approved reten
 decision. Completed jobs and `mapping remap` read the checkpoint key their job
 recorded, so before deleting a JSON checkpoint confirm that the latest completed job
 for that accession and revision points at the `.json.zst` key (re-ingest otherwise).
+
+Two maintenance commands change stored data. Both are dry runs without `--yes` and
+need the `admin` service (the worker identities can't delete):
+
+- `storage recompress-extractions [--yes] [--delete-legacy]` rewrites each legacy
+  plain-JSON saved extraction as `.json.zst` (the JSON bytes are compressed
+  unchanged, and the new object must load as the same filing and revision), then
+  points every completed job's `extract` checkpoint at it. `--delete-legacy` deletes
+  each plain object once no checkpoint uses it. On the versioned bucket a deleted
+  object stays recoverable as a noncurrent version for 30 days.
+- `storage retire-revisions [--yes]` deletes the ClickHouse rows of extraction
+  revisions older than each filing's published revision, in every revisioned table
+  (`xbrl_*`, `xbrl_concept_labels`, `canonical_facts`). A revision is retired only
+  when its saved extraction is still in the object store; `xbrl_extractions`, silver
+  Parquet, and the saved extraction keep its lineage. Run it after a re-extraction is
+  verified, not during one.
 
 ## Recovery
 
@@ -245,8 +319,11 @@ inside its limit:
   thousand columns, and each background merge of `metric_log` took 3.1 GiB for about
   a second, killing whatever query ran at that moment. The warehouse exports its own
   Prometheus metrics instead.
-- Other system logs expire (trace and processor logs after 3 days, text and
+- `system.trace_log` (the sampling profiler) is off; `text_log` keeps information
+  and above. Other system logs expire (processor logs after 3 days, text and
   asynchronous-metric logs after 7, query and part logs after 14).
+- The server log files rotate at 50 MB, three files each (the image default, 1000 MB
+  times ten, reached 1 GB on the log volume).
 - Caches are capped at 128–256 MiB each; the defaults (5–8 GiB) exceed the container.
 
 When a container that predates this file is recreated, ClickHouse keeps the old log
@@ -254,6 +331,22 @@ tables as `system.<log>_0` without expiry, and the old `metric_log` and
 `query_metric_log` still merge. Detach them (`DETACH TABLE system.metric_log
 PERMANENTLY`, same for `query_metric_log`); the `_0` tables can be dropped when their
 history is no longer needed.
+
+### ClickHouse compression and indexes
+
+Tables use `default_compression_codec = 'ZSTD(3)'` for columns without their own
+codec (about 15% smaller than LZ4 on this data). `xbrl_facts` and `canonical_facts`
+(sorted by CIK) have a bloom-filter index on `accession`, and the SEC NUM and TXT
+tables on `adsh`. `db init-clickhouse` applies both to existing tables
+(`050_storage_settings.sql`); existing parts take the codec as they merge, and the
+indexes need one build:
+
+```sql
+ALTER TABLE xbrl.xbrl_facts MATERIALIZE INDEX idx_accession SETTINGS mutations_sync = 1;
+ALTER TABLE xbrl.canonical_facts MATERIALIZE INDEX idx_accession SETTINGS mutations_sync = 1;
+ALTER TABLE xbrl.sec_numeric_facts MATERIALIZE INDEX idx_adsh SETTINGS mutations_sync = 1;
+ALTER TABLE xbrl.sec_text_facts MATERIALIZE INDEX idx_adsh SETTINGS mutations_sync = 1;
+```
 
 To diagnose a code-241 failure, check what else held memory at that second:
 `system.text_log` lines from `MemoryTracker` ("Background process (mutate/merge) peak

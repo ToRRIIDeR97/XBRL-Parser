@@ -26,7 +26,8 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
   then it queues the parse) and `parse_filing` (no SEC client), e.g.
   `--job-type fetch_filing` on the one SEC-active worker and
   `XBRL_WORKER_CONCURRENCY=N XBRL_ARELLE_OFFLINE=true worker run --job-type parse_filing`
-  beside it. Legacy queued `ingest_filing` jobs still run.
+  beside it. Legacy queued `ingest_filing` jobs still run. Completed parses queue a
+  coalesced `rebuild_series` job per company, which those workers also claim.
 - Retain Arelle semantics, immutable raw artifacts, reversible canonical mappings,
   idempotent replay, and diagnostics for rejected or drifting inputs.
 - Keep secrets out of source control. Preserve query budgets, download and parser
@@ -48,21 +49,25 @@ and keep `XBRL_RETAIN_FILING_SOURCE_FILES=true`. Use `docker-compose` if the
 `docker compose` plugin isn't installed.
 
 ```bash
-docker compose build api worker
+docker compose build api worker admin
 docker compose up -d postgres clickhouse minio minio-init
-docker compose run --rm --entrypoint alembic worker upgrade head
-docker compose run --rm worker db init-clickhouse
-docker compose run --rm worker taxonomy sync
-docker compose run --rm worker doctor
+docker compose run --rm --entrypoint alembic admin upgrade head
+docker compose run --rm admin db init-clickhouse
+./ops/provision/provision_identities.sh
+docker compose run --rm admin taxonomy sync
+docker compose run --rm admin doctor
 docker compose up -d api
 ```
 
 `doctor` fails while a pinned taxonomy package is missing; `taxonomy sync` installs them.
 
-Privileged and operator CLI commands (migrations, `catalog`, `backfill`, `filing`,
-`mapping`, `taxonomy`, `company`, `jobs`) run through the `worker` service. The `api` service has no writer
-credentials or data volume. It connects as `xbrl_api` to PostgreSQL and ClickHouse, and
-those identities must be provisioned first (see SECURITY.md). Docs are served at
+Privileged commands (migrations, `db`, `taxonomy`, `storage` maintenance, `doctor`) run
+through the on-demand `admin` service, which holds the owner credentials. Workers
+connect as least-privilege identities (`xbrl_worker`, `xbrl_writer`, and an object-store
+user without delete); `provision_identities.sh` and `minio-init` create them, and
+queue-only operator commands (`catalog`, `backfill`, `filing`, `mapping`, `company`,
+`jobs`) work through either service. The `api` service has no writer credentials or
+data volume. It connects as `xbrl_api` to PostgreSQL and ClickHouse (see SECURITY.md). Docs are served at
 `http://127.0.0.1:8080/docs`. Avoid `docker compose down -v`, which deletes data volumes.
 
 ## Validate

@@ -47,7 +47,6 @@ class SourceArtifactRow(TimestampMixin, Base):
             "dataset", "period", "revision", name="uq_source_artifact_period_revision"
         ),
         Index("ix_source_artifacts_state", "state"),
-        Index("ix_source_artifacts_dataset_period", "dataset", "period"),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -145,7 +144,6 @@ class JobCheckpointRow(Base):
 class ValidationIssueRow(Base):
     __tablename__ = "validation_issues"
     __table_args__ = (
-        Index("ix_validation_accession", "accession"),
         Index("ix_validation_artifact", "artifact_id"),
         Index("ix_validation_code_severity", "code", "severity"),
         Index("ix_validation_accession_revision", "accession", "extraction_revision"),

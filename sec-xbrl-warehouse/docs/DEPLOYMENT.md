@@ -1,9 +1,11 @@
 # Deployment Guide
 
-The API runs with reader identities only: provision its PostgreSQL and ClickHouse logins
-and the ClickHouse settings profile described in [SECURITY.md](SECURITY.md) before
-starting the `api` service. Run migrations and other privileged CLI commands through the
-`worker` service, never `api`.
+Each service runs with its own least-privilege identity. Before starting `api` or the
+workers, run `ops/provision/provision_identities.sh`, which creates the PostgreSQL and
+ClickHouse logins and the API's ClickHouse settings profile described in
+[SECURITY.md](SECURITY.md); `minio-init` creates the workers' object-store user. Run
+migrations and other privileged CLI commands through the on-demand `admin` service,
+never `worker` or `api` (OPERATIONS.md, "Identities and the admin service").
 
 ## Local development
 
@@ -44,7 +46,8 @@ A small deployment can retain the same service topology on one protected host, b
 - pinned container digests;
 - TLS/reverse proxy and API authentication;
 - secrets outside `.env` and source control;
-- private database/object-storage networks;
+- private database/object-storage networks (Compose puts storage on the internal
+  `backend` network, and `worker-parse` on it alone);
 - persistent volumes on monitored disks;
 - object replication and PostgreSQL backups;
 - CPU/memory limits, log rotation, and alerts;
@@ -58,7 +61,7 @@ A small deployment can retain the same service topology on one protected host, b
 - pinned taxonomy packages installed with `taxonomy sync`, and `XBRL_ARELLE_OFFLINE=true`.
 
 Before starting workers on a production host, run `xbrl-warehouse taxonomy sync`
-through the `worker` service, then set `XBRL_ARELLE_OFFLINE=true`. `doctor` fails in
+through the `admin` service, then set `XBRL_ARELLE_OFFLINE=true`. `doctor` fails in
 production while offline mode is off or any enabled taxonomy package is missing.
 Keep `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR` on persistent storage writable by UID 10001.
 

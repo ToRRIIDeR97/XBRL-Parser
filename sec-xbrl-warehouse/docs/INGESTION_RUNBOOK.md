@@ -23,8 +23,8 @@ xbrl-warehouse worker run
 ## Incremental filings
 
 Each filing is two jobs: `fetch_filing` (SEC download, then it enqueues the parse) and
-`parse_filing` (Arelle, validation, silver and ClickHouse writes, canonical mapping,
-series rebuild; no SEC download). Discovery and `filing enqueue` queue `fetch_filing`
+`parse_filing` (Arelle, validation, silver and ClickHouse writes, canonical mapping;
+no SEC download), which queues the company's coalesced `rebuild_series` job. Discovery and `filing enqueue` queue `fetch_filing`
 keyed `fetch:<accession>:<revision>`; a completed fetch queues `parse_filing` keyed
 `parse:<accession>:<revision>`. Queued legacy `ingest_filing` jobs still run both steps
 in one job.
@@ -49,7 +49,8 @@ job idempotency key, and older lineage is retained:
 xbrl-warehouse filing enqueue --accession <accession> --cik <cik> \
   --company-name <name> --form <form> --filed-date <YYYY-MM-DD> \
   --primary-document <file>
-xbrl-warehouse worker run --job-type fetch_filing                 # SEC-active
+XBRL_WORKER_CONCURRENCY=4 \
+  xbrl-warehouse worker run --job-type fetch_filing               # SEC-active
 XBRL_WORKER_CONCURRENCY=4 XBRL_ARELLE_OFFLINE=true \
   xbrl-warehouse worker run --job-type parse_filing               # no SEC client
 ```

@@ -41,7 +41,7 @@ class _Connection:
         return None
 
     async def scalar(self, statement: object) -> str:
-        return "0006_filing_manifest_pointer"
+        return "0007_drop_prefix_indexes"
 
 
 class _Engine:

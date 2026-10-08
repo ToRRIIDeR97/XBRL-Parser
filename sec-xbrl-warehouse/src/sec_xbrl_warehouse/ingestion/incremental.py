@@ -294,7 +294,7 @@ class IncrementalFilingIngestor:
                     await self._save(job_id, "canonical", {"mapped": mapped})
                 await asyncio.to_thread(self.warehouse.publish_xbrl_bundle, bundle, counts)
                 await self.control.update_filing_package(manifest, extraction_revision)
-                reconciliation = await self.reconcile(filing.accession)
+                reconciliation = await self.reconcile(filing.accession, filing.cik)
                 result = {
                     "accession": filing.accession,
                     "cik": filing.cik,
@@ -414,10 +414,11 @@ class IncrementalFilingIngestor:
         await self._save(job_id, "gold", counts)
         return counts
 
-    async def reconcile(self, accession: str) -> dict[str, Any]:
+    async def reconcile(self, accession: str, cik: int | None = None) -> dict[str, Any]:
         # ponytail: comparison holds one bounded filing; stream/partition if this ceiling is reached.
-        params = {
+        params: dict[str, Any] = {
             "accession": accession,
+            "cik": cik,
             "max_rows": self.settings.reconciliation_max_rows,
             "max_bytes": self.settings.reconciliation_max_bytes,
         }
@@ -425,13 +426,23 @@ class IncrementalFilingIngestor:
             max_result_bytes = %(max_bytes)s, result_overflow_mode = 'throw',
             max_execution_time = 60, max_memory_usage = 536870912
         """
+        # The `v_sec_*_latest` views apply an outer WHERE after their LIMIT BY, so a
+        # filter on them reads the whole table. These queries filter first (adsh is a
+        # LIMIT BY key, so the result is the same) and join only the filing's dimensions.
         bulk_numeric = await asyncio.to_thread(
             self.warehouse.query,
             """
-            SELECT n.tag, n.version, n.ddate, n.qtrs, n.uom, n.value_raw,
-                   d.segments, d.segt FROM v_sec_numeric_latest AS n
-            LEFT JOIN sec_dimensions AS d FINAL ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
-            WHERE n.adsh = %(accession)s
+            WITH n AS (
+                SELECT adsh, tag, version, ddate, qtrs, uom, dimh, iprx, value_raw, _artifact_id
+                FROM sec_numeric_facts FINAL WHERE adsh = %(accession)s
+                ORDER BY _source_period DESC, _source_revision DESC, _ingested_at DESC
+                LIMIT 1 BY adsh, tag, version, ddate, qtrs, uom, dimh, iprx
+            )
+            SELECT n.tag, n.version, n.ddate, n.qtrs, n.uom, n.value_raw, d.segments, d.segt
+            FROM n LEFT JOIN (
+                SELECT _artifact_id, dimh, segments, segt FROM sec_dimensions FINAL
+                WHERE dimh IN (SELECT dimh FROM sec_numeric_facts WHERE adsh = %(accession)s)
+            ) AS d ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
             """
             + budget,
             params,
@@ -439,10 +450,19 @@ class IncrementalFilingIngestor:
         bulk_text = await asyncio.to_thread(
             self.warehouse.query,
             """
+            WITH n AS (
+                SELECT adsh, tag, version, ddate, qtrs, dimh, iprx, lang, txtlen, value,
+                       _artifact_id
+                FROM sec_text_facts FINAL WHERE adsh = %(accession)s
+                ORDER BY _source_period DESC, _source_revision DESC, _ingested_at DESC
+                LIMIT 1 BY adsh, tag, version, ddate, qtrs, dimh, iprx
+            )
             SELECT n.tag, n.version, n.ddate, n.qtrs, n.lang, n.txtlen, n.value AS value_raw,
-                   d.segments, d.segt FROM v_sec_text_latest AS n
-            LEFT JOIN sec_dimensions AS d FINAL ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
-            WHERE n.adsh = %(accession)s
+                   d.segments, d.segt
+            FROM n LEFT JOIN (
+                SELECT _artifact_id, dimh, segments, segt FROM sec_dimensions FINAL
+                WHERE dimh IN (SELECT dimh FROM sec_text_facts WHERE adsh = %(accession)s)
+            ) AS d ON n._artifact_id = d._artifact_id AND n.dimh = d.dimh
             """
             + budget,
             params,
@@ -456,6 +476,7 @@ class IncrementalFilingIngestor:
                       unit_id, unit_numerator_json, unit_denominator_json, language,
                       value_decimal, value_text, is_nil, raw_value
                FROM v_xbrl_facts_latest WHERE accession = %(accession)s"""
+            + (" AND cik = %(cik)s" if cik is not None else "")
             + budget,
             params,
         )

@@ -28,7 +28,7 @@ class PostgresMappingRepository:
     def __init__(self, settings: Settings, engine: AsyncEngine | None = None) -> None:
         self.settings = settings
         self.engine = engine or create_async_engine(
-            settings.postgres_dsn,
+            settings.postgres_dsn.get_secret_value(),
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,
@@ -55,52 +55,69 @@ class PostgresMappingRepository:
         then family. Within equal specificity, the highest mapping version wins
         (append-only history means the latest is authoritative).
         """
-        family = namespace_family(namespace)
-        namespaces = [namespace] if family is None else [namespace, family]
-        async with self.sessions() as session:
-            rows = (
-                await session.execute(
-                    select(ConceptMappingRow, CanonicalMetricRow.code)
-                    .join(
-                        CanonicalMetricRow,
-                        ConceptMappingRow.metric_id == CanonicalMetricRow.id,
+        key = (namespace, concept_name, taxonomy_version)
+        return (await self.approved_mappings_for_concepts([key], cik, filed_date))[key]
+
+    async def approved_mappings_for_concepts(
+        self,
+        keys: Sequence[tuple[str, str, str | None]],
+        cik: int,
+        filed_date: date,
+    ) -> dict[tuple[str, str, str | None], Sequence[ConceptMapping]]:
+        """`approved_mappings_for_concept` for many `(namespace, name, version)` keys.
+
+        One query per chunk of keys instead of one per concept; each key gets the
+        same result the single-concept lookup returns.
+        """
+        result: dict[tuple[str, str, str | None], Sequence[ConceptMapping]] = {}
+        unique = list(dict.fromkeys(keys))
+        for start in range(0, len(unique), _MAPPING_KEY_CHUNK):
+            chunk = unique[start : start + _MAPPING_KEY_CHUNK]
+            namespaces = {
+                candidate
+                for namespace, _, _ in chunk
+                for candidate in (namespace, namespace_family(namespace))
+                if candidate is not None
+            }
+            versions = {version for _, _, version in chunk if version is not None}
+            async with self.sessions() as session:
+                rows = (
+                    await session.execute(
+                        select(ConceptMappingRow, CanonicalMetricRow.code)
+                        .join(
+                            CanonicalMetricRow,
+                            ConceptMappingRow.metric_id == CanonicalMetricRow.id,
+                        )
+                        .where(
+                            ConceptMappingRow.namespace.in_(sorted(namespaces)),
+                            ConceptMappingRow.concept_name.in_(sorted({k[1] for k in chunk})),
+                            ConceptMappingRow.status == "approved",
+                            ConceptMappingRow.cik.is_(None) | (ConceptMappingRow.cik == cik),
+                            ConceptMappingRow.taxonomy_version.is_(None)
+                            | ConceptMappingRow.taxonomy_version.in_(sorted(versions)),
+                            ConceptMappingRow.valid_from.is_(None)
+                            | (ConceptMappingRow.valid_from <= filed_date),
+                            ConceptMappingRow.valid_to.is_(None)
+                            | (ConceptMappingRow.valid_to >= filed_date),
+                        )
                     )
-                    .where(
-                        ConceptMappingRow.namespace.in_(namespaces),
-                        ConceptMappingRow.concept_name == concept_name,
-                        ConceptMappingRow.status == "approved",
-                        ConceptMappingRow.cik.is_(None) | (ConceptMappingRow.cik == cik),
-                        ConceptMappingRow.taxonomy_version.is_(None)
-                        | (ConceptMappingRow.taxonomy_version == taxonomy_version),
-                        ConceptMappingRow.valid_from.is_(None)
-                        | (ConceptMappingRow.valid_from <= filed_date),
-                        ConceptMappingRow.valid_to.is_(None)
-                        | (ConceptMappingRow.valid_to >= filed_date),
-                    )
+                ).all()
+            by_name: dict[str, list[tuple[ConceptMappingRow, str]]] = {}
+            for row, metric_code in rows:
+                by_name.setdefault(row.concept_name, []).append((row, metric_code))
+            for key in chunk:
+                namespace, concept_name, taxonomy_version = key
+                family = namespace_family(namespace)
+                result[key] = _most_specific(
+                    [
+                        (row, code)
+                        for row, code in by_name.get(concept_name, ())
+                        if row.namespace in (namespace, family)
+                        and row.taxonomy_version in (None, taxonomy_version)
+                    ],
+                    namespace,
                 )
-            ).all()
-        if not rows:
-            return ()
-
-        latest: dict[tuple[object, ...], tuple[ConceptMappingRow, str]] = {}
-        for row, metric_code in rows:
-            key = (metric_code, row.namespace, row.cik, row.taxonomy_version)
-            if key not in latest or latest[key][0].mapping_version < row.mapping_version:
-                latest[key] = (row, metric_code)
-
-        def specificity(row: ConceptMappingRow) -> tuple[bool, bool, bool]:
-            return (
-                row.cik is not None,
-                row.taxonomy_version is not None,
-                row.namespace == namespace,
-            )
-
-        best = max(specificity(row) for row, _ in latest.values())
-        return tuple(
-            _to_concept_mapping(row, metric_code)
-            for row, metric_code in latest.values()
-            if specificity(row) == best
-        )
+        return result
 
     async def seed_metrics(self, metrics: Sequence[CanonicalMetric]) -> int:
         async with self.sessions.begin() as session:
@@ -498,4 +515,35 @@ def _to_concept_mapping(row: ConceptMappingRow, metric_code: str) -> ConceptMapp
         valid_to=row.valid_to,
         explanation=row.rationale,
         version=row.mapping_version,
+    )
+
+
+# Keys per approved-mapping query; keeps bound parameters well under asyncpg's limit.
+_MAPPING_KEY_CHUNK = 2000
+
+
+def _most_specific(
+    rows: Sequence[tuple[ConceptMappingRow, str]], namespace: str
+) -> tuple[ConceptMapping, ...]:
+    """The latest version of each mapping, keeping only the most specific ones."""
+    if not rows:
+        return ()
+    latest: dict[tuple[object, ...], tuple[ConceptMappingRow, str]] = {}
+    for row, metric_code in rows:
+        key = (metric_code, row.namespace, row.cik, row.taxonomy_version)
+        if key not in latest or latest[key][0].mapping_version < row.mapping_version:
+            latest[key] = (row, metric_code)
+
+    def specificity(row: ConceptMappingRow) -> tuple[bool, bool, bool]:
+        return (
+            row.cik is not None,
+            row.taxonomy_version is not None,
+            row.namespace == namespace,
+        )
+
+    best = max(specificity(row) for row, _ in latest.values())
+    return tuple(
+        _to_concept_mapping(row, metric_code)
+        for row, metric_code in latest.values()
+        if specificity(row) == best
     )

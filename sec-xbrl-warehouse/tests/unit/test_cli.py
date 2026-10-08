@@ -389,3 +389,25 @@ def test_filing_enqueue_queues_a_fetch_job(monkeypatch: pytest.MonkeyPatch, tmp_
     assert result.exit_code == 0, result.output
     assert calls[0]["job_type"] == JobType.FETCH_FILING.value
     assert calls[0]["idempotency_key"] == "fetch:0000320193-25-000079:3"
+
+
+def test_api_serve_refuses_an_unauthenticated_non_loopback_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    served: list[str] = []
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: served.append(kwargs["host"]))
+    for settings, host, allowed in (
+        (Settings(_env_file=None, env="test"), "0.0.0.0", False),
+        (Settings(_env_file=None, env="test"), "127.0.0.1", True),
+        (Settings(_env_file=None, env="test", api_key="k" * 32), "0.0.0.0", True),
+        (
+            Settings(_env_file=None, env="test", api_allow_unauthenticated_remote=True),
+            "0.0.0.0",
+            True,
+        ),
+    ):
+        served.clear()
+        monkeypatch.setattr(cli, "get_settings", lambda settings=settings: settings)
+        result = CliRunner().invoke(cli.app, ["api", "serve", "--host", host])
+        assert (result.exit_code == 0) is allowed, result.output
+        assert served == ([host] if allowed else [])

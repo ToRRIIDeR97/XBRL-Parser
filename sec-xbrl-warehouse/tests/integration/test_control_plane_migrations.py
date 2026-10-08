@@ -59,7 +59,7 @@ def _review(accession: str, fact_id: str, namespace: str, concept: str, state: s
 def test_review_and_issue_migrations_upgrade_and_downgrade() -> None:
     base = Settings(env="test")
     database = f"xbrl_migration_{uuid4().hex[:12]}"
-    url = make_url(base.postgres_dsn)
+    url = make_url(base.postgres_dsn.get_secret_value())
     admin = url.set(drivername="postgresql", database="postgres").render_as_string(
         hide_password=False
     )

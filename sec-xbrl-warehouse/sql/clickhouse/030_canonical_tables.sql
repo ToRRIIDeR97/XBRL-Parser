@@ -28,9 +28,10 @@ CREATE TABLE IF NOT EXISTS {{database}}.canonical_facts
     fiscal_period LowCardinality(Nullable(String)),
     report_date Nullable(Date),
     _row_hash FixedString(32),
-    _ingested_at DateTime64(3, 'UTC')
+    _ingested_at DateTime64(3, 'UTC'),
+    INDEX idx_accession accession TYPE bloom_filter GRANULARITY 1
 )
 ENGINE = ReplacingMergeTree(mapping_version)
 PARTITION BY toYear(filed_date)
 ORDER BY (cik, canonical_metric, ifNull(period_end, toDate('1970-01-01')), ifNull(period_instant, toDate('1970-01-01')), accession, extraction_revision, raw_fact_id, mapping_id, mapping_version)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';

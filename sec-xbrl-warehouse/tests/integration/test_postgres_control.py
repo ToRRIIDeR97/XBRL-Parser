@@ -658,7 +658,7 @@ async def test_egress_lock_verify_reacquires_after_dropped_connection(
     holder = SecEgressLock(postgres_settings, check_interval_seconds=0)
     other = SecEgressLock(postgres_settings, check_interval_seconds=0)
     admin = await asyncpg.connect(
-        make_url(postgres_settings.postgres_dsn)
+        make_url(postgres_settings.postgres_dsn.get_secret_value())
         .set(drivername="postgresql")
         .render_as_string(hide_password=False)
     )

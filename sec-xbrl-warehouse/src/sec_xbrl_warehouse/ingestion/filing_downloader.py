@@ -165,7 +165,7 @@ class FilingPackageDownloader:
                 acquired_at=datetime.now(UTC),
             )
             manifest = await asyncio.to_thread(self._store_archive, manifest, sources)
-        cache_bytes = manifest.model_dump_json(indent=2).encode("utf-8")
+        cache_bytes = manifest.model_dump_json().encode("utf-8")
         try:
             await asyncio.to_thread(self.object_store.put_bytes, cache_bytes, cache_key)
         except ArtifactIntegrityError:
@@ -423,7 +423,7 @@ class FilingPackageDownloader:
             archived = self._write_archive(manifest, dict(member_entries), staging)
             # 4. Regenerate and store the manifest that records archive lineage.
             updated = archived
-            updated_bytes = updated.model_dump_json(indent=2).encode("utf-8")
+            updated_bytes = updated.model_dump_json().encode("utf-8")
             updated_checksum = sha256_bytes(updated_bytes)
             updated_key = (
                 f"manifests/sec/filings/{manifest.filing.accession}/sha256={updated_checksum}.json"
@@ -462,7 +462,7 @@ class FilingPackageDownloader:
         if _ARCHIVE_MANIFEST in sources:
             raise ArtifactIntegrityError(f"Package member shadows {_ARCHIVE_MANIFEST}")
         archive_path = staging / _package_archive_name(manifest)
-        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(archive_path, "w", PACKAGE_COMPRESSION) as zf:
             for name in sorted(sources):
                 _write_member(zf, name, sources[name])
             _write_member(zf, _ARCHIVE_MANIFEST, _archive_manifest_bytes(manifest))
@@ -708,7 +708,15 @@ def _expand_filing_archive(
     compression ratio, CRC) and then the filing member and byte limits. Nothing
     is published here.
     """
-    validate_zip_integrity(archive_path, settings)
+    # The filing budget bounds the bulk checks too, so an archive that declares
+    # more than the filing may hold is rejected before anything is decompressed.
+    scoped = settings.model_copy(
+        update={
+            "zip_max_members": min(settings.zip_max_members, settings.filing_max_members),
+            "zip_max_total_bytes": max(1, min(settings.zip_max_total_bytes, budget.remaining)),
+        }
+    )
+    validate_zip_integrity(archive_path, scoped)
     with zipfile.ZipFile(archive_path) as archive:
         infos = [info for info in archive.infolist() if not info.is_dir()]
         if len(infos) + 1 > settings.filing_max_members:
@@ -765,10 +773,16 @@ def filing_package_key(filing: FilingRef, archive_checksum: str) -> str:
     )
 
 
+# Package archives written since the storage audit use LZMA (about 30% smaller than
+# deflate on filing XBRL). Existing deflate archives keep their bytes and checksums;
+# both read with the standard library.
+PACKAGE_COMPRESSION = zipfile.ZIP_LZMA
+
+
 def _write_member(zf: zipfile.ZipFile, name: str, data: bytes | Path) -> None:
     info = zipfile.ZipInfo(name)
     info.date_time = (1980, 1, 1, 0, 0, 0)
-    info.compress_type = zipfile.ZIP_DEFLATED
+    info.compress_type = PACKAGE_COMPRESSION
     info.create_system = 3
     info.external_attr = 0o100644 << 16
     with zf.open(info, "w") as target:
@@ -789,7 +803,7 @@ def _safe_package_name(name: str) -> str:
 def _archive_manifest_bytes(manifest: FilingPackageManifest) -> bytes:
     """The manifest embedded in a package archive: filing and members only."""
     payload = manifest.model_dump(mode="json", include={"filing", "members"})
-    return json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _entrypoint_path(destination: Path, entrypoint: str) -> Path:

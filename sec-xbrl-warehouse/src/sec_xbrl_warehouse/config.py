@@ -52,19 +52,22 @@ class Settings(BaseSettings):
     reconciliation_max_rows: int = Field(default=50_000, gt=0)
     reconciliation_max_bytes: int = Field(default=16 * 1024**2, gt=0)
 
-    postgres_dsn: str = "postgresql+asyncpg://xbrl:xbrl_dev_password@localhost:5432/xbrl_control"
+    # Secrets are SecretStr so settings reprs, dumps, and tracebacks never print them.
+    postgres_dsn: SecretStr = SecretStr(
+        "postgresql+asyncpg://xbrl:xbrl_dev_password@localhost:5432/xbrl_control"
+    )
 
     clickhouse_host: str = "localhost"
     clickhouse_port: int = 8123
     clickhouse_database: str = "xbrl"
     clickhouse_username: str = "xbrl"
-    clickhouse_password: str = "xbrl_dev_password"
+    clickhouse_password: SecretStr = SecretStr("xbrl_dev_password")
     clickhouse_secure: bool = False
 
     object_store_backend: Literal["s3", "local"] = "s3"
     object_store_endpoint: str = "http://localhost:9002"
     object_store_access_key: str = "xbrl_minio"
-    object_store_secret_key: str = "xbrl_minio_dev_password"
+    object_store_secret_key: SecretStr = SecretStr("xbrl_minio_dev_password")
     object_store_bucket: str = "sec-xbrl"
     object_store_region: str = "us-east-1"
     object_store_secure: bool = False
@@ -108,6 +111,9 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8080, ge=1, le=65535)
     api_key: SecretStr | None = Field(default=None, min_length=32)
+    # `api serve` refuses a non-loopback bind without an API key unless this is set
+    # (Compose sets it: the container binds 0.0.0.0 behind a 127.0.0.1-only port).
+    api_allow_unauthenticated_remote: bool = False
     api_max_concurrency: int = Field(default=4, gt=0, le=64)
     api_clickhouse_username: str | None = None
     api_clickhouse_password: SecretStr | None = None
@@ -153,6 +159,38 @@ class Settings(BaseSettings):
             self.parquet_compression_level = None
         return self
 
+    def assert_production_ready(self) -> None:
+        """Reject development credentials and plaintext transport in production.
+
+        Called by the API at startup and by `doctor`; other environments pass.
+        """
+        if self.env != "production":
+            return
+        problems = []
+        secrets = {
+            "XBRL_POSTGRES_DSN": self.postgres_dsn.get_secret_value(),
+            "XBRL_CLICKHOUSE_PASSWORD": self.clickhouse_password.get_secret_value(),
+            "XBRL_OBJECT_STORE_SECRET_KEY": self.object_store_secret_key.get_secret_value(),
+            "XBRL_API_CLICKHOUSE_PASSWORD": (
+                self.api_clickhouse_password.get_secret_value()
+                if self.api_clickhouse_password is not None
+                else ""
+            ),
+        }
+        problems += [
+            f"{name} uses a development credential"
+            for name, value in secrets.items()
+            if _DEV_CREDENTIAL in value
+        ]
+        if not self.clickhouse_secure:
+            problems.append("XBRL_CLICKHOUSE_SECURE must be true")
+        if self.object_store_backend == "s3" and not (
+            self.object_store_secure or self.object_store_endpoint.startswith("https://")
+        ):
+            problems.append("the object store endpoint must use TLS")
+        if problems:
+            raise ConfigurationError("Production settings rejected: " + "; ".join(problems))
+
     def assert_sec_identity(self) -> None:
         """Reject the template SEC identity before a network request is made."""
         placeholder_tokens = ("monitored-email@example.com", "Your Name or Organization")
@@ -196,6 +234,15 @@ class Settings(BaseSettings):
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.arelle_cache_dir.mkdir(parents=True, exist_ok=True)
         self.arelle_taxonomy_packages_dir.mkdir(parents=True, exist_ok=True)
+
+
+# Every development default and `.env.example` credential contains this marker.
+_DEV_CREDENTIAL = "dev_password"
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether a bind address only accepts local connections."""
+    return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
 
 
 @lru_cache(maxsize=1)

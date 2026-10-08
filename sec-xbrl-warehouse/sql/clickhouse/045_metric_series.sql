@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.metric_series
 )
 ENGINE = ReplacingMergeTree(built_at)
 ORDER BY (cik, metric, view, period_type, period_end, ifNull(period_start, toDate('1970-01-01')), known_from)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 CREATE TABLE IF NOT EXISTS {{database}}.companies
 (

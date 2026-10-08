@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_submissions
 ENGINE = ReplacingMergeTree(_source_revision)
 PARTITION BY toYear(filed)
 ORDER BY (adsh, _artifact_id)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_tags
 (
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_tags
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 ORDER BY (tag, version, _artifact_id)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_dimensions
 (
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_dimensions
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 ORDER BY (dimh, _artifact_id)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_numeric_facts
 (
@@ -115,12 +115,13 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_numeric_facts
     _source_period LowCardinality(String),
     _source_revision UInt32,
     _row_hash FixedString(64),
-    _ingested_at DateTime64(3, 'UTC')
+    _ingested_at DateTime64(3, 'UTC'),
+    INDEX idx_adsh adsh TYPE bloom_filter GRANULARITY 1
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 PARTITION BY toYear(filed)
 ORDER BY (cik, tag, version, ddate, qtrs, uom, dimh, adsh, iprx, _artifact_id)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_text_facts
 (
@@ -153,12 +154,13 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_text_facts
     _source_period LowCardinality(String),
     _source_revision UInt32,
     _row_hash FixedString(64),
-    _ingested_at DateTime64(3, 'UTC')
+    _ingested_at DateTime64(3, 'UTC'),
+    INDEX idx_adsh adsh TYPE bloom_filter GRANULARITY 1
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 PARTITION BY toYear(filed)
 ORDER BY (cik, tag, version, ddate, qtrs, dimh, adsh, iprx, _artifact_id, _row_hash)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_renderings
 (
@@ -180,7 +182,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_renderings
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 ORDER BY (adsh, report, _artifact_id)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_presentations
 (
@@ -202,7 +204,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_presentations
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 ORDER BY (adsh, report, line, _artifact_id)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 CREATE TABLE IF NOT EXISTS {{database}}.sec_calculations
 (
@@ -222,4 +224,4 @@ CREATE TABLE IF NOT EXISTS {{database}}.sec_calculations
 )
 ENGINE = ReplacingMergeTree(_source_revision)
 ORDER BY (adsh, grp, arc, _artifact_id)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';

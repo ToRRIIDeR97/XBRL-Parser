@@ -72,6 +72,12 @@ class ClickHouseWarehouse:
     ) -> None:
         self.settings = settings
         self.database = settings.clickhouse_database
+        if read_only and not settings.api_clickhouse_username and settings.env == "production":
+            raise ConfigurationError(
+                "The API reader needs XBRL_API_CLICKHOUSE_USERNAME; it never uses the writer"
+            )
+        if read_only and not settings.api_clickhouse_username:
+            logger.warning("api_clickhouse_writer_fallback", env=settings.env)
         query_settings = (
             {
                 "readonly": 1,
@@ -98,7 +104,7 @@ class ClickHouseWarehouse:
             else settings.clickhouse_username,
             password=settings.api_clickhouse_password.get_secret_value()
             if read_only and settings.api_clickhouse_password is not None
-            else settings.clickhouse_password,
+            else settings.clickhouse_password.get_secret_value(),
             database=settings.clickhouse_database,
             secure=settings.clickhouse_secure,
             autogenerate_session_id=False,
@@ -547,15 +553,30 @@ class ClickHouseWarehouse:
         """Verify all raw entities before exposing this immutable revision to readers.
 
         Entities missing from `counts` (written before the derived entities existed)
-        are not checked.
+        are not checked. All counts run as one query; `xbrl_facts` is sorted by CIK,
+        so its count also filters on the filing's CIK.
         """
-        for entity in (entity for entity in (*XBRL_ENTITIES, "concept_labels") if entity in counts):
-            result = self.query(
-                f"SELECT count() AS count FROM xbrl_{entity} FINAL WHERE accession = %(accession)s AND extraction_revision = %(revision)s",
-                {"accession": bundle.filing.accession, "revision": bundle.extraction_revision},
-            )
-            if not result or int(result[0]["count"]) != counts[entity]:
-                raise WarehouseWriteError(f"Extraction row count mismatch for {entity}")
+        entities = [entity for entity in (*XBRL_ENTITIES, "concept_labels") if entity in counts]
+        if entities:
+            found = {
+                str(row["entity"]): int(row["count"])
+                for row in self.query(
+                    " UNION ALL ".join(
+                        f"SELECT '{entity}' AS entity, count() AS count FROM xbrl_{entity} FINAL "
+                        "WHERE accession = %(accession)s AND extraction_revision = %(revision)s"
+                        + (" AND cik = %(cik)s" if entity == "facts" else "")
+                        for entity in entities
+                    ),
+                    {
+                        "accession": bundle.filing.accession,
+                        "revision": bundle.extraction_revision,
+                        "cik": bundle.filing.cik,
+                    },
+                )
+            }
+            for entity in entities:
+                if found.get(entity) != counts[entity]:
+                    raise WarehouseWriteError(f"Extraction row count mismatch for {entity}")
         schema = pa.schema(
             [
                 pa.field("accession", pa.string(), False),
@@ -573,7 +594,7 @@ class ClickHouseWarehouse:
                         "accession": bundle.filing.accession,
                         "extraction_revision": bundle.extraction_revision,
                         "entity_counts_json": _json(counts),
-                        "metadata_json": bundle.metadata.model_dump_json(),
+                        "metadata_json": extraction_metadata_json(bundle),
                         "completed_at": bundle.metadata.extracted_at,
                     }
                 ],
@@ -719,6 +740,20 @@ def encode_hash_columns(table_name: str, table: pa.Table) -> pa.Table:
             field = pa.field(name, binary, field.nullable)
         table = table.set_column(index, field, column)
     return table
+
+
+def extraction_metadata_json(bundle: XbrlExtractionBundle) -> str:
+    """`xbrl_extractions.metadata_json`: the bundle metadata without Arelle's log.
+
+    The full validation log (about 1 MB per filing) stays in the saved extraction
+    checkpoint, and its issues are grouped in PostgreSQL `validation_issues`; here
+    only its record count is kept.
+    """
+    provenance = dict(bundle.metadata.provenance)
+    log = provenance.pop("validation_log", None)
+    if isinstance(log, list | tuple):
+        provenance["validation_log_records"] = len(log)
+    return bundle.metadata.model_copy(update={"provenance": provenance}).model_dump_json()
 
 
 def validate_canonical_facts(facts: Sequence[CanonicalFact]) -> None:
@@ -1426,7 +1461,7 @@ def _ddl_columns(statement: str) -> dict[str, tuple[str, str, str]]:
     columns = {}
     for line in body.splitlines():
         declaration = line.strip().rstrip(",")
-        if not declaration or declaration.startswith("--"):
+        if not declaration or declaration.startswith(("--", "INDEX ")):
             continue
         name, kind = declaration.split(" ", 1)
         kind = re.split(r"\s+CODEC\(", kind, maxsplit=1)[0]

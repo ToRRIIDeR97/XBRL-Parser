@@ -277,6 +277,19 @@ class CanonicalMapper:
         if batch_rows < 1:
             raise ValueError("Mapping batch size must be positive")
         approved: dict[tuple[str, str, str | None], Sequence[ConceptMapping]] = {}
+        batch_lookup = getattr(self.repository, "approved_mappings_for_concepts", None)
+        if batch_lookup is not None and isinstance(facts, Sequence):
+            # One query for every concept of the filing instead of one per concept.
+            approved = dict(
+                await batch_lookup(
+                    [
+                        (fact.concept_namespace, fact.concept_name, fact.taxonomy_version)
+                        for fact in facts
+                    ],
+                    filing.cik,
+                    filing.filed_date,
+                )
+            )
         mapped: list[CanonicalFact] = []
         # One review request per concept per filing: the first unmapped fact's
         # decision plus a count and sample fact IDs, sent after the last batch.

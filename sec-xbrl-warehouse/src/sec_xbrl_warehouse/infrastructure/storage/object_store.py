@@ -172,7 +172,7 @@ class S3ObjectStore:
             "s3",
             endpoint_url=settings.object_store_endpoint,
             aws_access_key_id=settings.object_store_access_key,
-            aws_secret_access_key=settings.object_store_secret_key,
+            aws_secret_access_key=settings.object_store_secret_key.get_secret_value(),
             region_name=settings.object_store_region,
             use_ssl=settings.object_store_secure,
         )

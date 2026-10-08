@@ -207,7 +207,10 @@ def test_reconcile_reports_bulk_absence() -> None:
     result = asyncio.run(ingestor.ingest(_filing()))
     reconciliation = result["reconciliation"]
     assert reconciliation["available"] is False
-    assert all("sec_dimensions AS d FINAL" in sql for sql in warehouse.queries[:2])
+    for sql in warehouse.queries[:2]:
+        # The filing filter runs before the latest-row LIMIT BY, not after it.
+        assert sql.index("WHERE adsh = %(accession)s") < sql.index("LIMIT 1 BY")
+        assert "FROM sec_dimensions FINAL" in sql
 
 
 def test_ingest_resumes_from_download_extract_and_silver_checkpoints(tmp_path: Path) -> None:

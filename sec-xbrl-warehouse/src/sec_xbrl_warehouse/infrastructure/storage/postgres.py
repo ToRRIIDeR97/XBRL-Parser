@@ -102,7 +102,7 @@ class PostgresControlRepository:
     ) -> None:
         self.settings = settings
         self.engine = engine or create_async_engine(
-            settings.postgres_dsn,
+            settings.postgres_dsn.get_secret_value(),
             pool_pre_ping=True,
             # Concurrent jobs each heartbeat and checkpoint on their own connection.
             pool_size=max(5, settings.worker_concurrency + 2),

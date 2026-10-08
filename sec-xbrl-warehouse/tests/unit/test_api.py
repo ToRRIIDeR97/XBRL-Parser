@@ -247,3 +247,49 @@ def test_series_routes_validate_and_resolve_tickers():
     assert response.status_code == 200 and response.json()["cik"] == 320193
     assert client.get("/v1/series?ticker=MSFT&metrics=revenue").status_code == 404
     client.close()
+
+
+def test_production_api_rejects_development_credentials_and_plaintext():
+    import pytest
+
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.exceptions import ConfigurationError
+
+    ready = {
+        "_env_file": None,
+        "env": "production",
+        "api_key": "a" * 32,
+        "api_clickhouse_username": "reader",
+        "api_clickhouse_password": "reader-secret",
+        "postgres_dsn": "postgresql+asyncpg://w:secret@db/x",
+        "clickhouse_password": "writer-secret",
+        "object_store_secret_key": "store-secret",
+        "clickhouse_secure": True,
+        "object_store_secure": True,
+    }
+    Settings(**ready).assert_production_ready()
+    for change, message in (
+        ({"api_clickhouse_password": "xbrl_api_dev_password"}, "XBRL_API_CLICKHOUSE_PASSWORD"),
+        ({"clickhouse_password": "xbrl_dev_password"}, "XBRL_CLICKHOUSE_PASSWORD"),
+        ({"clickhouse_secure": False}, "XBRL_CLICKHOUSE_SECURE"),
+        ({"object_store_secure": False}, "TLS"),
+    ):
+        with pytest.raises(ConfigurationError, match=message):
+            Settings(**{**ready, **change}).assert_production_ready()
+    app = create_app(Settings(**{**ready, "clickhouse_secure": False}))
+    with pytest.raises(ConfigurationError, match="XBRL_CLICKHOUSE_SECURE"), TestClient(app):
+        pass
+
+
+def test_settings_repr_hides_secrets():
+    from sec_xbrl_warehouse.config import Settings
+
+    settings = Settings(
+        _env_file=None,
+        postgres_dsn="postgresql+asyncpg://w:pg-secret@db/x",
+        clickhouse_password="ch-secret",
+        object_store_secret_key="s3-secret",
+    )
+    text = repr(settings) + str(settings.model_dump())
+    for secret in ("pg-secret", "ch-secret", "s3-secret"):
+        assert secret not in text

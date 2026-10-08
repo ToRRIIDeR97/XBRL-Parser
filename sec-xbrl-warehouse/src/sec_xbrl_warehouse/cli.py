@@ -13,7 +13,7 @@ import uvicorn
 from rich.console import Console
 from rich.table import Table
 
-from sec_xbrl_warehouse.config import Settings, get_settings
+from sec_xbrl_warehouse.config import Settings, get_settings, is_loopback_host
 from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.enums import DatasetKind, JobState, JobType
 from sec_xbrl_warehouse.domain.models import (
@@ -147,6 +147,13 @@ def doctor(skip_sec_identity: bool = False) -> None:
             checks.append(("SEC identity", True, settings.sec_user_agent))
         except Exception as exc:
             checks.append(("SEC identity", False, str(exc)))
+
+    if settings.env == "production":
+        try:
+            settings.assert_production_ready()
+            checks.append(("Production settings", True, "no development credentials, TLS on"))
+        except Exception as exc:
+            checks.append(("Production settings", False, str(exc)))
 
     required_configs = (
         "sources.yml",
@@ -385,9 +392,21 @@ def api_serve(
     reload: bool = False,
 ) -> None:
     settings = get_settings()
+    bind = host or settings.api_host
+    if (
+        settings.api_key is None
+        and not is_loopback_host(bind)
+        and not settings.api_allow_unauthenticated_remote
+    ):
+        console.print(
+            f"[red]Refusing to serve the API on {bind} without XBRL_API_KEY.[/red] "
+            "Bind to 127.0.0.1, set XBRL_API_KEY, or set "
+            "XBRL_API_ALLOW_UNAUTHENTICATED_REMOTE=true behind a loopback-only port."
+        )
+        raise typer.Exit(code=1)
     uvicorn.run(
         "sec_xbrl_warehouse.api.app:app",
-        host=host or settings.api_host,
+        host=bind,
         port=port or settings.api_port,
         reload=reload,
     )

@@ -42,7 +42,7 @@ class SecEgressLock:
         connect_timeout_seconds: float = 10.0,
         check_interval_seconds: float | None = None,
     ) -> None:
-        url = make_url(settings.postgres_dsn).set(drivername="postgresql")
+        url = make_url(settings.postgres_dsn.get_secret_value()).set(drivername="postgresql")
         self._dsn = url.render_as_string(hide_password=False)
         self._timeout = connect_timeout_seconds
         self._check_interval = (

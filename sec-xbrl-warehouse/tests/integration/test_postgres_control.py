@@ -804,3 +804,36 @@ async def test_manifest_pointer_and_parse_job_extraction_checkpoint(
         assert await repo.extraction_checkpoint(filing.accession, 3) == pointer
     finally:
         await repo.close()
+
+
+async def test_series_rebuild_requests_coalesce_per_company(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        first = await repo.enqueue_series_rebuild(7, 0)
+        assert await repo.enqueue_series_rebuild(7, 0) == first  # pending absorbs it
+        assert await repo.enqueue_series_rebuild(8, 0) != first  # per company
+        later = await repo.enqueue_series_rebuild(9, 3600)
+        assert await repo.claim_job("w0", 900, [JobType.REBUILD_SERIES]) is not None  # cik 7 or 8
+        running = await repo.claim_job("w1", 900, [JobType.REBUILD_SERIES])
+        assert running is not None and running.id != later  # delayed job isn't claimable yet
+        cik = running.payload["cik"]
+        # A request while the rebuild runs gets one follow-up job.
+        follow_up = await repo.enqueue_series_rebuild(cik, 0)
+        assert follow_up not in {None, running.id}
+        assert await repo.enqueue_series_rebuild(cik, 0) == follow_up
+        # A follow-up that finished while the rebuild still runs is queued again.
+        follow = await repo.claim_job("wf", 900, [JobType.REBUILD_SERIES])
+        assert follow is not None and follow.id == follow_up
+        await repo.complete_job(follow.id, {}, worker_id="wf", attempt=follow.attempts)
+        assert await repo.enqueue_series_rebuild(cik, 0) == follow_up
+        await repo.complete_job(running.id, {}, worker_id="w1", attempt=running.attempts)
+        # A completed job is reset to pending by the next request.
+        assert await repo.enqueue_series_rebuild(cik, 0) == running.id
+        claimed = {
+            job.id
+            for job in [await repo.claim_job("w2", 900, [JobType.REBUILD_SERIES]) for _ in range(2)]
+            if job is not None
+        }
+        assert claimed == {running.id, follow_up}
+    finally:
+        await repo.close()

@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, date, datetime
+from uuid import UUID
 
 import httpx
 import pytest
@@ -396,14 +397,20 @@ def test_worker_claims_only_requested_job_types() -> None:
             worker.stop()
             return None
 
-    worker = Worker(
-        Settings(env="test", worker_poll_seconds=0.01),
-        _Control(),  # type: ignore[arg-type]
-        {},
-        [JobType.INGEST_FILING],
-    )
-    asyncio.run(worker.run())
-    assert requested == [(JobType.INGEST_FILING,)]
+    for job_types, claimed in (
+        ([JobType.FETCH_FILING], (JobType.FETCH_FILING,)),
+        # Jobs that queue series rebuilds also claim them.
+        ([JobType.PARSE_FILING], (JobType.PARSE_FILING, JobType.REBUILD_SERIES)),
+    ):
+        requested.clear()
+        worker = Worker(
+            Settings(env="test", worker_poll_seconds=0.01),
+            _Control(),  # type: ignore[arg-type]
+            {},
+            job_types,
+        )
+        asyncio.run(worker.run())
+        assert requested == [claimed]
 
 
 def test_discovery_stores_companies_for_cik_and_daily_index_jobs() -> None:
@@ -904,3 +911,44 @@ def test_requires_sec_and_parse_only_services_have_no_sec_client(monkeypatch, tm
     online = asyncio.run(services(False))
     assert built == ["egress-lock"], "online parse takes the egress lock lazily, no SEC client"
     assert online["ingestor"].ensure_sec_egress is not None
+
+
+def test_parse_queues_one_coalesced_series_rebuild_job() -> None:
+    queued: list[tuple[int, float]] = []
+    rebuilt: list[int] = []
+
+    class _Ingestor:
+        async def parse(self, accession, *, extraction_revision, job_id=None):
+            return {"accession": accession, "cik": 7, "status": "complete"}
+
+    class _Control:
+        async def enqueue_series_rebuild(self, cik, delay_seconds):
+            queued.append((cik, delay_seconds))
+            return UUID(int=1)
+
+    class _Warehouse:
+        def insert_metric_series(self, table):
+            return 0
+
+    import sec_xbrl_warehouse.query.series as series
+    from sec_xbrl_warehouse.config import Settings
+
+    original = series.rebuild_metric_series
+    series.rebuild_metric_series = lambda warehouse, cik, **kwargs: rebuilt.append(cik) or 0  # type: ignore[assignment]
+    try:
+        handlers = build_handlers(
+            settings=Settings(env="test", series_rebuild_delay_seconds=30),
+            services={"ingestor": _Ingestor(), "control": _Control(), "warehouse": _Warehouse()},
+        )
+        parsed = asyncio.run(
+            handlers[JobType.PARSE_FILING](_job(JobType.PARSE_FILING, {"accession": "a"}))
+        )
+        assert parsed["series"] == {"status": "queued", "job_id": str(UUID(int=1))}
+        assert queued == [(7, 30)] and rebuilt == []
+        done = asyncio.run(
+            handlers[JobType.REBUILD_SERIES](_job(JobType.REBUILD_SERIES, {"cik": 7}))
+        )
+        assert done == {"cik": 7, "status": "rebuilt", "rows": 0}
+        assert rebuilt == [7]
+    finally:
+        series.rebuild_metric_series = original  # type: ignore[assignment]

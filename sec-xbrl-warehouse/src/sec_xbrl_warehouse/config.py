@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     sec_egress_max_defer_seconds: float = Field(default=6 * 3600.0, gt=0)
     # How often a held SEC egress lock's connection is checked before SEC requests.
     sec_egress_check_seconds: float = Field(default=30.0, gt=0)
+    # A company's series rebuild runs this long after the first filing that asks
+    # for it; later filings within the window share the same rebuild.
+    series_rebuild_delay_seconds: float = Field(default=60.0, ge=0)
     # Daily-index discovery refetches a stored company older than this.
     company_refresh_days: int = Field(default=30, ge=1)
     worker_lock_timeout_seconds: int = Field(default=900, gt=30)

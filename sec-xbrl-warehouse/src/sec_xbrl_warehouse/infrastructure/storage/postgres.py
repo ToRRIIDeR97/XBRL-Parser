@@ -326,6 +326,61 @@ class PostgresControlRepository:
             job_id: UUID | None = await session.scalar(statement)
             return job_id
 
+    async def enqueue_series_rebuild(self, cik: int, delay_seconds: float) -> UUID | None:
+        """Queue one company's series rebuild, coalescing requests per CIK.
+
+        The job (`series:<cik>`) runs `delay_seconds` after the first request, so a
+        backfill of many filings of one company rebuilds once, not once per filing.
+        A pending or retrying job absorbs the request. A completed or dead job is
+        reset to pending. While a rebuild runs, it may already have read the
+        company's facts, so one follow-up job per running attempt is queued.
+        """
+        key = f"series:{cik}"
+        payload = {"cik": cik}
+        available = func.now() + timedelta(seconds=delay_seconds)
+        async with self.sessions.begin() as session:
+            # Each running job hands requests to its own follow-up key, so the chain
+            # is at most as long as the number of rebuilds of this company running.
+            while True:
+                row = await session.scalar(
+                    select(IngestionJobRow)
+                    .where(IngestionJobRow.idempotency_key == key)
+                    .with_for_update()
+                )
+                if row is not None and row.state == JobState.RUNNING.value:
+                    key = f"series:{cik}:after:{row.id}:{row.attempts}"
+                    continue
+                if row is None:
+                    job_id: UUID | None = await session.scalar(
+                        pg_insert(IngestionJobRow)
+                        .values(
+                            job_type=JobType.REBUILD_SERIES.value,
+                            state=JobState.PENDING.value,
+                            idempotency_key=key,
+                            payload=payload,
+                            available_at=available,
+                        )
+                        .on_conflict_do_nothing(index_elements=[IngestionJobRow.idempotency_key])
+                        .returning(IngestionJobRow.id)
+                    )
+                    if job_id is None:  # a concurrent request inserted it first
+                        job_id = await session.scalar(
+                            select(IngestionJobRow.id).where(IngestionJobRow.idempotency_key == key)
+                        )
+                    return job_id
+                if row.state not in {JobState.PENDING.value, JobState.RETRY.value}:
+                    row.state = JobState.PENDING.value
+                    row.attempts = 0
+                    row.available_at = available
+                    row.result = None
+                    row.last_error = None
+                    row.completed_at = None
+                    row.locked_at = None
+                    row.locked_by = None
+                    row.heartbeat_at = None
+                    row.deferred_since = None
+                return row.id
+
     async def published_filing_revisions(
         self, accessions: Sequence[str] | None = None
     ) -> list[tuple[str, int]]:

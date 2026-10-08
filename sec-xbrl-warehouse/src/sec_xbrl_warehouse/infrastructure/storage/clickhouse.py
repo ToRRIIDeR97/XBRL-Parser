@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack
@@ -72,6 +73,9 @@ class ClickHouseWarehouse:
     ) -> None:
         self.settings = settings
         self.database = settings.clickhouse_database
+        # `taxonomy_concepts` row hashes inserted by this process (see insert_xbrl_bundle).
+        self._taxonomy_rows: set[str] = set()
+        self._taxonomy_lock = threading.Lock()
         if read_only and not settings.api_clickhouse_username and settings.env == "production":
             raise ConfigurationError(
                 "The API reader needs XBRL_API_CLICKHOUSE_USERNAME; it never uses the writer"
@@ -511,7 +515,8 @@ class ClickHouseWarehouse:
             )
         )
         # Standard concepts are shared across filings (not part of the revision's
-        # published row counts).
+        # published row counts). A row's hash covers the stored row alone, so a row
+        # this process already inserted is skipped: re-inserting it changes nothing.
         for table in iter_xbrl_tables(
             bundle,
             "taxonomy_concepts",
@@ -519,7 +524,18 @@ class ClickHouseWarehouse:
             self.settings.arrow_batch_bytes,
             target="clickhouse",
         ):
-            self._insert_arrow("taxonomy_concepts", table)
+            hashes = table.column("_row_hash").to_pylist()
+            with self._taxonomy_lock:
+                fresh = [hash_ not in self._taxonomy_rows for hash_ in hashes]
+            if not any(fresh):
+                continue
+            self._insert_arrow("taxonomy_concepts", table.filter(pa.array(fresh)))
+            with self._taxonomy_lock:
+                if len(self._taxonomy_rows) > _TAXONOMY_ROW_CACHE:
+                    self._taxonomy_rows.clear()
+                self._taxonomy_rows.update(
+                    hash_ for hash_, new in zip(hashes, fresh, strict=True) if new
+                )
         return counts
 
     def insert_canonical_facts(self, facts: Sequence[CanonicalFact]) -> int:
@@ -671,6 +687,10 @@ class ClickHouseWarehouse:
         return tuple(part.strip() for part in cleaned.split(";") if part.strip())
 
 
+# Upper bound on remembered `taxonomy_concepts` row hashes per process (each pinned
+# taxonomy year holds about 20,000 concepts).
+_TAXONOMY_ROW_CACHE = 1_000_000
+
 # SHA-256 identity and row hashes stored as FixedString(32) bytes in ClickHouse; the
 # v_* views return lower-case hex. SEC bulk tables keep their hex `_row_hash`.
 HASH_COLUMNS: dict[str, frozenset[str]] = {
@@ -786,7 +806,8 @@ def iter_xbrl_tables(
     clickhouse = target == "clickhouse"
     build = {
         "contexts": contexts_table,
-        "concepts": concepts_table if clickhouse else silver_concepts_table,
+        # ClickHouse rows are selected below, so both targets share the builder.
+        "concepts": silver_concepts_table,
         "taxonomy_concepts": taxonomy_concepts_table,
         "concept_labels": concept_labels_table,
         "facts": facts_table if clickhouse else silver_facts_table,
@@ -808,9 +829,14 @@ def iter_xbrl_tables(
             yield from bounded(table.slice(0, middle))
             yield from bounded(table.slice(middle))
 
+    selected = xbrl_entity_records(bundle, entity)
+    if clickhouse and entity == "concepts":
+        # Only extension concepts go to `xbrl_concepts`; filter before building and
+        # hashing rows instead of building the whole DTS and discarding most of it.
+        selected = tuple(concept for concept in selected if concept.is_extension)
     records: list[Any] = []
     size = 0
-    for record in xbrl_entity_records(bundle, entity):
+    for record in selected:
         record_size = _record_size(record)
         if record_size > batch_bytes:
             raise WarehouseWriteError(f"Single {entity} record exceeds Arrow byte budget")

@@ -205,12 +205,23 @@ class IncrementalFilingIngestor:
                     await self._save(job_id, "package", manifest.model_dump(mode="json"))
                     if self.ensure_sec_egress is not None and not self.settings.arelle_offline:
                         await self.ensure_sec_egress()
+                    # An extractor that can write the checkpoint file itself (Arelle)
+                    # serializes the bundle once; it is uploaded below as written.
+                    checkpoint_path = staging / "extraction.json.zst"
+                    extra = (
+                        {"checkpoint_path": checkpoint_path}
+                        if self.object_store is not None
+                        and "checkpoint_path"
+                        in inspect.signature(self.extractor.extract).parameters
+                        else {}
+                    )
                     with STAGE_LATENCY.labels(pipeline="filing", stage="extract").time():
                         bundle = await asyncio.to_thread(
                             self.extractor.extract,
                             entrypoint,
                             filing,
                             extraction_revision=extraction_revision,
+                            **extra,
                         )
                     if (
                         bundle.extraction_revision != extraction_revision
@@ -227,10 +238,11 @@ class IncrementalFilingIngestor:
                         ROWS_PARSED.labels(source="arelle", table=entity).inc(count)
                     if self.object_store is not None:
                         # zstd-compressed; the checksum is of the stored object.
-                        path = staging / "extraction.json.zst"
-                        await asyncio.to_thread(
-                            write_json, bundle, path, self.settings.extraction_max_bytes
-                        )
+                        path = checkpoint_path
+                        if not path.is_file():
+                            await asyncio.to_thread(
+                                write_json, bundle, path, self.settings.extraction_max_bytes
+                            )
                         checksum = await asyncio.to_thread(sha256_file, path)
                         key = f"silver/xbrl/extractions/accession={filing.accession}/revision={extraction_revision}/sha256={checksum}.json.zst"
                         await asyncio.to_thread(

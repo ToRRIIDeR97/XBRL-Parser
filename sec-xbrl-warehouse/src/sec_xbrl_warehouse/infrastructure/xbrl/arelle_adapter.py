@@ -18,6 +18,8 @@ from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import BaseHandler
 
+from pydantic import SecretStr
+
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.enums import FactValueKind, PeriodKind, RelationshipType
@@ -80,6 +82,8 @@ class ArelleExtractor:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._idle: list[_ArelleChild] = []
+        self._idle_lock = threading.Lock()
 
     def extract(
         self,
@@ -87,30 +91,40 @@ class ArelleExtractor:
         filing: FilingRef,
         *,
         extraction_revision: int = 1,
+        checkpoint_path: Path | None = None,
     ) -> XbrlExtractionBundle:
-        """Keep the parser's model in a killable process with a finite lifetime."""
+        """Keep the parser's model in a killable process with a finite lifetime.
+
+        Extractions run in warm child processes, each reused for up to
+        `XBRL_ARELLE_CHILD_MAX_TASKS` successful extractions: Arelle, its plugins,
+        and taxonomy package verification load once per child instead of once per
+        filing, while every filing still gets a fresh controller and model. A child
+        that times out, fails, or crashes is never reused. The child writes the
+        bundle as zstd JSON; with `checkpoint_path` that file is kept for the caller
+        (the saved extraction checkpoint), so the bundle is serialized only once.
+        """
         if not entrypoint.is_file():
             raise FileNotFoundError(entrypoint)
         self.settings.ensure_directories()
         with tempfile.TemporaryDirectory(prefix="arelle-", dir=self.settings.temp_dir) as directory:
-            output = Path(directory) / "bundle.json"
+            output = checkpoint_path or Path(directory) / "bundle.json.zst"
             error_path = Path(directory) / "error.json"
-            process = multiprocessing.get_context("spawn").Process(
-                target=_extract_child,
-                args=(
-                    self.settings,
-                    entrypoint.resolve(),
-                    filing,
-                    extraction_revision,
-                    output,
-                    error_path,
-                ),
-            )
-            process.start()
+            child = self._checkout()
+            reusable = False
             try:
-                process.join(self.settings.arelle_timeout_seconds)
-                if process.is_alive():
+                child.connection.send(
+                    (entrypoint.resolve(), filing, extraction_revision, output, error_path)
+                )
+                if not child.connection.poll(self.settings.arelle_timeout_seconds):
                     raise XbrlExtractionError("Arelle exceeded its extraction time budget")
+                try:
+                    child.connection.recv()
+                except (EOFError, OSError):
+                    child.process.join(5)
+                    raise XbrlExtractionError(
+                        f"Arelle process failed (exit {child.process.exitcode}); "
+                        "check its memory budget"
+                    ) from None
                 if error_path.is_file():
                     error = json.loads(error_path.read_bytes())
                     failure = XbrlExtractionError(error["message"])
@@ -118,19 +132,41 @@ class ArelleExtractor:
                         ValidationIssue.model_validate(item) for item in error["issues"]
                     )
                     raise failure
-                if process.exitcode != 0 or not output.is_file():
-                    raise XbrlExtractionError(
-                        f"Arelle process failed (exit {process.exitcode}); check its memory budget"
-                    )
+                if not output.is_file():
+                    raise XbrlExtractionError("Arelle process wrote no extraction")
+                child.tasks += 1
+                reusable = child.tasks < self.settings.arelle_child_max_tasks
                 return read_bundle(output, self.settings.extraction_max_bytes)
             finally:
-                if process.is_alive():
-                    process.terminate()
-                    process.join(5)
-                    if process.is_alive():
-                        process.kill()
-                        process.join()
-                process.close()
+                if reusable:
+                    with self._idle_lock:
+                        self._idle.append(child)
+                else:
+                    child.stop()
+
+    def close(self) -> None:
+        """Stop idle Arelle children (running ones stop when their extraction ends)."""
+        with self._idle_lock:
+            idle, self._idle = self._idle, []
+        for child in idle:
+            child.stop()
+
+    def _checkout(self) -> _ArelleChild:
+        with self._idle_lock:
+            while self._idle:
+                child = self._idle.pop()
+                if child.process.is_alive():
+                    return child
+                child.stop()
+        connection, child_end = multiprocessing.get_context("spawn").Pipe()
+        process = multiprocessing.get_context("spawn").Process(
+            target=_extract_child,
+            args=(child_settings(self.settings), child_end),
+            daemon=True,
+        )
+        process.start()
+        child_end.close()
+        return _ArelleChild(process, connection)
 
     def _extract(
         self, entrypoint: Path, filing: FilingRef, extraction_revision: int
@@ -287,7 +323,7 @@ class ArelleExtractor:
                 )
             prefix_sources: list[TaxonomyPackage] = []
             for package in packages:
-                status = check_package(package)
+                status = _check_package_once(package)
                 if status.state == "disabled":
                     continue
                 if status.state == "mapping_missing":
@@ -760,29 +796,118 @@ class ArelleExtractor:
 # ---------------------------------------------------------------------------
 
 
-def _extract_child(
-    settings: Settings,
-    entrypoint: Path,
-    filing: FilingRef,
-    revision: int,
-    output: Path,
-    error_path: Path,
-) -> None:
-    try:
-        # ponytail: Linux enforces address-space limits; macOS/Windows use the Compose memory limit.
-        if sys.platform == "linux":
-            import resource
+class _ArelleChild:
+    """A warm extraction process and the parent's end of its task pipe."""
 
-            resource.setrlimit(resource.RLIMIT_AS, (settings.arelle_memory_limit_bytes,) * 2)
-        with _ARELLE_LOCK:
-            bundle = ArelleExtractor(settings)._extract(entrypoint, filing, revision)
-        write_json(bundle, output, settings.extraction_max_bytes)
-    except Exception as exc:
-        write_json(
-            {"message": str(exc), "issues": getattr(exc, "validation_issues", ())},
-            error_path,
-            settings.extraction_max_bytes,
-        )
+    def __init__(self, process: Any, connection: Any) -> None:
+        self.process = process
+        self.connection = connection
+        self.tasks = 0
+
+    def stop(self) -> None:
+        with contextlib.suppress(Exception):
+            self.connection.close()
+        if self.process.is_alive():
+            self.process.terminate()
+            self.process.join(5)
+            if self.process.is_alive():
+                self.process.kill()
+                self.process.join()
+        with contextlib.suppress(Exception):
+            self.process.close()
+
+
+# Settings and environment variables the parser child must not hold: it parses
+# untrusted filings, so it gets no database, object-store, or API credentials.
+_CHILD_SECRET_ENV = re.compile(r"(PASSWORD|SECRET|DSN|API_KEY|ACCESS_KEY)", re.IGNORECASE)
+
+
+def child_settings(settings: Settings) -> Settings:
+    """`settings` without credentials, for the Arelle child process."""
+    return settings.model_copy(
+        update={
+            "postgres_dsn": SecretStr(""),
+            "clickhouse_password": SecretStr(""),
+            "object_store_access_key": "",
+            "object_store_secret_key": SecretStr(""),
+            "api_key": None,
+            "api_clickhouse_password": None,
+        }
+    )
+
+
+def _extract_child(settings: Settings, connection: Any) -> None:
+    """Child loop: run one extraction per task until the parent closes the pipe."""
+    import os
+
+    for name in [name for name in os.environ if _CHILD_SECRET_ENV.search(name)]:
+        del os.environ[name]
+    # ponytail: Linux enforces address-space limits; macOS/Windows use the Compose memory limit.
+    if sys.platform == "linux":
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_AS, (settings.arelle_memory_limit_bytes,) * 2)
+    first = True
+    while True:
+        try:
+            task = connection.recv()
+        except (EOFError, OSError):
+            return
+        entrypoint, filing, revision, output, error_path = task
+        try:
+            if not first:
+                _reset_arelle_registries()
+            first = False
+            with _ARELLE_LOCK:
+                bundle = ArelleExtractor(settings)._extract(entrypoint, filing, revision)
+            write_json(bundle, output, settings.extraction_max_bytes)
+        except Exception as exc:
+            write_json(
+                {"message": str(exc), "issues": getattr(exc, "validation_issues", ())},
+                error_path,
+                settings.extraction_max_bytes,
+            )
+        connection.send("done")
+
+
+def _reset_arelle_registries() -> None:
+    """Clear Arelle's process-global plugin and package registries.
+
+    `PluginManager.init` and `PackageManager.init` only build a configuration when
+    none exists, so a reused process would otherwise start a filing with the
+    previous filing's registrations; after this it starts like a new process.
+    """
+    from arelle import PackageManager, PluginManager
+
+    PluginManager.close()
+    PackageManager.reset()
+
+
+# Taxonomy packages verified in this process, keyed by file identity and pin. A warm
+# Arelle child hashes each package once instead of once per filing; a replaced file
+# changes size, mtime, or inode and is verified again.
+_VERIFIED_PACKAGES: dict[tuple[object, ...], Any] = {}
+
+
+def _check_package_once(package: TaxonomyPackage) -> Any:
+    if package.path is None or not package.enabled or not package.path.is_file():
+        return check_package(package)
+    stat = package.path.stat()
+    key = (
+        str(package.path),
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ino,
+        package.sha256,
+        package.kind,
+        package.mappings,
+    )
+    status = _VERIFIED_PACKAGES.get(key)
+    if status is None:
+        status = check_package(package)
+        if status.state == "ok":
+            _VERIFIED_PACKAGES[key] = status
+    return status
 
 
 # Arelle logs these and keeps going, silently omitting facts whose schemas

@@ -89,6 +89,7 @@ async def runtime_services(
     await asyncio.to_thread(store.ensure_bucket)
     control.object_store = store  # parse jobs load stored manifests
     warehouse = await asyncio.to_thread(ClickHouseWarehouse, settings)
+    extractor = ArelleExtractor(settings)
     lazy_egress: LazyEgress | None = None
     try:
         async with contextlib.AsyncExitStack() as stack:
@@ -138,7 +139,7 @@ async def runtime_services(
                 "ingestor": IncrementalFilingIngestor(
                     control,
                     FilingPackageDownloader(settings, http, store),
-                    ArelleExtractor(settings),
+                    extractor,
                     writer,
                     warehouse,
                     settings=settings,
@@ -164,6 +165,7 @@ async def runtime_services(
     finally:
         if lazy_egress is not None:
             await lazy_egress.close()
+        await asyncio.to_thread(extractor.close)
         await asyncio.to_thread(warehouse.close)
 
 

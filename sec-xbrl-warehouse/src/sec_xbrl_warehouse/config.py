@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     )
     arelle_timeout_seconds: float = Field(default=600, gt=0)
     arelle_memory_limit_bytes: int = Field(default=2 * 1024**3, gt=0)
+    # Successful extractions per warm Arelle child before it is replaced (1 = a new
+    # process per filing, the earlier behaviour).
+    arelle_child_max_tasks: int = Field(default=20, ge=1, le=1000)
     extraction_max_bytes: int = Field(default=512 * 1024**2, gt=0)
 
     worker_id: str = "local-worker"

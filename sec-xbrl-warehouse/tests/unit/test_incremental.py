@@ -268,6 +268,36 @@ def test_extraction_checkpoint_streams_and_round_trips(tmp_path, monkeypatch):
     assert not path.exists()
 
 
+def test_extraction_json_bytes_match_the_field_by_field_encoding(tmp_path):
+    """Records are serialized whole now; saved checkpoints must keep their bytes."""
+    from pydantic import BaseModel
+    from pydantic_core import to_json
+
+    from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import write_json
+
+    def field_by_field(value):
+        if isinstance(value, BaseModel):
+            value = {name: getattr(value, name) for name in type(value).model_fields}
+        if isinstance(value, dict):
+            items = [to_json(str(key)) + b":" + field_by_field(item) for key, item in value.items()]
+            return b"{" + b",".join(items) + b"}"
+        if isinstance(value, (tuple, list)):
+            return b"[" + b",".join(field_by_field(item) for item in value) + b"]"
+        return to_json(value)
+
+    bundle = _bundle()
+    bundle = bundle.model_copy(
+        update={
+            "metadata": bundle.metadata.model_copy(
+                update={"provenance": {"validation_log": [{"level": "info", "args": [1, None]}]}}
+            )
+        }
+    )
+    path = tmp_path / "bundle.json"
+    write_json(bundle, path, 1_000_000)
+    assert path.read_bytes() == field_by_field(bundle)
+
+
 def test_entity_tables_are_built_in_bounded_batches():
     from sec_xbrl_warehouse.exceptions import WarehouseWriteError
     from sec_xbrl_warehouse.infrastructure.storage.clickhouse import iter_xbrl_tables

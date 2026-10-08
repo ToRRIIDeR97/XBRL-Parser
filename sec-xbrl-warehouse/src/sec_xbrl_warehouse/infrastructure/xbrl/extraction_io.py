@@ -11,8 +11,16 @@ from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
 
 
-def _json_chunks(value: Any) -> Iterator[bytes]:
+def _json_chunks(value: Any, *, top: bool = True) -> Iterator[bytes]:
+    """JSON for `value`, expanding only the top-level model and its containers.
+
+    Nested models (facts, contexts, ...) are serialized whole by pydantic-core,
+    which gives the same bytes as walking their fields one scalar at a time.
+    """
     if isinstance(value, BaseModel):
+        if not top:
+            yield to_json(value)
+            return
         value = {name: getattr(value, name) for name in type(value).model_fields}
     if isinstance(value, dict):
         yield b"{"
@@ -20,14 +28,14 @@ def _json_chunks(value: Any) -> Iterator[bytes]:
             if index:
                 yield b","
             yield to_json(str(key)) + b":"
-            yield from _json_chunks(item)
+            yield from _json_chunks(item, top=False)
         yield b"}"
     elif isinstance(value, (tuple, list)):
         yield b"["
         for index, item in enumerate(value):
             if index:
                 yield b","
-            yield from _json_chunks(item)
+            yield from _json_chunks(item, top=False)
         yield b"]"
     else:
         yield to_json(value)

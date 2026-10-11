@@ -17,11 +17,16 @@ def report_package(lei: str = LEI_A, period: str = "2022-03-31") -> bytes:
     """A minimal ESEF report package: top folder, META-INF, one inline XBRL report."""
     buffer = io.BytesIO()
     root = f"{lei}-{period}-ESEF-GB-0"
+    entries = {
+        f"{root}/META-INF/reportPackage.json": '{"documentInfo": {"documentType": "https://xbrl.org/report-package/2023/xbri"}}',
+        f"{root}/META-INF/taxonomyPackage.xml": "<taxonomyPackage/>",
+        f"{root}/reports/{lei}-{period}-en.xhtml": "<html xmlns:ix='http://www.xbrl.org/2013/inlineXBRL'/>",
+        f"{root}/www.example.com/2022/ext.xsd": "<schema/>",
+    }
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(f"{root}/META-INF/reportPackage.json", '{"documentInfo": {"documentType": "https://xbrl.org/report-package/2023/xbri"}}')
-        archive.writestr(f"{root}/META-INF/taxonomyPackage.xml", "<taxonomyPackage/>")
-        archive.writestr(f"{root}/reports/{lei}-{period}-en.xhtml", "<html xmlns:ix='http://www.xbrl.org/2013/inlineXBRL'/>")
-        archive.writestr(f"{root}/www.example.com/2022/ext.xsd", "<schema/>")
+        for name, text in entries.items():
+            # Fixed timestamps: the same arguments must always give the same bytes.
+            archive.writestr(zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0)), text)
     return buffer.getvalue()
 
 

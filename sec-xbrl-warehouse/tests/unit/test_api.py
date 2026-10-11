@@ -293,3 +293,111 @@ def test_settings_repr_hides_secrets():
     text = repr(settings) + str(settings.model_dump())
     for secret in ("pg-secret", "ch-secret", "s3-secret"):
         assert secret not in text
+
+
+def test_disclosure_routes_validate_filter_and_shape_rows():
+    from datetime import date
+    from decimal import Decimal
+
+    import pytest
+
+    from sec_xbrl_warehouse.config import Settings
+
+    class DisclosureWarehouse(Warehouse):
+        def query(self, sql, parameters=None):
+            self.queries.append((sql, parameters))
+            if "v_cover_pages_latest" in sql:
+                return [
+                    {
+                        "accession": parameters["accession"],
+                        "amendment": 0,
+                        "shares_outstanding": Decimal("15000000000.000000000000000000"),
+                        "public_float": Decimal("2.500000000000000000"),
+                        "security_members": ["us-gaap:CommonStockMember", "ex:NotesMember"],
+                        "security_titles": ["Common Stock", "Notes"],
+                        "security_symbols": ["AAPL", None],
+                        "security_exchanges": ["NASDAQ", None],
+                    }
+                ]
+            if "v_segment_facts_latest" in sql:
+                return [
+                    {
+                        "fact_id": "a" * 32,
+                        "kind": "segment",
+                        "member_axes": ["segment", "product"],
+                        "member_qnames": ["ex:AmericasMember", "us-gaap:ProductMember"],
+                        "member_labels": ["Americas", "Products"],
+                        "value": Decimal("178000.000000000000000000"),
+                        "period_end": date(2025, 9, 27),
+                        "is_elimination": 1,
+                    }
+                ]
+            return []
+
+    warehouse = DisclosureWarehouse()
+    app = create_app(Settings(_env_file=None, env="test", api_key="k" * 32))
+    app.dependency_overrides[get_query_service] = lambda: QueryService(warehouse)
+    client = TestClient(app, raise_server_exceptions=False)
+    base = "/v1/filings/0000320193-25-000079"
+    assert client.get(f"{base}/segments").status_code == 401
+    client.headers["Authorization"] = "Bearer " + "k" * 32
+    for path in [
+        f"{base}/segments?include_eliminations=maybe",
+        f"{base}/segments?concept=us-gaap:Revenues'%20OR%201=1--",
+        f"{base}/segments?offset=10001",
+        f"{base}/segments?offset=-1",
+        f"{base}/text-blocks?policy=maybe",
+        f"{base}/text-blocks?include_text=true&limit=101",
+        f"{base}/text-blocks?concept=us-gaap:{'A' * 512}",
+    ]:
+        assert client.get(path).status_code == 422, path
+    assert not warehouse.queries
+    with pytest.raises(ValueError):
+        QueryService(warehouse).text_blocks(base[12:], include_text=True, limit=101)
+
+    cover = client.get(f"{base}/cover-page").json()
+    assert cover["amendment"] is False
+    assert (cover["shares_outstanding"], cover["public_float"]) == (15_000_000_000, 2.5)
+    assert cover["securities"][1] == {
+        "member": "ex:NotesMember",
+        "title": "Notes",
+        "symbol": None,
+        "exchange": None,
+    }
+    assert "security_members" not in cover
+
+    response = client.get(
+        f"{base}/segments?kind=segment&kind=product&concept=us-gaap:Revenues"
+        "&include_eliminations=false&limit=2&offset=4"
+    )
+    sql, parameters = warehouse.queries[-1]
+    assert "hasAny(member_axes, %(kinds)s)" in sql and "is_elimination = 0" in sql
+    assert parameters == {
+        "accession": "0000320193-25-000079",
+        "kinds": ["product", "segment"],
+        "concept": "us-gaap:Revenues",
+        "limit": 2,
+        "offset": 4,
+    }
+    body = response.json()
+    assert (body["limit"], body["offset"], body["count"]) == (2, 4, 1)
+    item = body["items"][0]
+    assert item["members"][1] == {
+        "kind": "product",
+        "qname": "us-gaap:ProductMember",
+        "label": "Products",
+    }
+    assert item["is_elimination"] is True and item["value"] == 178000
+    assert item["period_end"] == "2025-09-27"
+
+    body = client.get(f"{base}/text-blocks?policy=false&include_text=true&limit=100").json()
+    sql, parameters = warehouse.queries[-1]
+    assert "value_text AS text" in sql and parameters["policy"] == 0
+    assert body["limit"] == 100
+    client.get(f"{base}/text-blocks?include_text=true")
+    assert warehouse.queries[-1][1]["limit"] == 100
+    client.get(f"{base}/text-blocks")
+    sql, parameters = warehouse.queries[-1]
+    assert "value_text AS text" not in sql and parameters["limit"] == 200
+    assert "is_policy" not in parameters
+    client.close()

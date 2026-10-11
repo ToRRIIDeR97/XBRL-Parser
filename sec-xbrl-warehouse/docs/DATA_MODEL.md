@@ -341,6 +341,29 @@ SELECT concept_name, value_text
 FROM xbrl.v_text_blocks_latest WHERE accession = '0000320193-25-000079' AND is_policy;
 ```
 
+The query API serves the same views per filing (bearer token when `XBRL_API_KEY` is
+set):
+
+```bash
+# Cover page; `securities` lists {member, title, symbol, exchange}. 404 without a row.
+curl -H "Authorization: Bearer $XBRL_API_KEY" \
+  http://127.0.0.1:8080/v1/filings/0000320193-25-000079/cover-page
+# Segment revenue. `kind` repeats (segment, product, geography, consolidation) and
+# matches any member; include_eliminations=false drops elimination rows;
+# limit 1-10,000 (default 1,000), offset 0-10,000.
+curl -H "Authorization: Bearer $XBRL_API_KEY" \
+  "http://127.0.0.1:8080/v1/filings/0000320193-25-000079/segments?kind=segment&concept=us-gaap:Revenues"
+# Accounting policies with their HTML. policy=false lists the other text blocks;
+# limit 1-1,000 (default 200), at most 100 with include_text=true (default 100).
+curl -H "Authorization: Bearer $XBRL_API_KEY" \
+  "http://127.0.0.1:8080/v1/filings/0000320193-25-000079/text-blocks?policy=true&include_text=true"
+```
+
+List responses are `{accession, items, count, limit, offset}`. Segment items carry
+`kind` (the stored `axis`) and `members` (`[{kind, qname, label}]`); text-block items
+carry `text_length` in characters and `text` only on request. Decimals are JSON
+numbers: exact when integral, otherwise the nearest double.
+
 ## Canonical layer
 
 ### `canonical_metrics` in PostgreSQL

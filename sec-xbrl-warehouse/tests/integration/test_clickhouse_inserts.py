@@ -301,6 +301,14 @@ def test_disclosures_keep_recast_filings_and_latest_revision_only(
                     True,
                     (segment,),
                 ),
+                (
+                    "http://fasb.org/us-gaap/2025",
+                    "RevenueRecognitionPolicyTextBlock",
+                    "us-gaap:RevenueRecognitionPolicyTextBlock",
+                    f"<p>{value}</p>",
+                    False,
+                    (),
+                ),
             )
         )
         return XbrlExtractionBundle(
@@ -356,6 +364,20 @@ def test_disclosures_keep_recast_filings_and_latest_revision_only(
         "SELECT count() AS n FROM v_cover_pages_latest WHERE cik = 11 AND document_type = '10-K'"
     )
     assert covers[0]["n"] == 2
+
+    # The API's query methods see only the republished revision.
+    from sec_xbrl_warehouse.query.service import QueryService
+
+    service = QueryService(warehouse)
+    cover = service.cover_page("0000000011-26-000001")
+    assert cover is not None and cover["extraction_revision"] == 2
+    segments = service.segment_facts("0000000011-26-000001", kinds=["segment"])
+    assert [(row["member_label"], row["value"]) for row in segments] == [("CloudSegment", 101)]
+    texts = service.text_blocks("0000000011-26-000001", include_text=True)
+    assert [(row["is_policy"], row["text"], row["text_length"]) for row in texts] == [
+        (True, "<p>101</p>", 10)
+    ]
+    assert service.segment_facts("0000000011-26-000001", kinds=["geography"]) == []
 
 
 def test_series_rebuild_versions_priority_and_company_mirror(

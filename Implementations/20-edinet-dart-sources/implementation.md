@@ -460,3 +460,104 @@ to split windows by hand.
 | `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 52 passed |
 
 ### Verifier record
+
+**Verdict: ACCEPT** candidate 5627947 (11 October 2026), with two non-blocking
+follow-ups below.
+
+Setup: branch `verify/20-edinet-dart-sources` at 5627947. `verification/` was copied
+from the main checkout. `acceptance/` matches the main checkout's copy (`diff -r`), and
+so do lines 1–164 of this file, everything above "Completion evidence" (`cmp`). The
+main checkout's `.env` and `.venv` are symlinked and not committed. No container was
+touched, alembic wasn't run, nothing reached a regulator, and no API key was used.
+
+| Command (from `sec-xbrl-warehouse/`) | Result |
+| --- | --- |
+| verification set | 9 passed (includes `test_ac4_dart_long_window_is_split`) |
+| acceptance set, 3 runs | 8 passed every run |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` / `ruff format --check .` | pass / 192 files formatted |
+| `mypy src` | pass (89 files) |
+| `pytest -m "not integration"` with the live `.env` | 553 passed, 1 failed (`test_repository_registry_entries_are_on_allowed_hosts`), 1 skipped |
+| same with `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` set to the new default | 554 passed, 1 skipped (sec-2024.zip not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 52 passed |
+
+The single failure with the live `.env` comes from the `.env` itself, which pins the
+pre-plan-19 host list. The new default adds only `disclosure.edinet-fsa.go.jp` (where
+the EDINET taxonomy namespaces and schemas live) and `disclosure2dl.edinet-fsa.go.jp`
+(the FSA's download host). Neither is a source API host, and both stay behind
+`reject_unlisted_hosts`/`require_https`. No DART host was added. That's correct while
+the DART namespace host is unconfirmed.
+
+**Review of `6e8e5d3..5627947`.** I also ran 25 throwaway adversarial probes; they
+aren't committed.
+
+- Secrets (AC-3) hold. Keys only appear in the outgoing query. I sent HTTP
+  401/403/404/500/503 on the list call, a same-host redirect whose `Location` carries
+  the key followed by a 500, a redirect to a foreign host (refused, and only the
+  EDINET host was ever contacted), and transport errors that echo the full URL, a
+  lower-case `subscription-key=` and a `%3D`-encoded form, on discover and on both
+  downloads. In every case the exception chain (str and args), structlog output,
+  stdlib records (`httpx` and `httpcore` at DEBUG), stored objects and their paths,
+  the manifest JSON, `Settings` repr and dump, and the Prometheus exposition held no
+  key. A missing or blank key raises `ConfigurationError` with zero requests, for both
+  discover and download on both sources. The Arelle child gets `child_settings` with
+  both keys blanked, and `_CHILD_SECRET_ENV` (`API_KEY`) strips the environment
+  variables. Compose blanks both keys on `worker-parse`, and `api` never receives
+  `.env`.
+- SEC and ESEF are unchanged. Their policies have empty `secret_params`, so
+  `_show`/`_scrub` are identities, the sidecar URL comparison is unchanged, and the
+  httpx log filter is only installed for keyed policies. The full unit and
+  integration suites pass. The four policies' host sets are disjoint, and neither new
+  API host is a taxonomy host.
+- Discovery is correct:
+  - EDINET loops one list per day, oldest first, with `type=2`. It needs both bounds
+    and an inclusive span of at most `edinet_max_days`. It filters on `xbrlFlag`,
+    `withdrawalStatus`, hidden and edit-notice records, forms and entity.
+  - DART maps the report codes (11013/11014 only for `.03`/`.09`) and amendments. It
+    skips `rm` 철. Status 013 gives an empty search and the next window still runs,
+    020 raises `SourceRateLimited` (retryable, `retry_at` honoured by the worker),
+    and any other status raises `SourceAccessError`. It pages each window to
+    `total_page`. `search_windows` tiles 3,000 random ranges with no gap or overlap,
+    keeps every non-final window maximal, and stays under three calendar months.
+    With a corp_code it sends a single window.
+- Package and fiscal rules hold. Traversal, case-duplicate, missing-instance and
+  several-instance zips, and AuditDoc-only or nested PublicDoc instances are all
+  rejected and quarantined under `quarantine/<source>/filings/<accession>/`. Error
+  bodies store nothing. A re-download reuses the stored package. Fiscal focus follows
+  the contract. Prefixes fail closed (`coverage_gaps` test).
+- The edited existing line (`assert set(policies) == {"sec", "esef", "edinet", "dart"}`
+  in `test_esef_source.py`) is acceptable. Registering the two new policies, which
+  AC-7 requires, has to change it. It's still an exact-set assertion, and nothing
+  else in the test was loosened.
+- I couldn't spot-check the step-0 claims against the FSA/FSS pages this session
+  because the web tool was unavailable. The claims match the plan-author correction
+  and the accepted contract.
+
+**Rulings on deviations.**
+
+1. Manual DART window split: superseded by round 2, which implements the contract's
+   automatic split. Resolved.
+2. Live `.env` host list: accepted. It's an operator `.env` update, already listed in
+   HANDOFF and in "Left for the operator".
+3. Additions beyond the contract: accepted. `keyed.py`, `secret_params` with
+   `redact_params`, the policy helpers, the hidden/edit-notice/`rm` skips,
+   `[첨부정정]` as an amendment, `retry_at`, the entity and bound checks, child and
+   Compose key blanking, and quarantine all tighten behavior or follow plan 19's
+   precedent.
+4. No digest from either API, so the package is re-downloaded and reused by bytes:
+   accepted.
+
+**Non-blocking follow-ups.**
+
+- `sources/dart.report_code` sets `is_amendment` whenever a tag contains `정정`, so
+  `[정정명령부과]사업보고서 (2023.12)` and `[정정제출요구]…` return `is_amendment=True`.
+  The OpenDART guide describes those two tags as FSS correction orders on the report
+  itself, not as filed corrections. This goes beyond the contract (which pins only
+  `[기재정정]`) and beyond the implementer's own note (`[기재정정]`, `[첨부정정]`). The
+  flag is stored metadata only: no selection logic reads it. Match the two
+  correction tags exactly.
+- `SourceHttpClient` masks credential parameters, not the bare key. A library
+  exception whose text held the key outside `name=value` form would reach the retry
+  warning log. The final exception is still cleaned by `keyed.redacted`. httpx's own
+  messages don't take that form, so this is hardening only.

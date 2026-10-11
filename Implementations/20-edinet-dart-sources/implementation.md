@@ -64,7 +64,11 @@ Contract surface:
   request/s), `DART_SCHEME = "https://opendart.fss.or.kr/corp_code"`,
   `DartSourceAdapter(settings, http, object_store, entity_keys)`.
   - discover: `list.json` with the window as `bgn_de`/`end_de`, `pblntf_ty=A`,
-    `corp_code` when `request.entity` is set, all pages to `total_page`. Keep
+    `corp_code` when `request.entity` is set, all pages to `total_page`. Without
+    `corp_code`, OpenDART searches at most 3 months, so a longer window is split into
+    consecutive requests, each from its start date to the day before the same day three
+    calendar months later (or `filed_to`), in order. With `corp_code` the window is sent
+    whole. Keep
     사업보고서 (11011), 반기보고서 (11012), 분기보고서 (11013 for a `.03` period,
     11014 for `.09`); a `[기재정정]` prefix sets `is_amendment`; other reports are
     skipped. `FilingRef`: `accession = "dart-" + rcept_no`, `cik =
@@ -148,6 +152,15 @@ imports `acceptance/api_fixtures.py`.
 
 All tests fail at import (`sec_xbrl_warehouse.sources` from plan 18 is missing).
 Rerun on the accepted plan 18 commit before implementation.
+
+### Plan-author correction (11 October 2026)
+
+The implementer's step 0 found that OpenDART limits searches without `corp_code` to
+3 months, while `test_ac4_dart_discovery` pinned one 4-month request. The test was
+wrong against the official specification. The contract now splits long windows (above),
+the acceptance test uses a 3-month window (2024-03-01 to 2024-05-31, amendment row
+dated 2024-05-20), and the verification set gained a splitting test. No other
+assertion changed.
 
 ## Completion evidence
 

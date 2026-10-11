@@ -116,20 +116,20 @@ async def test_ac4_dart_discovery(tmp_path) -> None:
         [[
             dart_item("20240312000736", "사업보고서 (2023.12)"),
             dart_item("20240515001234", "분기보고서 (2024.03)", date="20240515"),
-            dart_item("20240601000001", "[기재정정]반기보고서 (2023.06)", date="20240601"),
+            dart_item("20240520000001", "[기재정정]반기보고서 (2023.06)", date="20240520"),
             dart_item("20240312009999", "주요사항보고서(자기주식취득결정)"),
         ]]
     )
     adapter, _ = dart(tmp_path, fake)
-    result = await adapter.discover(request(filed_from=date(2024, 3, 1), filed_to=date(2024, 6, 30)))
+    result = await adapter.discover(request(filed_from=date(2024, 3, 1), filed_to=date(2024, 5, 31)))
     summary = [(f.accession, f.form, f.report_date, f.is_amendment) for f in result.filings]
     assert summary == [
         ("dart-20240312000736", "11011", date(2023, 12, 31), False),
         ("dart-20240515001234", "11013", date(2024, 3, 31), False),
-        ("dart-20240601000001", "11012", date(2023, 6, 30), True),
+        ("dart-20240520000001", "11012", date(2023, 6, 30), True),
     ]
     sent = fake.requests[0]
-    assert sent.url.params["bgn_de"] == "20240301" and sent.url.params["end_de"] == "20240630"
+    assert sent.url.params["bgn_de"] == "20240301" and sent.url.params["end_de"] == "20240531"
     assert sent.url.params["pblntf_ty"] == "A"
 
 

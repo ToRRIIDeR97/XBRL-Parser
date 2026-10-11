@@ -105,6 +105,30 @@ def dart_policy(settings: Settings) -> SourcePolicy:
     )
 
 
+def search_windows(start: date, end: date, by_company: bool) -> list[tuple[date, date]]:
+    """The `(bgn_de, end_de)` searches covering `[start, end]`, in order.
+
+    With a corp_code the window is one search. Without one each search runs from its
+    start date to the day before the same day three calendar months later (a day the
+    month lacks becomes its last day), or to `end` if earlier; the next search starts
+    the following day, so no day is skipped or searched twice.
+    """
+    if by_company:
+        return [(start, end)]
+    windows: list[tuple[date, date]] = []
+    while start <= end:
+        stop = min(_add_months(start, 3) - timedelta(days=1), end)
+        windows.append((start, stop))
+        start = stop + timedelta(days=1)
+    return windows
+
+
+def _add_months(day: date, months: int) -> date:
+    index = day.month - 1 + months
+    year, month = day.year + index // 12, index % 12 + 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
 def report_code(report_name: str) -> tuple[str, date, bool] | None:
     """`(reprt_code, period end, is_amendment)` for a periodic report name, else None.
 
@@ -153,8 +177,9 @@ class DartSourceAdapter:
     async def discover(self, request: DiscoveryRequest) -> DiscoveryResult:
         """Periodic reports received in `[filed_from, filed_to]`, every result page.
 
-        Without a corp_code OpenDART limits the window to three months and refuses
-        longer ones with an error status. Status `013` (no data) is an empty result;
+        Without a corp_code OpenDART searches at most three months, so the window is
+        split into consecutive searches (`search_windows`), each paged to `total_page`;
+        with one it is sent whole. Status `013` (no data) is an empty search;
         `020` (daily limit) raises `SourceRateLimited`; any other non-`000` status
         raises `SourceAccessError`.
         """
@@ -173,50 +198,57 @@ class DartSourceAdapter:
         filings: dict[str, FilingRef] = {}
         companies: dict[int, Company] = {}
         keys: dict[str, int] = {}
-        number, total = 1, 1
-        while number <= total:
-            params = {
-                DART_KEY_PARAM: key,
-                "bgn_de": request.filed_from.strftime("%Y%m%d"),
-                "end_de": request.filed_to.strftime("%Y%m%d"),
-                "pblntf_ty": "A",
-                "page_no": str(number),
-                "page_count": str(self.settings.dart_page_count),
-            }
-            if entity is not None:
-                params["corp_code"] = entity
-            page = await redacted(
-                http.get_json(f"{DART_API}/list.json?{urlencode(params)}"), key, DART_POLICY
-            )
-            status = str(page.get("status"))
-            if status == "013":
-                break
-            if status != "000":
-                _raise_status(status, page.get("message"), "disclosure search")
-            items = page.get("list")
-            if not isinstance(items, list):
-                raise SchemaDriftError("DART disclosure search response has no list")
-            try:
-                total = int(page.get("total_page") or 1)
-            except (TypeError, ValueError):
-                raise SchemaDriftError("DART disclosure search has an invalid total_page") from None
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                if entity is not None and item.get("corp_code") != entity:
-                    continue
+        for bgn, end in search_windows(request.filed_from, request.filed_to, entity is not None):
+            number, total = 1, 1
+            while number <= total:
+                params = {
+                    DART_KEY_PARAM: key,
+                    "bgn_de": bgn.strftime("%Y%m%d"),
+                    "end_de": end.strftime("%Y%m%d"),
+                    "pblntf_ty": "A",
+                    "page_no": str(number),
+                    "page_count": str(self.settings.dart_page_count),
+                }
+                if entity is not None:
+                    params["corp_code"] = entity
+                page = await redacted(
+                    http.get_json(f"{DART_API}/list.json?{urlencode(params)}"), key, DART_POLICY
+                )
+                status = str(page.get("status"))
+                if status == "013":
+                    break
+                if status != "000":
+                    _raise_status(status, page.get("message"), "disclosure search")
+                items = page.get("list")
+                if not isinstance(items, list):
+                    raise SchemaDriftError("DART disclosure search response has no list")
                 try:
-                    filing = await self._filing(item, keys, forms)
-                except _Skip as skipped:
-                    logger.info(
-                        "dart_report_skipped", rcept_no=item.get("rcept_no"), reason=str(skipped)
+                    total = int(page.get("total_page") or 1)
+                except (TypeError, ValueError):
+                    raise SchemaDriftError(
+                        "DART disclosure search has an invalid total_page"
+                    ) from None
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    if entity is not None and item.get("corp_code") != entity:
+                        continue
+                    try:
+                        filing = await self._filing(item, keys, forms)
+                    except _Skip as skipped:
+                        logger.info(
+                            "dart_report_skipped",
+                            rcept_no=item.get("rcept_no"),
+                            reason=str(skipped),
+                        )
+                        continue
+                    if filing is None or filing.accession in filings:
+                        continue
+                    filings[filing.accession] = filing
+                    companies.setdefault(
+                        filing.cik, Company(cik=filing.cik, name=filing.company_name)
                     )
-                    continue
-                if filing is None or filing.accession in filings:
-                    continue
-                filings[filing.accession] = filing
-                companies.setdefault(filing.cik, Company(cik=filing.cik, name=filing.company_name))
-            number += 1
+                number += 1
         return DiscoveryResult(filings=tuple(filings.values()), companies=tuple(companies.values()))
 
     async def _filing(

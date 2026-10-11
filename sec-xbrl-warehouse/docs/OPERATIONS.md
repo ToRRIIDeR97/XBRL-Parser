@@ -193,8 +193,9 @@ a key, reissue it on the regulator's site, update `.env`, and restart the worker
   answer raises `SourceRateLimited`: the job goes back to the queue no earlier than
   00:05 Korea time (the next day) and spends an attempt, so a long backfill should
   stay under the daily budget (one call per result page of 100 reports, plus one per
-  package). Without a company (`entity`), OpenDART limits a search to three months;
-  a longer window comes back as an error status, so split it.
+  package). Without a company (`entity`), OpenDART searches at most three months,
+  so discovery splits a longer window into consecutive searches of up to three
+  calendar months each (more calls: plan the budget per search, not per job).
 - *EDINET* publishes no daily quota but answers bursts with status 429
   (`SourceRateLimited`, retried after 15 minutes). One discovery run reads one
   document list per day, at most `XBRL_EDINET_MAX_DAYS` (default 31) days.

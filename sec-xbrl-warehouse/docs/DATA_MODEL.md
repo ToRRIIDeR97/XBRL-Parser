@@ -308,7 +308,11 @@ the field to the fallback with a `warehouse:fiscalFocusInvalid` warning.
 Korean periodic reports come from the FSS's OpenDART API (`sources/dart.py`, source
 code `dart`). Discovery pages `/api/list.json` (`bgn_de`/`end_de` from the window,
 `pblntf_ty=A`, `page_count` = `XBRL_DART_PAGE_COUNT`, `corp_code` for one company)
-through `total_page`. Status `013` (no data) is an empty result. Report names map to
+through `total_page`. Without `corp_code` OpenDART searches at most three months, so
+a longer window becomes consecutive searches, each from its start date to the day
+before the same day three calendar months later (a day the month lacks becomes its
+last day) or `filed_to`, in order (`search_windows`); with `corp_code` the window is
+one search. Status `013` (no data) is an empty search. Report names map to
 report codes:
 
 | `report_nm` | `form` (reprt_code) | `fiscal_period` |

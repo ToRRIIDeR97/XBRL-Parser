@@ -64,7 +64,11 @@ Contract surface:
   request/s), `DART_SCHEME = "https://opendart.fss.or.kr/corp_code"`,
   `DartSourceAdapter(settings, http, object_store, entity_keys)`.
   - discover: `list.json` with the window as `bgn_de`/`end_de`, `pblntf_ty=A`,
-    `corp_code` when `request.entity` is set, all pages to `total_page`. Keep
+    `corp_code` when `request.entity` is set, all pages to `total_page`. Without
+    `corp_code`, OpenDART searches at most 3 months, so a longer window is split into
+    consecutive requests, each from its start date to the day before the same day three
+    calendar months later (or `filed_to`), in order. With `corp_code` the window is sent
+    whole. Keep
     사업보고서 (11011), 반기보고서 (11012), 분기보고서 (11013 for a `.03` period,
     11014 for `.09`); a `[기재정정]` prefix sets `is_amendment`; other reports are
     skipped. `FilingRef`: `accession = "dart-" + rcept_no`, `cik =
@@ -148,6 +152,15 @@ imports `acceptance/api_fixtures.py`.
 
 All tests fail at import (`sec_xbrl_warehouse.sources` from plan 18 is missing).
 Rerun on the accepted plan 18 commit before implementation.
+
+### Plan-author correction (11 October 2026)
+
+The implementer's step 0 found that OpenDART limits searches without `corp_code` to
+3 months, while `test_ac4_dart_discovery` pinned one 4-month request. The test was
+wrong against the official specification. The contract now splits long windows (above),
+the acceptance test uses a 3-month window (2024-03-01 to 2024-05-31, amendment row
+dated 2024-05-20), and the verification set gained a splitting test. No other
+assertion changed.
 
 ## Completion evidence
 
@@ -402,5 +415,48 @@ else in the test changed and nothing was weakened.
 4. AC-9 canary: enable `edinet` and `dart`, discover one week of each, ingest three
    filings each with offline parsing, and confirm the facts (OPERATIONS.md, "EDINET
    and DART filings").
+
+#### Corrections (round 2)
+
+The plan author ruled on step-0 item 2: the acceptance test was wrong against the
+specification, and the contract now splits long DART windows (see "Plan-author
+correction"). This supersedes step-0 item 2, deviation 1, and the OPERATIONS.md advice
+to split windows by hand.
+
+- `acceptance/test_edinet_dart_acceptance.py` was copied from the main checkout
+  byte-identical (`cmp`; `diff -r` of `acceptance/` matches). The only change is
+  `test_ac4_dart_discovery`'s 3-month window (2024-03-01 to 2024-05-31, amendment
+  row dated 2024-05-20). The two plan edits (the extended `discover:` bullet and the
+  "Plan-author correction" section) were applied here; everything above the
+  Implementer record now matches the main checkout's copy.
+- `sources/dart.search_windows(start, end, by_company)` returns the searches. With a
+  corp_code it returns one window. Without one, each window runs from its start to the
+  day before the same day three calendar months later, or to `filed_to` if earlier,
+  and the next starts the following day. A day the target month lacks becomes that
+  month's last day (2023-11-30 → 2024-02-28; 2024-01-31 → 2024-04-29), so no day is
+  skipped or searched twice. `discover` runs the windows in order and pages each to
+  its `total_page`; a `013` window is empty and the next one still runs.
+- Regression tests (`tests/unit/test_edinet_dart_sources.py`, now 36):
+  `test_search_windows_split_into_three_calendar_months` covers the contract example
+  (2024-01-15..2024-08-10 → (20240115, 20240414), (20240415, 20240714), (20240715,
+  20240810)), an exact 3-month window, month-end starts in a leap year, a one-day
+  window, the corp_code case, and every start day from 2023-01-01 to 2024-12-31 over
+  a 401-day range: windows tile the range with no gap or overlap and none exceeds 92
+  days. `test_dart_long_window_is_searched_in_order_and_paged` checks the request
+  sequence (window 1 pages 1–2, window 2 `013`, window 3) and that a corp_code search
+  sends the whole window once.
+- Docs: OPERATIONS.md describes the automatic split and its effect on the daily call
+  budget; DATA_MODEL.md, "DART filings", states the rule.
+
+| Command (round 2) | Result |
+| --- | --- |
+| acceptance, 3 runs | 8 passed every run |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` / `ruff format --check .` | pass / 192 files formatted |
+| `mypy src` | pass (89 files) |
+| `pytest -m "not integration"` with the live `.env` | 553 passed, 1 failed (`test_repository_registry_entries_are_on_allowed_hosts`, deviation 2), 1 skipped |
+| same with `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` set to the new default | 554 passed, 1 skipped (sec-2024.zip not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 52 passed |
 
 ### Verifier record

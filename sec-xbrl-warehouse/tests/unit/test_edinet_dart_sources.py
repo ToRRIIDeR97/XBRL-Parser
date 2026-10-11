@@ -505,6 +505,106 @@ def test_dart_pages_filters_and_maps(tmp_path) -> None:
     assert [f.accession for f in quarter.filings] == ["dart-20241114000123"]
 
 
+def test_search_windows_split_into_three_calendar_months() -> None:
+    from datetime import timedelta
+    from itertools import pairwise
+
+    from sec_xbrl_warehouse.sources.dart import search_windows
+
+    def ymd(windows):
+        return [(a.strftime("%Y%m%d"), b.strftime("%Y%m%d")) for a, b in windows]
+
+    assert ymd(search_windows(date(2024, 1, 15), date(2024, 8, 10), False)) == [
+        ("20240115", "20240414"),
+        ("20240415", "20240714"),
+        ("20240715", "20240810"),
+    ]
+    assert ymd(search_windows(date(2024, 3, 1), date(2024, 5, 31), False)) == [
+        ("20240301", "20240531")
+    ]
+    # Month-end starts: a day the target month lacks becomes its last day.
+    assert ymd(search_windows(date(2023, 11, 30), date(2024, 6, 1), False)) == [
+        ("20231130", "20240228"),
+        ("20240229", "20240528"),
+        ("20240529", "20240601"),
+    ]
+    assert ymd(search_windows(date(2024, 1, 31), date(2024, 7, 31), False)) == [
+        ("20240131", "20240429"),
+        ("20240430", "20240729"),
+        ("20240730", "20240731"),
+    ]
+    assert search_windows(date(2024, 1, 1), date(2025, 12, 31), True) == [
+        (date(2024, 1, 1), date(2025, 12, 31))
+    ]
+    assert search_windows(date(2024, 5, 5), date(2024, 5, 5), False) == [
+        (date(2024, 5, 5), date(2024, 5, 5))
+    ]
+    # Every start day over several years: windows tile the range exactly.
+    start = date(2023, 1, 1)
+    while start < date(2025, 1, 1):
+        end = start + timedelta(days=400)
+        windows = search_windows(start, end, False)
+        assert windows[0][0] == start and windows[-1][1] == end
+        for previous, following in pairwise(windows):
+            assert following[0] == previous[1] + timedelta(days=1)
+        # Three calendar months at most (92 days is the longest such span).
+        assert all(a <= b and (b - a).days < 92 for a, b in windows)
+        start += timedelta(days=1)
+
+
+def test_dart_long_window_is_searched_in_order_and_paged(tmp_path) -> None:
+    pages: dict[str, list[list[dict]]] = {
+        "20240115": [
+            [_item("20240212000001", "사업보고서 (2023.12)", rcept_dt="20240212")],
+            [_item("20240313000002", "사업보고서 (2023.12)", rcept_dt="20240313")],
+        ],
+        "20240415": [],  # 013: no data in this window
+        "20240715": [
+            [_item("20240801000003", "반기보고서 (2024.06)", rcept_dt="20240801")],
+        ],
+    }
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        chunk = pages[request.url.params["bgn_de"]]
+        if not chunk:
+            return httpx.Response(200, json={"status": "013", "message": "none"})
+        number = int(request.url.params["page_no"])
+        return httpx.Response(
+            200,
+            json={
+                "status": "000",
+                "total_page": len(chunk),
+                "list": chunk[number - 1],
+            },
+        )
+
+    adapter, _ = _dart(tmp_path, handler)  # type: ignore[arg-type]
+    window = {"filed_from": date(2024, 1, 15), "filed_to": date(2024, 8, 10)}
+    result = _run(adapter.discover(_request(**window)))
+    assert [f.accession for f in result.filings] == [
+        "dart-20240212000001",
+        "dart-20240313000002",
+        "dart-20240801000003",
+    ]
+    assert [
+        (r.url.params["bgn_de"], r.url.params["end_de"], r.url.params["page_no"]) for r in sent
+    ] == [
+        ("20240115", "20240414", "1"),
+        ("20240115", "20240414", "2"),
+        ("20240415", "20240714", "1"),
+        ("20240715", "20240810", "1"),
+    ]
+
+    sent.clear()
+    pages["20240115"] = [[_item("20240212000001", "사업보고서 (2023.12)", corp_code="00164779")]]
+    _run(adapter.discover(_request(**window, entity="00164779")))
+    assert [(r.url.params["bgn_de"], r.url.params["end_de"]) for r in sent] == [
+        ("20240115", "20240810")
+    ]
+
+
 def test_dart_key_problems_are_access_errors_without_the_key(tmp_path) -> None:
     fake = _Dart()
     adapter, _ = _dart(tmp_path, fake)

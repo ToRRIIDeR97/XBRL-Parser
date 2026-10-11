@@ -335,3 +335,85 @@ Pre-existing tests are still unchanged; round-2 test changes are new tests plus 
 added assertion in the round-1 integration test.
 
 ### Verifier record
+
+Independent verifier, branch `verify/18-source-adapters`, 11 October 2026. The
+held-back `verification/` folder was copied from the main checkout; it is identical to
+that copy (`diff -r`) and no test was edited. Commands ran from `sec-xbrl-warehouse/`
+with the main checkout's venv and `.env` (symlinked, not committed).
+
+**Round 1 (a5ac1aa): REJECT.**
+
+- Verification 8 passed, 1 failed (`test_ac3_sec_error_type_and_release`). Acceptance
+  9 passed. All Validate gates passed (485 passed / 1 skipped unit, 51 integration).
+- D1 (AC-3): a busy `SourceEgressLock(settings, source="sec")` raised the generic
+  `EgressBusyError`; only the `SecEgressLock` subclass raised `SecEgressBusyError`.
+  Release and retake worked.
+- D2 (invariant "SEC behavior is identical", retry semantics): daily-index companies
+  were collected and upserted after the run. A failure partway through stored none, so
+  a retry fetched every submissions JSON again. Scratch probe, 3 new CIKs with a
+  `TimeoutError` on the third: attempt 1 stored nothing; attempt 2 brought the total
+  to 6 requests. The previous code stored each company as it was fetched.
+- D3 (invariant "never falls back to SEC", minor): `{"source": ""}` ran SEC discovery
+  because of `payload.get("source") or "sec"`.
+- Rulings on the implementer's deviations: (a) defect, see D2. (b) omitting
+  `companies_stored` when zero was acceptable: the field is only diagnostic and
+  nothing reads it. (c) `map_canonical` calling `derive_fiscal_focus` directly was
+  acceptable for SEC-only but had to be fixed before a non-SEC adapter. (d) failing
+  `worker run` at startup for an enabled source without an adapter is acceptable: it
+  fails closed and OPERATIONS.md documents it. (e) non-SEC requests in the `SEC_*`
+  metrics are acceptable as a documented limitation; SEC series are unchanged. (f)
+  `SourceRetryDeferred`, `packages=`, `fiscal_focus=`, `requires_network`,
+  `sec_policy` and `is_source_code` are acceptable: each is needed or harmless, and
+  SEC defaults and messages are unchanged.
+
+**Round 2 (3f515a3): ACCEPT.**
+
+| Command | Result |
+| --- | --- |
+| `RUN_XBRL_INTEGRATION=1 pytest -c pyproject.toml --rootdir . ../Implementations/18-source-adapters/verification` | 9 passed |
+| `RUN_XBRL_INTEGRATION=1 pytest -c pyproject.toml --rootdir . ../Implementations/18-source-adapters/acceptance` | 9 passed |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` | pass |
+| `ruff format --check .` | pass (186 files) |
+| `mypy src` | pass (85 files) |
+| `pytest -m "not integration"` | 493 passed, 1 skipped (sec-2024.zip not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 51 passed |
+
+- D1 fixed: `SourceEgressLock._busy` returns `SecEgressBusyError` for any `sec` lock.
+  The held-back AC-3 test passes, including release and retake.
+- D2 fixed: the SEC adapter stores daily-index companies one at a time through
+  `_MirroredCompanies` (PostgreSQL plus ClickHouse mirror) with the unchanged
+  `enrich_companies`, as before plan 18. Rerunning the probe: attempt 1 made 3
+  requests and stored CIKs 1 and 2; attempt 2 made 1 more request (4 in total),
+  stored CIK 3 and enqueued 3 fetch jobs with `companies_stored: 1`.
+- D3 fixed: only a missing `source` key means `sec`. `""`, `None`, `"SEC"`, `"nope"`,
+  `7` and `["sec"]` each raised `UnsupportedSourceError` with
+  `is_retryable_exception == False`, and no adapter was called.
+- (c) fixed: `map_canonical` passes `SourceRegistry.fiscal_focus` to
+  `load_published_extraction`. For SEC this is `bundle.model_copy(update={"filing":
+  derive_fiscal_focus(bundle)[0]})`, the same as the default path; the worker is the
+  only caller.
+- Introduced by the fix: `DiscoveryResult.stored_companies: int | None = None` is
+  acceptable. It is optional, AC-4 still upserts the `companies` the adapter
+  returns, and the SEC submissions path still returns its one company. No company is
+  written twice: the daily-index path returns none and the submissions path stores
+  none itself. `companies_stored` is reported exactly as before plan 18, including 0
+  when no new company was stored. Ruling (b) no longer applies.
+- `git diff 11137ef..3f515a3 -- sec-xbrl-warehouse/tests` removes no lines; all test
+  changes are additions.
+- SEC invariant (diff review, both rounds): `SecHttpClient` is the former request loop
+  moved into `SourceHttpClient` with the same hosts, user agent, headers on the wire,
+  rate, concurrency, retryable statuses, `Retry-After` deferral, byte limits, log
+  event names and `dataset="sec"` metric label. The lock name, object keys,
+  `fetch:<key>:<revision>` job keys and payloads are unchanged. Form filters reach
+  discovery as `set(forms)`, so a tuple instead of a list makes no difference. Every
+  redirect hop is checked against the policy's hosts, and unknown or disabled sources
+  are never retried.
+
+Limitations: nothing checks that two policies' host allowlists don't overlap, so
+"one source's client can't reach another source's hosts" relies on each later
+adapter's policy. Non-SEC traffic is still counted in the `SEC_*` metrics, and the
+lazy lock for online Arelle stays SEC-only. `filing discover` has no `--source`.
+Only the SEC adapter exists, so non-SEC paths were exercised with the fake `demo`
+adapter only. No SEC traffic was sent.

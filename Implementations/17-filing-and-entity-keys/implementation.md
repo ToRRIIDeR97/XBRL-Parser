@@ -260,3 +260,85 @@ Limitations:
 - The live control database is still at 0007 (manual operator step above).
 
 ### Verifier record
+
+Verifier session, 11 October 2026, branch `claude/verify-17-filing-entity-keys-d938c4`
+(cut from the implementer's 131a87f). `verification/` copied from the main checkout;
+`.env` symlinked from the main checkout and not committed; main checkout's `.venv`
+used. The suites' conftests put this worktree's `src` first on `sys.path`, so the
+results apply to this branch. No implementation code or test was changed. No alembic
+run against the live control database, no SEC traffic.
+
+**Overall verdict: accept.**
+
+| Criterion | Verdict | Evidence |
+|---|---|---|
+| AC-1 Filing keys | accept | acceptance and verification pass; independent property check below |
+| AC-2 FilingRef | accept | range edges at `ENTITY_KEY_BASE` both ways (verification `test_ac2_range_edges`) |
+| AC-3 Entity keys | accept | concurrency, restart, scheme separation, bad inputs (integration) |
+| AC-4 Control plane | accept | all four `accession` columns 128 wide, idempotent non-SEC upsert |
+| AC-5 Object storage | accept | SEC keys byte-identical; inventory classes; retire-revisions on non-SEC key |
+| AC-6 Fetch guard | accept | `download_package` and `fetch_index` refuse with `http=None`, nothing written; not retryable |
+| AC-7 API | accept | malformed keys 422 with zero queries; non-SEC key routes to 404 |
+| AC-8 SEC regression | accept | all Validate gates pass; the one existing-test edit is the Alembic head stub |
+
+Commands (from `sec-xbrl-warehouse/`):
+
+- `RUN_XBRL_INTEGRATION=1 pytest -c pyproject.toml --rootdir . ../Implementations/17-filing-and-entity-keys/acceptance`: 16 passed.
+- `RUN_XBRL_INTEGRATION=1 pytest -c pyproject.toml --rootdir . ../Implementations/17-filing-and-entity-keys/verification`: 8 passed.
+- `python -m compileall -q src tests scripts`: ok.
+- `ruff check .`: all checks passed. `ruff format --check .`: 180 files already formatted.
+- `mypy src`: no issues in 80 source files.
+- `pytest -m "not integration"`: 468 passed, 1 skipped (`sec-2024.zip` not installed
+  locally; pre-existing), 50 deselected.
+- `python scripts/scan_stubs.py`: 0 markers.
+- `RUN_XBRL_INTEGRATION=1 pytest -m integration`: 50 passed.
+
+Failures: none.
+
+Review of `git diff b8df8d8..131a87f` against the contract:
+
+- **Key pattern.** The `_SOURCE` alternation is exactly `[a-z][a-z0-9]{1,15}` minus
+  `sec` (checked by hand and by an exhaustive comparison over every 2–3 character
+  source plus 20,000 random ones). 200,000 random keys with quotes, spaces, slashes,
+  backslashes, control and non-ASCII characters (`é`, Arabic-Indic digit, NBSP,
+  U+2028): Python `filing_source` and pydantic's Rust engine agreed on every key, and
+  every accepted key matched `[A-Za-z0-9._-]+`. Trailing newline rejected by both
+  (`fullmatch`; Rust `$` has no newline exception). 128 accepted, 129 rejected.
+- **SEC keys byte-identical.** `_filing_prefix`/`_manifest_prefix` yield
+  `bronze/sec/filings/<cik>/<accession>/` and `manifests/sec/filings/<accession>/`
+  for bare accessions, the same strings as before. API field names unchanged.
+- **No ClickHouse DDL.** The diff touches no ClickHouse schema or DDL file.
+- **Downgrade guard.** Counts non-SEC values in all four `accession` columns (NULL
+  `validation_issues.accession` is not counted, correctly), `filings.cik >= 10^10`, and
+  any `entity_keys` row, and raises before any DDL. The migration test covers refusal
+  and a clean downgrade/re-upgrade.
+- **Fetch guard.** `_require_sec` is the first statement of both `fetch_index` and
+  `download_package`, ahead of `ensure_directories()` and `_sec()`; member downloads
+  (`_fetch_member`) are only reached through `download_package`.
+- **Not retryable.** `UnsupportedSourceError` sits in the first permanent-error check of
+  `is_retryable_exception`.
+- **SQL formatting.** `retire-revisions` gates on `is_filing_key` before formatting
+  `'{a}'` into `ALTER TABLE ... DELETE`; the property above keeps that safe.
+- **Entity keys.** SELECT, then `INSERT ... ON CONFLICT DO NOTHING RETURNING`, then a
+  re-read in a new session: under READ COMMITTED the losing INSERT waits for the
+  winner's commit, so the re-read sees it. Sequence gaps from lost races are harmless
+  (keys are never reused). SEC CIKs never reach the table.
+
+Findings (none blocking):
+
+1. `resolve_entity_key` stores non-SEC identifiers verbatim, so `"LEI…"` and
+   `"LEI… "` (or a lower-cased LEI) get different keys. The AC only requires blank
+   input to fail. Recommend that plan 19 normalise LEIs (strip, upper-case) before
+   calling it, since a second key for one issuer can't be undone.
+2. Remaining SEC-only regexes (`filing_discovery.py`, `edgartools_adapter.py`) and
+   `bronze/sec/daily-index`, `bronze/sec/fsnds` keys are within the plan's exclusions.
+
+Deviations:
+
+- **`LocalObjectStore(bucket="sec-xbrl")` default: acceptable.** It equals
+  `Settings.object_store_bucket`'s default, the only production constructor
+  (`object_store.py:400`) still passes the setting explicitly, and the bucket name
+  has no effect on local storage paths. It changes no behaviour and no assertion.
+- **`tests/unit/test_cli.py` stub bumped to `0008_filing_entity_keys`: acceptable.**
+  The stub stands in for the database revision that `doctor` compares with the
+  Alembic head; c52c2ea made the same one-line bump for 0007. No assertion weakened.

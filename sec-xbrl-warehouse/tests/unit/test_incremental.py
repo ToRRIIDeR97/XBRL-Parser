@@ -207,7 +207,10 @@ def test_reconcile_reports_bulk_absence() -> None:
     result = asyncio.run(ingestor.ingest(_filing()))
     reconciliation = result["reconciliation"]
     assert reconciliation["available"] is False
-    assert all("sec_dimensions AS d FINAL" in sql for sql in warehouse.queries[:2])
+    for sql in warehouse.queries[:2]:
+        # The filing filter runs before the latest-row LIMIT BY, not after it.
+        assert sql.index("WHERE adsh = %(accession)s") < sql.index("LIMIT 1 BY")
+        assert "FROM sec_dimensions FINAL" in sql
 
 
 def test_ingest_resumes_from_download_extract_and_silver_checkpoints(tmp_path: Path) -> None:
@@ -263,6 +266,36 @@ def test_extraction_checkpoint_streams_and_round_trips(tmp_path, monkeypatch):
     with pytest.raises(XbrlExtractionError, match="byte limit"):
         write_json(bundle, path, 5)
     assert not path.exists()
+
+
+def test_extraction_json_bytes_match_the_field_by_field_encoding(tmp_path):
+    """Records are serialized whole now; saved checkpoints must keep their bytes."""
+    from pydantic import BaseModel
+    from pydantic_core import to_json
+
+    from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import write_json
+
+    def field_by_field(value):
+        if isinstance(value, BaseModel):
+            value = {name: getattr(value, name) for name in type(value).model_fields}
+        if isinstance(value, dict):
+            items = [to_json(str(key)) + b":" + field_by_field(item) for key, item in value.items()]
+            return b"{" + b",".join(items) + b"}"
+        if isinstance(value, (tuple, list)):
+            return b"[" + b",".join(field_by_field(item) for item in value) + b"]"
+        return to_json(value)
+
+    bundle = _bundle()
+    bundle = bundle.model_copy(
+        update={
+            "metadata": bundle.metadata.model_copy(
+                update={"provenance": {"validation_log": [{"level": "info", "args": [1, None]}]}}
+            )
+        }
+    )
+    path = tmp_path / "bundle.json"
+    write_json(bundle, path, 1_000_000)
+    assert path.read_bytes() == field_by_field(bundle)
 
 
 def test_entity_tables_are_built_in_bounded_batches():
@@ -350,3 +383,63 @@ def test_busy_egress_lock_records_no_diagnostics() -> None:
             asyncio.run(ingestor.ingest(_filing()))
     # The validation stage runs after extraction, so a busy lock records nothing.
     assert not hasattr(control, "issues")
+
+
+def test_shared_standard_concepts_are_stored_once_across_filings(tmp_path):
+    from datetime import UTC, datetime
+
+    from sec_xbrl_warehouse.domain.xbrl import XbrlConcept
+    from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
+        filing_concepts,
+        iter_shared_concept_tables,
+    )
+    from sec_xbrl_warehouse.infrastructure.storage.object_store import LocalObjectStore
+    from sec_xbrl_warehouse.infrastructure.storage.parquet import ParquetBatchWriter
+
+    def concept(namespace, name, *, extension=False, version="2024"):
+        prefix = "ext" if extension else "us-gaap"
+        return XbrlConcept(
+            namespace=namespace,
+            name=name,
+            qname=f"{prefix}:{name}",
+            taxonomy_version=None if extension else version,
+            is_extension=extension,
+        )
+
+    gaap = "http://fasb.org/us-gaap/2024"
+    first = _bundle().model_copy(
+        update={
+            "concepts": (
+                concept(gaap, "Revenues"),
+                concept(gaap, "Assets"),
+                concept("http://fasb.org/us-gaap/2023", "Assets", version="2023"),
+                concept("http://example.com/ext", "Custom", extension=True),
+            )
+        }
+    )
+    second = first.model_copy(
+        update={
+            "filing": first.filing.model_copy(update={"accession": "0000000001-26-000002"}),
+            "metadata": first.metadata.model_copy(
+                update={"extracted_at": datetime(2030, 1, 1, tzinfo=UTC)}
+            ),
+            "concepts": tuple(reversed(first.concepts)),  # order must not matter
+        }
+    )
+    settings = Settings(env="test", data_dir=tmp_path / "data", temp_dir=tmp_path / "tmp")
+    writer = ParquetBatchWriter(settings, LocalObjectStore(tmp_path / "objects", "sec-xbrl"))
+    keys = []
+    for bundle in (first, second):
+        tables = list(iter_shared_concept_tables(bundle, 1000, 10_000_000))
+        shared_rows = sum(table.num_rows for _, table in tables)
+        assert shared_rows + len(filing_concepts(bundle)) == len(bundle.concepts)
+        keys.append(
+            [
+                item.key
+                for prefix, table in tables
+                for item in writer.write_batches(
+                    (table,), destination_prefix=prefix, partition_values={}
+                )
+            ]
+        )
+    assert keys[0] == keys[1]  # one stored object for both filings

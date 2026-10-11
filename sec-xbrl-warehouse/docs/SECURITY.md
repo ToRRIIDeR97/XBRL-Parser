@@ -11,7 +11,7 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 | Silver Parquet and checkpoints | Object store | The ClickHouse rebuild source. Checkpoints bind the source checksum, code hashes, schema, and row counts. |
 | Control state | PostgreSQL | Jobs, leases, artifacts, validation issues, mapping versions, and review decisions. |
 | Warehouse facts | ClickHouse | Raw and canonical facts served by the API. |
-| Credentials | `.env` (local), secret manager (production) | Writer DSNs, ClickHouse writer/reader passwords, MinIO root keys, `XBRL_API_KEY`. |
+| Credentials | `.env` (local), secret manager (production) | Owner/admin/root credentials (admin service), the worker, writer, and reader identities, `XBRL_API_KEY`. Settings hold them as `SecretStr`, so reprs, dumps, and tracebacks don't print them. |
 | SEC identity | `XBRL_SEC_USER_AGENT` | The SEC identifies and throttles traffic by this identity. |
 
 ## Trust boundaries
@@ -32,19 +32,43 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   contacted.
 - **The object store is trusted.** Manifest-cache and checkpoint verification detect
   corruption and mismatched reuse. They don't defend against a malicious storage administrator.
-- **The API is a separate, lower-privilege identity.** Compose passes it an explicit
-  environment allowlist with no `.env`, no writer or MinIO credentials, and no
-  application-data volume. Bootstrap and operator CLI commands run through the
-  `worker` service image, not `api`.
+  The bucket is versioned (noncurrent versions expire after 30 days), and the workers'
+  object-store user can't delete, so a compromised worker can't remove or overwrite
+  bronze objects.
+- **The Arelle child parses untrusted XML and has no credentials.** It gets settings
+  with the database, object-store, and API secrets blanked and removes credential
+  variables (`*PASSWORD*`, `*SECRET*`, `*DSN*`, `*API_KEY*`, `*ACCESS_KEY*`) from its
+  own environment. Its initial process environment is inherited from the worker, so
+  the worker containers carry only least-privilege identities (below).
+- **The parse worker has no internet route.** `worker-parse` is only on the internal
+  `backend` network, so offline Arelle can't reach a remote host even if its
+  allowlist were bypassed.
+- **Every service has its own least-privilege identity** (table in OPERATIONS.md,
+  "Identities and the admin service"):
+  - workers use `xbrl_worker` (PostgreSQL DML only, no DDL or superuser), `xbrl_writer`
+    (ClickHouse SELECT and INSERT), and an object-store user with get, put, and list
+    but no delete; Compose blanks the owner, admin, root, and API secrets that `.env`
+    holds in their environment;
+  - the API gets an explicit environment allowlist with no `.env`, no writer or MinIO
+    credentials, and no application-data volume;
+  - the owner, ClickHouse admin, and MinIO root credentials are used only by the
+    on-demand `admin` service (migrations, DDL, upgrades, taxonomy sync, storage
+    maintenance) and `minio-init`.
 
 ## Authentication and authorization
 
 - **API.** When `XBRL_API_KEY` is set (at least 32 characters), every route except
   `/health/live` and `/health/ready` requires `Authorization: Bearer <key>`, compared
   in constant time. That includes `/docs`, `/metrics`, and queries. Without a key the API
-  is unauthenticated and is safe only on loopback.
+  is unauthenticated and is safe only on loopback, so `api serve` refuses a
+  non-loopback bind without a key unless `XBRL_API_ALLOW_UNAUTHENTICATED_REMOTE=true`
+  (Compose sets it: the container binds `0.0.0.0` behind a `127.0.0.1`-only port).
 - **Production startup** (`XBRL_ENV=production`) fails unless an API key and a separate,
-  non-empty ClickHouse reader identity are configured. See `src/sec_xbrl_warehouse/api/app.py`.
+  non-empty ClickHouse reader identity are configured, and it rejects any credential
+  that contains the development marker `dev_password`, plaintext ClickHouse
+  (`XBRL_CLICKHOUSE_SECURE=false`), and an object-store endpoint without TLS. `doctor`
+  runs the same check. The API adapter never falls back to the ClickHouse writer in
+  production. See `api/app.py` and `Settings.assert_production_ready`.
 - **ClickHouse reader.** Production expects a SELECT-only user whose settings profile
   enforces the API query budgets below. The API requests these settings on its own
   connection and refuses to start if the effective limits are missing, unlimited, or
@@ -67,11 +91,18 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   Source: `ClickHouseWarehouse.__init__` (`read_only=True`) and `config.py`.
 - **PostgreSQL API login.** The API needs a login with CONNECT and no table or writer
   privileges (`XBRL_API_POSTGRES_DSN`).
-- **Unknown:** the repository contains no script that provisions the `xbrl_api`
-  PostgreSQL or ClickHouse identities. Until an operator creates them, the Compose
-  `api` service can't reach its databases with the default DSN.
+- **Provisioning.** `ops/provision/provision_identities.sh` creates or updates
+  `xbrl_worker` and `xbrl_api` in PostgreSQL (`ops/provision/postgres_roles.sql`:
+  CONNECT, DML grants plus default privileges for future tables, no `CREATE` on
+  `public`) and `xbrl_writer`, `xbrl_api`, and `xbrl_api_profile` in ClickHouse. The
+  profile is `readonly = 1` with every budget in the table above; under it the API
+  connects without per-query settings and its startup check confirms the profile's
+  values. `minio-init` creates the workers' object-store user and policy.
 - **Grafana** in the monitoring profile allows anonymous Viewer access. That's for local use only.
 - **Workers** have no inbound API. Their metrics port stays on the Compose network.
+- **Filing archives.** A `-xbrl.zip` is checked against the filing budget
+  (`XBRL_FILING_MAX_MEMBERS`, `XBRL_FILING_MAX_BYTES`) while its central directory is
+  read, before any member is decompressed.
 
 ## Secrets
 
@@ -93,6 +124,13 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
   most 366 days. Offsets are capped, accessions are syntax-checked, and per-process
   concurrency is bounded. ClickHouse queries carry time, memory, rows-read, and
   result-byte budgets.
+- Filing keys (the `accession` path and query parameter, `FilingRef.accession`) must
+  match `FILING_KEY_PATTERN` in `domain/sources.py` and be at most 128 characters: an
+  SEC accession or `<source>-<native id>` of ASCII letters, digits, `.`, `_`, and `-`.
+  The API rejects anything else with 422 before a query. A valid key has no quotes,
+  spaces, slashes, or control characters, which is what lets `storage
+  retire-revisions` format keys into its `ALTER TABLE ... DELETE` and the downloader
+  put them in object keys. Keep that property if the pattern changes.
 - Each API process runs one readiness probe at a time. Overlapping probes get 503.
 - SEC requests use the configured user agent. They default to 8 req/s with jitter and
   honor `Retry-After`. **The limiter is process-local**, so a PostgreSQL advisory lock
@@ -130,15 +168,11 @@ bounded object restores. The full gates are listed in the root `AGENTS.md`.
 
 ## Before public exposure
 
-Grant the API's ClickHouse reader (`xbrl_api`) `SELECT` on the tables and views added
-by the statement, series, and disclosure work: `metric_series`, `companies`,
-`xbrl_roles`, `xbrl_statement_lines`, `v_statement_lines_latest`, `xbrl_cover_pages`,
-`xbrl_segment_facts`, `v_cover_pages_latest`, `v_segment_facts_latest`,
-`v_text_blocks_latest`, `taxonomy_concepts`, `xbrl_concept_labels`, and
-`v_filing_concepts_latest` (in addition to the existing latest views). Today `QueryService`
-reads only `v_xbrl_facts_latest`, `v_canonical_facts_latest`, `metric_series`, and
-`companies`. No API route reads the statement or disclosure objects yet, so those grants
-matter only to readers that query ClickHouse directly with the `xbrl_api` identity.
+The provisioning script grants `xbrl_api` `SELECT` on the whole warehouse database
+(all public SEC data). Today `QueryService` reads only `v_xbrl_facts_latest`,
+`v_canonical_facts_latest`, `metric_series`, and `companies`; narrow the grant to those
+if direct ClickHouse readers shouldn't see the rest. Replace every development
+password (`XBRL_ENV=production` refuses them) and supply them from a secret manager.
 
 
 Public exposure also needs production authentication, a dedicated bounded ClickHouse

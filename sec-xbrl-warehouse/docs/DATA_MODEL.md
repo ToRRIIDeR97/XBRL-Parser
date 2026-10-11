@@ -96,7 +96,7 @@ Required identity and lineage:
 - source document, source fact ID, extraction revision.
 
 **ClickHouse encoding.** Silver Parquet keeps every value as extracted (hex hashes,
-every raw value, every concept). ClickHouse stores the same data more compactly; the
+every raw value, every concept; standard concepts in shared files, see below). ClickHouse stores the same data more compactly; the
 `v_*` views and `QueryService` return it in the original form:
 
 - **Hashes.** Identity hashes (`fact_id`, `context_hash`, `dimension_hash`,
@@ -176,11 +176,50 @@ abstract/nillable flags, labels, documentation, and extension status.
   with the filing's own labels where it has them, else the shared ones. No filer's
   labels reach another filing.
 
-Silver Parquet keeps every concept of every filing.
+Silver Parquet holds every concept of every filing, each stored once:
+
+- The filing's `silver/xbrl/concepts/.../accession=<a>/revision=<r>/` objects hold
+  its extension concepts and the standard concepts it labels itself (with the
+  filer's labels), one row per concept as before.
+- Every other standard concept is stored as a `taxonomy_concepts` row (no accession,
+  no ingest time, rows sorted by name) under
+  `silver/xbrl/taxonomy_concepts/namespace_sha256=<first 16 hex of the namespace's
+  SHA-256>/taxonomy_version=<v>/`. The objects are content-addressed, so filings that
+  load the same taxonomy share one object.
+- The filing's `silver:concepts` checkpoint lists both sets, and its row count is
+  the filing's concept count. The saved extraction keeps the full concept list too.
+- Filings written before this change keep a full per-filing copy.
 
 ### `xbrl_relationships`
 
 One row per arc. Includes network type, link role, arc role, source/target QName, order, priority, weight, preferred label, and dimensional flags.
+
+## Filing keys and entity keys
+
+The `accession` and `cik` columns (PostgreSQL, ClickHouse, Parquet) and API fields
+keep their names, but hold source-neutral keys (`domain/sources.py`, migration
+`0008_filing_entity_keys`). Every SEC value is unchanged.
+
+- **Filing key** (`accession`): an SEC accession (`0000320193-25-000079`) or
+  `<source>-<native id>` for any other source, for example
+  `esef-5493001KJTIIGC8Y1R12-2023-12-31-ESEF-GB-0`. `source` is `[a-z][a-z0-9]{1,15}`
+  and the native id `[A-Za-z0-9][A-Za-z0-9._-]*`, 128 characters at most in total.
+  SEC accessions start with a digit, so the forms never overlap, and `sec-...` is
+  invalid. `filing_source(key)` returns `sec` or the prefix and raises `ValueError`
+  for anything else. No `source` column is stored; it is read from the key.
+- **Entity key** (`cik`): the SEC CIK for SEC issuers (every CIK is below 10^10) and a
+  number at or above `ENTITY_KEY_BASE = 10_000_000_000` for everything else.
+  `FilingRef` checks the range against the filing's source.
+- **`entity_keys`** (PostgreSQL): `entity_key` (from `entity_key_seq`, starting at
+  10^10), `scheme`, `identifier` (unique together, for example the LEI scheme
+  `http://standards.iso.org/iso/17442` and an LEI), `created_at`.
+  `PostgresControlRepository.resolve_entity_key(scheme, identifier)` returns the CIK
+  for `SEC_CIK_SCHEME` (`http://www.sec.gov/CIK`) without a row and otherwise the
+  existing or a newly allocated key, the same one for concurrent first calls. Keys are
+  never reused or renumbered, and SEC CIKs are never written here.
+- **Object keys** carry the source: `bronze/<source>/filings/<entity key>/<filing
+  key>/...` and `manifests/<source>/filings/<filing key>/...`, so SEC keys stay
+  `bronze/sec/...` and `manifests/sec/...`.
 
 ## Companies
 
@@ -201,6 +240,19 @@ document), and `fetched_at`. EIN, phone, and addresses are not stored.
   filings) and, for daily-index discovery, from one submissions request per CIK not
   yet stored or fetched more than `XBRL_COMPANY_REFRESH_DAYS` (default 30) days ago
   (wall-clock time, so backfills of old dates refresh too). `--cik` discoveries always refresh the row.
+
+## Extraction records
+
+`xbrl_extractions` has one row per published `(accession, extraction_revision)`, written
+last: `entity_counts_json` and `metadata_json` (the bundle's document metadata). The
+Arelle validation log (about 1 MB per filing) isn't copied into `metadata_json`; its
+provenance keeps `validation_log_records`, the record count. The full log stays in the
+saved extraction, and its issues are grouped in `validation_issues`. Rows written
+before this change still embed the log.
+
+`storage retire-revisions` can delete the `xbrl_*` and `canonical_facts` rows of
+revisions older than the published one (OPERATIONS.md); their `xbrl_extractions` row,
+silver Parquet, and saved extraction stay.
 
 ## Validation issues
 
@@ -316,6 +368,29 @@ SELECT concept_name, value_text
 FROM xbrl.v_text_blocks_latest WHERE accession = '0000320193-25-000079' AND is_policy;
 ```
 
+The query API serves the same views per filing (bearer token when `XBRL_API_KEY` is
+set):
+
+```bash
+# Cover page; `securities` lists {member, title, symbol, exchange}. 404 without a row.
+curl -H "Authorization: Bearer $XBRL_API_KEY" \
+  http://127.0.0.1:8080/v1/filings/0000320193-25-000079/cover-page
+# Segment revenue. `kind` repeats (segment, product, geography, consolidation) and
+# matches any member; include_eliminations=false drops elimination rows;
+# limit 1-10,000 (default 1,000), offset 0-10,000.
+curl -H "Authorization: Bearer $XBRL_API_KEY" \
+  "http://127.0.0.1:8080/v1/filings/0000320193-25-000079/segments?kind=segment&concept=us-gaap:Revenues"
+# Accounting policies with their HTML. policy=false lists the other text blocks;
+# limit 1-1,000 (default 200), at most 100 with include_text=true (default 100).
+curl -H "Authorization: Bearer $XBRL_API_KEY" \
+  "http://127.0.0.1:8080/v1/filings/0000320193-25-000079/text-blocks?policy=true&include_text=true"
+```
+
+List responses are `{accession, items, count, limit, offset}`. Segment items carry
+`kind` (the stored `axis`) and `members` (`[{kind, qname, label}]`); text-block items
+carry `text_length` in characters and `text` only on request. Decimals are JSON
+numbers: exact when integral, otherwise the nearest double.
+
 ## Canonical layer
 
 ### `canonical_metrics` in PostgreSQL
@@ -343,6 +418,12 @@ read from the namespace of the concept's XML Schema declaration, so every fact
 showed `2001`; facts and reviews written at revisions 1–2 carry that value.
 
 ### `canonical_facts` in ClickHouse
+
+One row per raw fact, metric, and extraction revision. The sort key leaves out the
+mapping, so after `mapping remap` the new mapping's row replaces the older one on
+merge (`ReplacingMergeTree(mapping_version)` keeps the highest version), the same row
+readers pick with `ORDER BY mapping_version DESC LIMIT 1 BY`. Mapping history stays
+in PostgreSQL `concept_mappings`.
 
 Contains:
 
@@ -397,9 +478,10 @@ Standardized series rebuilt per company from `canonical_facts` by
   row is written whenever a point changes (`known_from` = that time). A query takes the
   newest `built_at` for the company and, per point, the newest version with
   `known_from <= as_of`.
-- **Rebuilds.** The worker rebuilds a company after a completed `parse_filing` (or
-  legacy `ingest_filing`) or
-  `map_canonical` (a failure is reported in the job result, not retried);
+- **Rebuilds.** A completed `parse_filing` (or legacy `ingest_filing`) or
+  `map_canonical` queues the company's `rebuild_series` job, which runs after
+  `XBRL_SERIES_REBUILD_DELAY_SECONDS`; requests in the meantime share one rebuild, and
+  a failed rebuild retries like any job (OPERATIONS.md).
   `xbrl-warehouse series rebuild --cik <cik>` rebuilds on demand. The table is a
   `ReplacingMergeTree(built_at)`, so merges replace older builds' rows without a delete
   mutation per rebuild; readers only use the newest build.

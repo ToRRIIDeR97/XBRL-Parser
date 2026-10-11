@@ -19,7 +19,7 @@ the component view; the other views follow the prose sections.
 | SEC HTTP client | User agent, rate limit, retries with jitter, `Retry-After`, and the PostgreSQL advisory lock `SecEgressLock`, so only one process sends SEC traffic. | `infrastructure/http/` |
 | Bulk backfill | FSNDS catalog, ZIP download to bronze, streaming TSV to Parquet and ClickHouse, reconciliation. | `ingestion/bulk_*.py`, `ingestion/orchestrator.py`, `ingestion/sec_tsv.py` |
 | Filing ingestion | Discovery from daily indexes or submissions JSON, package download (`fetch_filing`), and extraction through publish (`parse_filing`). | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
-| Arelle adapter | Runs Arelle in a child process against pinned taxonomy packages and returns an `XbrlExtractionBundle`. | `infrastructure/xbrl/` |
+| Arelle adapter | Runs Arelle in reusable child processes (a fresh controller per filing, no credentials) against pinned taxonomy packages and returns an `XbrlExtractionBundle`. | `infrastructure/xbrl/` |
 | Validation | XBRL issues, filing reconciliation, data quality, schema drift, issue grouping. | `validation/` |
 | Canonical mapping | Applies approved concept mappings to raw facts, remaps published extractions, rebuilds `metric_series`. | `mapping/`, `query/series.py`, `normalization/series.py` |
 | Query API | FastAPI app with bearer auth and a concurrency limit; `QueryService` runs scan-bounded, budgeted SELECTs as the `xbrl_api` reader. | `api/`, `query/service.py` |
@@ -39,15 +39,18 @@ The SEC bulk data is the fastest and most reliable historical backfill, but it i
 
 - SEC bulk ZIPs.
 - EDGAR filing packages, stored as **one** deterministic package ZIP per filing
-  (`bronze/sec/filings/<cik>/<accession>/packages/sha256=<hash>/package.zip`).
+  (`bronze/sec/filings/<cik>/<accession>/packages/sha256=<hash>/package.zip`). Keys
+  are `bronze/<source>/filings/<entity key>/<filing key>/...`, where the source comes
+  from the filing key, so SEC keys are as shown.
 - HTTP metadata, checksums, source URLs, and acquisition timestamps.
 - A manifest containing every member's SHA-256 and size, plus `package_object_key`
   and `package_checksum_sha256`.
 
 `download_package` stages the selected members locally and stores only the package
-archive: members sorted by name, fixed timestamps, and an embedded `manifest.json`
-holding just the filing and members, so identical bytes give the same key and
-checksum. No member is stored loose. `materialize_package` downloads the archive,
+archive: members sorted by name, fixed timestamps, LZMA compression (archives written
+before the storage audit use deflate and keep their bytes), and an embedded compact
+`manifest.json` holding just the filing and members, so identical bytes give the same
+key and checksum. No member is stored loose. `materialize_package` downloads the archive,
 checks its SHA-256 against the manifest, applies the bulk ZIP safety checks
 (traversal, member count, expanded bytes, compression ratio, CRC), refuses entries
 that aren't manifest members, and verifies each extracted member's SHA-256 and size
@@ -70,8 +73,9 @@ Filing packages contain only the files Arelle needs (selection policy 2,
   the rest concurrently, at most `XBRL_SEC_MAX_CONCURRENCY` at once, through
   the rate-limited SEC client.
 - When the index lists no XBRL input but lists `<accession>-xbrl.zip`, only the
-  archive is fetched and checked with the bulk ZIP limits plus
-  `filing_max_members`/`filing_max_bytes`. The package archive then holds the
+  archive is fetched and checked with the bulk ZIP limits narrowed to
+  `filing_max_members`/`filing_max_bytes`, so an archive that declares more is
+  rejected before anything is decompressed. The package archive then holds the
   `-xbrl.zip` itself and its expanded members; those members record the archive in
   `source_archive`, and the flagged instance becomes the entrypoint. A rejected
   `-xbrl.zip` is stored loose under its checksum key for diagnosis.
@@ -90,11 +94,16 @@ XBRL namespace, so stray exhibits never enter the IXDS.
 
 Silver is the rebuild source for ClickHouse and protects against database corruption or schema experiments.
 
+Standard taxonomy concepts are stored once per namespace and taxonomy version under
+`silver/xbrl/taxonomy_concepts/` and shared by every filing that loads them; each
+filing's concept objects hold its own concepts (DATA_MODEL.md).
+
 The saved Arelle extraction (the resume and remap checkpoint) is a zstd-compressed
 JSON stream, `silver/xbrl/extractions/accession=<a>/revision=<r>/sha256=<hash>.json.zst`,
 where the hash is of the stored object. It is written and read as a stream through
 pyarrow's compressed streams, with `XBRL_EXTRACTION_MAX_BYTES` bounding the
-uncompressed JSON. Legacy uncompressed `.json` checkpoints are still read.
+uncompressed JSON. The Arelle child writes it, and the parent uploads that file
+as written, so a bundle is serialized once. Legacy uncompressed `.json` checkpoints are still read.
 
 ### Gold: ClickHouse
 
@@ -112,7 +121,8 @@ uncompressed JSON. Legacy uncompressed `.json` checkpoints are still read.
 - Cover pages, segment/product/geographic breakdowns, and text blocks
   (`xbrl_cover_pages`, `xbrl_segment_facts`, `v_cover_pages_latest`,
   `v_segment_facts_latest`, `v_text_blocks_latest`), derived from dei and dimensional
-  facts and published the same way.
+  facts and published the same way. The API reads them per filing under
+  `/v1/filings/{accession}/cover-page`, `/segments`, and `/text-blocks`.
 - Query-optimized denormalization such as CIK, filing date, form, and period fields on facts.
 
 ### PostgreSQL control plane
@@ -132,7 +142,10 @@ Logical identity is `(dataset_kind, source_period, source_url, checksum)`. If th
 
 ### Filings
 
-Logical identity is the dashed accession number. Package bytes and extraction version are tracked independently, allowing a parser upgrade to produce a new extraction revision without changing the filing identity.
+Logical identity is the filing key: the dashed SEC accession number, or
+`<source>-<native id>` for another source (DATA_MODEL.md, "Filing keys and entity
+keys"). The SEC package downloader refuses a non-SEC filing with
+`UnsupportedSourceError` (never retried) before any request. Package bytes and extraction version are tracked independently, allowing a parser upgrade to produce a new extraction revision without changing the filing identity.
 
 ### ClickHouse
 
@@ -150,10 +163,14 @@ The first implementation uses PostgreSQL as a queue:
 6. A worker runs up to `XBRL_WORKER_CONCURRENCY` jobs at once, claiming only when a
    slot is free; each job has its own lease, heartbeat, and checkpoint ownership.
 
+A completed parse, legacy ingest, or remap queues the company's `rebuild_series` job
+(`series:<cik>`, delayed by `XBRL_SERIES_REBUILD_DELAY_SECONDS`), so one backfill of a
+company rebuilds its series once instead of once per filing.
+
 A filing is two jobs. `fetch_filing` downloads the package from the SEC into one
 archive, records the package and manifest pointers on the `filings` row, and enqueues
 `parse_filing`. `parse_filing` loads the stored manifest, runs Arelle, validation,
-silver and ClickHouse writes, canonical mapping, and the series rebuild, and never
+silver and ClickHouse writes, and canonical mapping, queues the series rebuild, and never
 downloads (a missing package is a permanent `ArtifactIntegrityError`). Workers build
 the SEC client only for job types that send SEC traffic (`requires_sec`), so parse
 workers scale out beside the one SEC-active worker. Legacy `ingest_filing` jobs run
@@ -188,13 +205,18 @@ editor and keep node names consistent across views.
 ### Deployment view
 
 The local and single-host topology from `docker-compose.yml`. Production additions are
-listed in [DEPLOYMENT.md](DEPLOYMENT.md).
+listed in [DEPLOYMENT.md](DEPLOYMENT.md). Storage and application containers share the
+internal `backend` network; `worker-parse` is on it alone, so it has no internet
+route. Each service connects with its own identity (OPERATIONS.md, "Identities and the
+admin service").
 
-![UML deployment view: worker, worker-parse, and api containers reach postgres, minio, and clickhouse over the default Compose network; prometheus and grafana in the monitoring profile; SEC and taxonomy hosts outside the host](diagrams/deployment-compose.svg)
+![UML deployment view: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker, admin, and api also join the default network; prometheus and grafana in the monitoring profile; SEC and taxonomy hosts outside the host](diagrams/deployment-compose.svg)
 
 ### Class view
 
 Core Pydantic types from `domain/`. Persisted columns are in [DATA_MODEL.md](DATA_MODEL.md).
+`FilingRef.accession` is a filing key and `FilingRef.cik` an entity key whose range
+matches the key's source (`domain/sources.py`).
 
 ![UML class view: FilingRef, FilingPackageManifest, PackageMember, XbrlExtractionBundle and its parts, XbrlFact, CanonicalFact, ConceptMapping, CanonicalMetric, ValidationIssue, SourceArtifactRef, DatasetArtifact, and JobRecord](diagrams/class-domain.svg)
 
@@ -202,7 +224,7 @@ Core Pydantic types from `domain/`. Persisted columns are in [DATA_MODEL.md](DAT
 
 Filing discovery, fetch, and parse:
 
-![UML activity view with three swimlanes: operator enqueues discovery or a filing; SEC-active worker discovers and fetches packages; parse worker extracts, validates, writes silver and ClickHouse, maps, publishes, and rebuilds series](diagrams/activity-filing.svg)
+![UML activity view with three swimlanes: operator enqueues discovery or a filing; SEC-active worker discovers and fetches packages; parse worker extracts, validates, writes silver and ClickHouse, maps, publishes, and queues the series rebuild](diagrams/activity-filing.svg)
 
 Bulk FSNDS backfill:
 
@@ -233,14 +255,15 @@ Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level fol
 | Worker and job queue | Component; job state machine; filing sequence; recovery activity | `worker.py`; `infrastructure/storage/postgres.py` (`claim_job`, `complete_job`, `fail_job`, `retry_job`) |
 | SEC HTTP client and egress lock | Component; filing sequence; trust boundaries | `infrastructure/http/sec_client.py`, `egress_lock.py`, `rate_limiter.py` |
 | Bulk backfill | Component; bulk activity; artifact state machine | `ingestion/bulk_catalog.py`, `bulk_downloader.py`, `bulk_loader.py`, `orchestrator.py`, `sec_tsv.py` |
-| Filing ingestion | Component; filing activity; filing sequence | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
+| Filing ingestion | Component; class (FilingRef); filing activity; filing sequence | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py`; filing and entity keys in `domain/sources.py` |
 | Arelle and taxonomy packages | Component; filing activity and sequence; trust boundaries | `infrastructure/xbrl/arelle_adapter.py`, `taxonomy_packages.py`, `sec_transforms.py`; `config/taxonomy_packages.yml` |
 | Validation | Component; filing and bulk activity | `validation/` |
 | Statements, disclosures, fiscal fields | Class (bundle); filing activity (publish step) | `normalization/statements.py`, `disclosures.py`, `fiscal_focus.py`; `ClickHouseWarehouse.insert_xbrl_bundle` |
 | Canonical mapping and series | Component; class; filing activity and sequence | `mapping/`, `query/series.py`, `normalization/series.py`; `config/canonical_metrics.yml`, `concept_seed.yml` |
 | Query API | Component; API sequence; deployment; trust boundaries | `api/`, `query/service.py` |
-| PostgreSQL | Component; deployment; job and artifact state machines | `infrastructure/storage/postgres.py`, `postgres_models.py`; `migrations/` |
-| MinIO / S3 | Component; deployment; filing and bulk activity | `infrastructure/storage/object_store.py`, `parquet.py`, `extraction_io.py` |
+| PostgreSQL | Component; deployment; job and artifact state machines | `infrastructure/storage/postgres.py`, `postgres_models.py`; `migrations/`; `ops/provision/` |
+| MinIO / S3 | Component; deployment; filing and bulk activity | `infrastructure/storage/object_store.py`, `parquet.py`, `extraction_io.py`; `minio-init` in `docker-compose.yml` |
+| Storage maintenance | Deployment (admin service) | `infrastructure/storage/maintenance.py`, `inventory.py`; `cli.py` `storage` commands |
 | ClickHouse | Component; deployment; filing and API sequences | `infrastructure/storage/clickhouse.py`; `sql/clickhouse/`; `docker/clickhouse/` |
 | SEC EDGAR (external) | Component; deployment; filing sequence; trust boundaries | `config/sources.yml` |
 | Taxonomy hosts (external) | Component; deployment; trust boundaries | `config/taxonomy_packages.yml` |
@@ -261,7 +284,8 @@ These were found while mapping the code and are labelled in the diagrams:
   `ArtifactState.discovered` and `downloading` are allowed but unused, because the bulk
   downloader stores the ZIP before it creates the artifact row.
 - No CLI command rebuilds ClickHouse from silver Parquet. The recovery docs describe it
-  as the intent.
+  as the intent. `storage retire-revisions` therefore keeps a revision's ClickHouse
+  rows unless its saved extraction is still stored.
 
 ## Security
 

@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_cover_pages
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
 ORDER BY (accession, extraction_revision)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 -- One row per numeric fact whose dimensions are all on breakdown axes. `axis` and
 -- `member_label` describe the first member (segment, product, geography,
@@ -60,4 +60,4 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_segment_facts
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
 ORDER BY (accession, extraction_revision, concept_qname, fact_id)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';

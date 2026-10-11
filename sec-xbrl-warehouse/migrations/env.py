@@ -15,13 +15,15 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.postgres_dsn.replace("%", "%%"))
+config.set_main_option(
+    "sqlalchemy.url", settings.postgres_dsn.get_secret_value().replace("%", "%%")
+)
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.postgres_dsn,
+        url=settings.postgres_dsn.get_secret_value(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

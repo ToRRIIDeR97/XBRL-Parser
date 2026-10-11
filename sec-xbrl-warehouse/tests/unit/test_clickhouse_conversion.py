@@ -301,3 +301,35 @@ def test_raw_value_scale_rule(kind, raw, decimal, text, nil, scale) -> None:
         )
     )
     assert raw_value_scale(fact) == scale
+
+
+def test_bundle_insert_skips_taxonomy_rows_already_inserted_by_this_process() -> None:
+    from types import SimpleNamespace
+
+    from sec_xbrl_warehouse.config import Settings
+    from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWarehouse
+
+    inserted: list[tuple[str, int]] = []
+    client = SimpleNamespace(
+        insert_arrow=lambda name, table: inserted.append((name.split(".")[-1], table.num_rows))
+    )
+    warehouse = ClickHouseWarehouse(Settings(env="test"), client=client)
+    base = _bundle()
+    standard = base.concepts[0]
+    extension = standard.model_copy(
+        update={
+            "namespace": "http://example.com/ext",
+            "qname": "ext:Custom",
+            "name": "Custom",
+            "is_extension": True,
+        }
+    )
+    bundle = base.model_copy(update={"concepts": (standard, extension)})
+
+    first = warehouse.insert_xbrl_bundle(bundle)
+    assert first["concepts"] == 1  # extension concepts only
+    assert ("taxonomy_concepts", 1) in inserted
+    inserted.clear()
+    second = warehouse.insert_xbrl_bundle(bundle)
+    assert second == first
+    assert "taxonomy_concepts" not in {name for name, _ in inserted}

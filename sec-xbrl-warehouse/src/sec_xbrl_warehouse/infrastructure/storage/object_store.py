@@ -23,7 +23,7 @@ def _validate_max_bytes(max_bytes: int | None) -> None:
 class LocalObjectStore:
     """Filesystem implementation with the same immutable-key contract as S3."""
 
-    def __init__(self, root: Path, bucket: str) -> None:
+    def __init__(self, root: Path, bucket: str = "sec-xbrl") -> None:
         self.root = root
         self.bucket = bucket
 
@@ -172,7 +172,7 @@ class S3ObjectStore:
             "s3",
             endpoint_url=settings.object_store_endpoint,
             aws_access_key_id=settings.object_store_access_key,
-            aws_secret_access_key=settings.object_store_secret_key,
+            aws_secret_access_key=settings.object_store_secret_key.get_secret_value(),
             region_name=settings.object_store_region,
             use_ssl=settings.object_store_secure,
         )

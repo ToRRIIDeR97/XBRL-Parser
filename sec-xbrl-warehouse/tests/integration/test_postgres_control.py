@@ -658,7 +658,7 @@ async def test_egress_lock_verify_reacquires_after_dropped_connection(
     holder = SecEgressLock(postgres_settings, check_interval_seconds=0)
     other = SecEgressLock(postgres_settings, check_interval_seconds=0)
     admin = await asyncpg.connect(
-        make_url(postgres_settings.postgres_dsn)
+        make_url(postgres_settings.postgres_dsn.get_secret_value())
         .set(drivername="postgresql")
         .render_as_string(hide_password=False)
     )
@@ -802,5 +802,117 @@ async def test_manifest_pointer_and_parse_job_extraction_checkpoint(
             await repo.save_checkpoint(job.id, "extract", pointer)
         await repo.complete_job(job.id, {}, worker_id="parse-worker", attempt=job.attempts)
         assert await repo.extraction_checkpoint(filing.accession, 3) == pointer
+    finally:
+        await repo.close()
+
+
+async def test_series_rebuild_requests_coalesce_per_company(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        first = await repo.enqueue_series_rebuild(7, 0)
+        assert await repo.enqueue_series_rebuild(7, 0) == first  # pending absorbs it
+        assert await repo.enqueue_series_rebuild(8, 0) != first  # per company
+        later = await repo.enqueue_series_rebuild(9, 3600)
+        assert await repo.claim_job("w0", 900, [JobType.REBUILD_SERIES]) is not None  # cik 7 or 8
+        running = await repo.claim_job("w1", 900, [JobType.REBUILD_SERIES])
+        assert running is not None and running.id != later  # delayed job isn't claimable yet
+        cik = running.payload["cik"]
+        # A request while the rebuild runs gets one follow-up job.
+        follow_up = await repo.enqueue_series_rebuild(cik, 0)
+        assert follow_up not in {None, running.id}
+        assert await repo.enqueue_series_rebuild(cik, 0) == follow_up
+        # A follow-up that finished while the rebuild still runs is queued again.
+        follow = await repo.claim_job("wf", 900, [JobType.REBUILD_SERIES])
+        assert follow is not None and follow.id == follow_up
+        await repo.complete_job(follow.id, {}, worker_id="wf", attempt=follow.attempts)
+        assert await repo.enqueue_series_rebuild(cik, 0) == follow_up
+        await repo.complete_job(running.id, {}, worker_id="w1", attempt=running.attempts)
+        # A completed job is reset to pending by the next request.
+        assert await repo.enqueue_series_rebuild(cik, 0) == running.id
+        claimed = {
+            job.id
+            for job in [await repo.claim_job("w2", 900, [JobType.REBUILD_SERIES]) for _ in range(2)]
+            if job is not None
+        }
+        assert claimed == {running.id, follow_up}
+    finally:
+        await repo.close()
+
+
+async def test_legacy_extraction_pointers_are_repointed(postgres_settings: Settings) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    accession = "0000000001-26-000007"
+    old = f"silver/xbrl/extractions/accession={accession}/revision=2/sha256=aa.json"
+    try:
+        await repo.enqueue_job(
+            job_type="parse_filing",
+            idempotency_key=f"parse:{accession}:2",
+            payload={"accession": accession, "extraction_revision": 2},
+        )
+        job = await repo.claim_job("w1", 900, [JobType.PARSE_FILING])
+        assert job is not None
+        with checkpoint_lease(job):
+            await repo.save_checkpoint(job.id, "extract", {"object_key": old, "sha256": "aa"})
+        await repo.complete_job(job.id, {}, worker_id="w1", attempt=job.attempts)
+
+        assert await repo.legacy_extraction_pointers() == [{"object_key": old, "sha256": "aa"}]
+        new = old.replace("sha256=aa.json", "sha256=bb.json.zst")
+        assert await repo.repoint_extraction_checkpoints(old, new, "bb") == 1
+        assert await repo.legacy_extraction_pointers() == []
+        assert await repo.extraction_checkpoint(accession, 2) == {"object_key": new, "sha256": "bb"}
+    finally:
+        await repo.close()
+
+
+async def test_resolve_entity_key_is_stable_under_concurrent_first_use(
+    postgres_settings: Settings,
+) -> None:
+    lei = f"TEST{uuid4().hex[:16].upper()}"
+    scheme = "http://standards.iso.org/iso/17442"
+    repos = [PostgresControlRepository(postgres_settings) for _ in range(4)]
+    try:
+        keys = await asyncio.gather(
+            *(repo.resolve_entity_key(scheme, lei) for repo in repos for _ in range(5))
+        )
+        assert len(set(keys)) == 1 and keys[0] >= 10_000_000_000
+        # Same identifier under another scheme is another entity.
+        other = await repos[0].resolve_entity_key("urn:example", lei)
+        assert other != keys[0]
+        async with repos[0].engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("SELECT count(*) FROM entity_keys WHERE identifier = :i"), {"i": lei}
+                )
+            ).scalar_one()
+        assert rows == 2
+        assert await repos[1].resolve_entity_key("http://www.sec.gov/CIK", "320193") == 320193
+        for scheme_, identifier in (
+            ("", lei),
+            (scheme, ""),
+            (scheme, "  "),
+            ("http://www.sec.gov/CIK", "12345678901"),
+            ("http://www.sec.gov/CIK", "12a"),
+        ):
+            with pytest.raises(ValueError):
+                await repos[1].resolve_entity_key(scheme_, identifier)
+    finally:
+        for repo in repos:
+            await repo.close()
+
+
+async def test_upsert_filing_stores_non_sec_filing_keys(postgres_settings: Settings) -> None:
+    key = f"esef-{uuid4().hex}-{'Z' * 80}"
+    filing = _filing().model_copy(update={"accession": key, "cik": 10_000_000_007})
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.upsert_filing(filing)
+        await repo.upsert_filing(filing)
+        async with repo.engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("SELECT accession, cik FROM filings WHERE accession = :k"), {"k": key}
+                )
+            ).all()
+        assert [tuple(row) for row in rows] == [(key, 10_000_000_007)]
     finally:
         await repo.close()

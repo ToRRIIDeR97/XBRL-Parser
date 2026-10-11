@@ -2,6 +2,28 @@
 
 Latest operational state (3 October 2026): the local warehouse was reset. The Colima Docker disk filled up (a 25 GB uncapped ClickHouse console log plus warehouse data), which crashed PostgreSQL. At the operator's request the PostgreSQL, ClickHouse, and MinIO volumes were deleted and recreated empty; migrations, ClickHouse DDL, and `doctor` pass. The earlier bulk progress (April, May, June, and July 2026 Notes jobs, their checkpoints, and quarantines) and the AAPL 2025 10-K no longer exist locally; the September handover files describe history, not live state. Recreated containers use the Compose log limits. Use `worker run --job-type ingest_filing` to process filing jobs without claiming bulk loads. AAPL (CIK 320193) 10-K/10-Q filings from 2016 to July 2026 are loaded: 42 of 43, with 41,333 facts in the latest views. 26 filings were re-extracted at revision 2 after the taxonomy-encoding fix. The January 2019 10-Q (`0000320193-19-000010`) is missing because SEC's `index.json` for it lists only the `.txt` bundle and `-xbrl.zip`, which the filing downloader can't read yet. Pre-2019 classic-XBRL filings need `filing enqueue --instance-document`. Validation: 183 unit tests and 23 integration tests passed. See the [8 September remediation](docs/history/HARDENING_REMEDIATION_2026-09-08.md) for hardening scope; the API credential split still requires provisioning before deployment.
 
+Storage, speed, and security audit (8 October 2026, branch
+`audit/speed-security-storage`): applied to the local stack. ClickHouse dropped the
+stale `system.*_0` log tables, the 2026-10-05 backup database and `__backup_` tables
+(verified against the live tables first), and `trace_log`; server logs now rotate at
+50 MB x 3. PostgreSQL dropped the three 2026-10-05 backup/scratch databases (same row
+counts as live), is at migration `0007_drop_prefix_indexes`, runs with WAL
+compression, and its control database went from 225 MB to 62 MB: 162,803 legacy
+validation issues were grouped into 42,563 rows (occurrence totals unchanged) and the
+36,452 superseded `mapping_reviews` were deleted (dump in
+`data/backups/xbrl_control_validation_issues_mapping_reviews_20261008.sql.gz`; this
+makes the 0003 downgrade unable to reopen them). `storage recompress-extractions`
+rewrote the 68 plain-JSON saved extractions (906 MB) as zstd (45 MB) and deleted the
+plain copies; the bucket is now versioned, so MinIO keeps them as noncurrent versions
+until they expire after 30 days. `storage retire-revisions` removed the revision-1
+rows of the 26 filings re-extracted at revision 2 (`v_xbrl_facts_latest` still has
+41,333 facts). `db upgrade-clickhouse --yes` rebuilt `canonical_facts` for its new sort
+key (empty table; its backup was dropped), `db init-clickhouse` applied ZSTD(3) and the
+accession bloom indexes, and the indexes were materialized. The least-privilege
+identities (`xbrl_worker`, `xbrl_writer`, `xbrl_api` and its profile, the MinIO
+`xbrl_worker` user) are provisioned with the development passwords. The application
+images weren't rebuilt or started in this change. Unit and integration suites pass.
+
 Pending after the filing package selection, dei fiscal-field, and SEC inline
 transform changes (extraction revision 3, selection policy 2): re-extract the 42 loaded AAPL filings and ingest
 `0000320193-19-000010` from its `-xbrl.zip`, then compare member counts,
@@ -19,16 +41,20 @@ show no `uncovered` rows), set
 `XBRL_ARELLE_OFFLINE=true` for the re-extraction, and confirm no `webCache:*` issues.
 Until then the live data stays at revisions 1 and 2.
 
-Pending after plans 12-15 (none run against live data): apply Alembic to 0006
-(`filings.manifest_object_key`), run `db upgrade-clickhouse --yes` (binary hashes,
-`taxonomy_concepts`, `xbrl_concept_labels`, disclosure tables; backups are kept as
-`<table>__backup_<timestamp>_<token>`), grant `xbrl_api` the new objects (SECURITY.md),
-and run `storage report` before any retention decision. Filings are now
+Plans 12-15 are applied locally (Alembic at 0007, ClickHouse upgraded, identities
+provisioned with `ops/provision/provision_identities.sh`, which also grants
+`xbrl_api`). Filings are now
 `fetch_filing` → `parse_filing` jobs: run one SEC-active worker with
 `--job-type fetch_filing --job-type discover_filings` and a parse worker with
 `XBRL_ARELLE_OFFLINE=true XBRL_WORKER_CONCURRENCY=N --job-type parse_filing` (compose
-profile `parse`). Then benchmark the AAPL re-ingest against the 43-minute serial
+profile `parse`); give the SEC-active worker `XBRL_WORKER_CONCURRENCY=4` too. Rebuild
+the images (`docker compose build api worker admin`) before starting them. Then benchmark the AAPL re-ingest against the 43-minute serial
 baseline (OPERATIONS.md, capacity tuning).
+
+Plan 17 (source-neutral filing and entity keys) adds Alembic
+`0008_filing_entity_keys`, not yet applied to the live control database: back up
+PostgreSQL (BACKUP_RESTORE.md), run `alembic upgrade head` through the `admin`
+service, then `doctor`. ClickHouse and existing SEC rows and object keys are unchanged.
 
 ## Current state
 
@@ -70,6 +96,7 @@ docker compose up -d postgres clickhouse minio minio-init
 python -m pip install -e ".[dev]"
 alembic upgrade head
 xbrl-warehouse db init-clickhouse
+./ops/provision/provision_identities.sh
 xbrl-warehouse taxonomy sync
 xbrl-warehouse doctor
 ```

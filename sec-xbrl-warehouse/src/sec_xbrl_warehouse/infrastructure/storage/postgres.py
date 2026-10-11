@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -31,6 +32,7 @@ from sec_xbrl_warehouse.domain.models import (
     SourceArtifactRef,
     ValidationIssue,
 )
+from sec_xbrl_warehouse.domain.sources import SEC_CIK_SCHEME
 from sec_xbrl_warehouse.exceptions import (
     ArtifactIntegrityError,
     ConfigurationError,
@@ -38,6 +40,7 @@ from sec_xbrl_warehouse.exceptions import (
 )
 from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
     CompanyRow,
+    EntityKeyRow,
     FilingRow,
     IngestionJobRow,
     JobCheckpointRow,
@@ -102,7 +105,7 @@ class PostgresControlRepository:
     ) -> None:
         self.settings = settings
         self.engine = engine or create_async_engine(
-            settings.postgres_dsn,
+            settings.postgres_dsn.get_secret_value(),
             pool_pre_ping=True,
             # Concurrent jobs each heartbeat and checkpoint on their own connection.
             pool_size=max(5, settings.worker_concurrency + 2),
@@ -326,6 +329,61 @@ class PostgresControlRepository:
             job_id: UUID | None = await session.scalar(statement)
             return job_id
 
+    async def enqueue_series_rebuild(self, cik: int, delay_seconds: float) -> UUID | None:
+        """Queue one company's series rebuild, coalescing requests per CIK.
+
+        The job (`series:<cik>`) runs `delay_seconds` after the first request, so a
+        backfill of many filings of one company rebuilds once, not once per filing.
+        A pending or retrying job absorbs the request. A completed or dead job is
+        reset to pending. While a rebuild runs, it may already have read the
+        company's facts, so one follow-up job per running attempt is queued.
+        """
+        key = f"series:{cik}"
+        payload = {"cik": cik}
+        available = func.now() + timedelta(seconds=delay_seconds)
+        async with self.sessions.begin() as session:
+            # Each running job hands requests to its own follow-up key, so the chain
+            # is at most as long as the number of rebuilds of this company running.
+            while True:
+                row = await session.scalar(
+                    select(IngestionJobRow)
+                    .where(IngestionJobRow.idempotency_key == key)
+                    .with_for_update()
+                )
+                if row is not None and row.state == JobState.RUNNING.value:
+                    key = f"series:{cik}:after:{row.id}:{row.attempts}"
+                    continue
+                if row is None:
+                    job_id: UUID | None = await session.scalar(
+                        pg_insert(IngestionJobRow)
+                        .values(
+                            job_type=JobType.REBUILD_SERIES.value,
+                            state=JobState.PENDING.value,
+                            idempotency_key=key,
+                            payload=payload,
+                            available_at=available,
+                        )
+                        .on_conflict_do_nothing(index_elements=[IngestionJobRow.idempotency_key])
+                        .returning(IngestionJobRow.id)
+                    )
+                    if job_id is None:  # a concurrent request inserted it first
+                        job_id = await session.scalar(
+                            select(IngestionJobRow.id).where(IngestionJobRow.idempotency_key == key)
+                        )
+                    return job_id
+                if row.state not in {JobState.PENDING.value, JobState.RETRY.value}:
+                    row.state = JobState.PENDING.value
+                    row.attempts = 0
+                    row.available_at = available
+                    row.result = None
+                    row.last_error = None
+                    row.completed_at = None
+                    row.locked_at = None
+                    row.locked_by = None
+                    row.heartbeat_at = None
+                    row.deferred_since = None
+                return row.id
+
     async def published_filing_revisions(
         self, accessions: Sequence[str] | None = None
     ) -> list[tuple[str, int]]:
@@ -470,6 +528,43 @@ class PostgresControlRepository:
         async with self.sessions() as session:
             payload = await session.scalar(statement)
         return dict(payload) if payload else None
+
+    async def legacy_extraction_pointers(self) -> list[dict[str, str]]:
+        """Distinct saved-extraction pointers of completed jobs that are plain `.json`."""
+        statement = (
+            select(JobCheckpointRow.payload)
+            .join(IngestionJobRow, IngestionJobRow.id == JobCheckpointRow.job_id)
+            .where(
+                JobCheckpointRow.stage == "extract",
+                IngestionJobRow.state == JobState.COMPLETE.value,
+                JobCheckpointRow.payload["object_key"].astext.like("%.json"),
+            )
+        )
+        async with self.sessions() as session:
+            payloads = (await session.scalars(statement)).all()
+        unique = {
+            (str(payload["object_key"]), str(payload["sha256"])): None for payload in payloads
+        }
+        return [{"object_key": key, "sha256": sha} for key, sha in unique]
+
+    async def repoint_extraction_checkpoints(
+        self, old_key: str, new_key: str, new_sha256: str
+    ) -> int:
+        """Point every saved-extraction checkpoint at `old_key` to a replacement object."""
+        async with self.sessions.begin() as session:
+            result = await session.execute(
+                update(JobCheckpointRow)
+                .where(
+                    JobCheckpointRow.stage == "extract",
+                    JobCheckpointRow.payload["object_key"].astext == old_key,
+                )
+                .values(
+                    payload=JobCheckpointRow.payload.op("||")(
+                        func.jsonb_build_object("object_key", new_key, "sha256", new_sha256)
+                    )
+                )
+            )
+            return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def claim_job(
         self,
@@ -766,6 +861,41 @@ class PostgresControlRepository:
             row.locked_by = None
             row.heartbeat_at = None
             return JobState(row.state)
+
+    async def resolve_entity_key(self, scheme: str, identifier: str) -> int:
+        """Return the entity key of an issuer identifier, allocating one on first use.
+
+        An SEC CIK (`SEC_CIK_SCHEME`) is its own key and is never stored. Any other
+        `(scheme, identifier)` gets a key from `entity_key_seq` (at or above
+        `ENTITY_KEY_BASE`) that never changes. Concurrent first calls agree: the
+        unique constraint keeps one row and the losers read it back.
+        """
+        if not scheme or not scheme.strip() or not identifier or not identifier.strip():
+            raise ValueError("Entity key scheme and identifier must not be empty")
+        if scheme == SEC_CIK_SCHEME:
+            if re.fullmatch(r"[0-9]{1,10}", identifier) is None:
+                raise ValueError(f"Invalid CIK: {identifier!r}")
+            return int(identifier)
+        values = {"scheme": scheme, "identifier": identifier}
+        lookup = select(EntityKeyRow.entity_key).where(
+            EntityKeyRow.scheme == scheme, EntityKeyRow.identifier == identifier
+        )
+        async with self.sessions.begin() as session:
+            key = await session.scalar(lookup)
+            if key is None:
+                key = await session.scalar(
+                    pg_insert(EntityKeyRow)
+                    .values(**values)
+                    .on_conflict_do_nothing(constraint="uq_entity_keys_scheme_identifier")
+                    .returning(EntityKeyRow.entity_key)
+                )
+        if key is None:
+            # Another transaction inserted it first; it has committed by now.
+            async with self.sessions() as session:
+                key = await session.scalar(lookup)
+        if key is None:
+            raise RuntimeError(f"Entity key for {scheme} {identifier} was not stored")
+        return int(key)
 
     async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
         values = {

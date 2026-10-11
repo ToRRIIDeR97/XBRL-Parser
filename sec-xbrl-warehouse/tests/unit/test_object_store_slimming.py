@@ -75,6 +75,7 @@ async def test_xbrl_zip_fallback_stores_only_the_package_archive(tmp_path: Path)
     assert (tmp_path / "out" / "example-20251231.xsd").read_bytes() == b"<schema/>"
     with zipfile.ZipFile(store.bucket_root / manifest.package_object_key) as package:
         embedded = json.loads(package.read("manifest.json"))
+        assert {info.compress_type for info in package.infolist()} == {zipfile.ZIP_LZMA}
     assert set(embedded) == {"filing", "members"}
 
 

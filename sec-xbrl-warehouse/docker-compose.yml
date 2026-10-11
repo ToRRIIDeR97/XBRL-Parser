@@ -11,6 +11,9 @@ services:
     mem_limit: ${POSTGRES_MEMORY_LIMIT:-2g}
     cpus: ${POSTGRES_CPUS:-2}
     image: postgres@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    # Compressed, smaller WAL: the control plane is small, and the 1 GB default
+    # max_wal_size kept more WAL than data.
+    command: ["postgres", "-c", "wal_compression=on", "-c", "max_wal_size=256MB", "-c", "min_wal_size=64MB"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-xbrl_control}
       POSTGRES_USER: ${POSTGRES_USER:-xbrl}
@@ -24,6 +27,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    networks: [default, backend]
     logging: *bounded-logging
     restart: unless-stopped
 
@@ -52,6 +56,7 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+    networks: [default, backend]
     logging: *bounded-logging
     restart: unless-stopped
 
@@ -73,18 +78,24 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+    networks: [default, backend]
     logging: *bounded-logging
     restart: unless-stopped
 
+  # Bucket, versioning, and the worker's object-store identity. Every step is
+  # idempotent and fails closed. The server image ships `mc`.
   minio-init:
-    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     depends_on:
       minio:
         condition: service_healthy
     environment:
+      HOME: /tmp
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-xbrl_minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-xbrl_minio_dev_password}
       XBRL_OBJECT_STORE_BUCKET: ${XBRL_OBJECT_STORE_BUCKET:-sec-xbrl}
+      XBRL_WORKER_OBJECT_STORE_ACCESS_KEY: ${XBRL_WORKER_OBJECT_STORE_ACCESS_KEY:-xbrl_worker}
+      XBRL_WORKER_OBJECT_STORE_SECRET_KEY: ${XBRL_WORKER_OBJECT_STORE_SECRET_KEY:-xbrl_worker_dev_password}
     entrypoint:
       - /bin/sh
       - -ec
@@ -92,6 +103,14 @@ services:
         mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
         mc mb --ignore-existing "local/$${XBRL_OBJECT_STORE_BUCKET}"
         mc anonymous set none "local/$${XBRL_OBJECT_STORE_BUCKET}"
+        mc version enable "local/$${XBRL_OBJECT_STORE_BUCKET}"
+        mc ilm rule ls "local/$${XBRL_OBJECT_STORE_BUCKET}" >/dev/null 2>&1 || mc ilm rule add --noncurrent-expire-days 30 "local/$${XBRL_OBJECT_STORE_BUCKET}"
+        policy="$$(mktemp)"
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket","s3:ListBucketMultipartUploads"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Resource":["arn:aws:s3:::%s/*"]}]}' "$${XBRL_OBJECT_STORE_BUCKET}" "$${XBRL_OBJECT_STORE_BUCKET}" > "$$policy"
+        mc admin policy create local xbrl-worker "$$policy"
+        mc admin user add local "$${XBRL_WORKER_OBJECT_STORE_ACCESS_KEY}" "$${XBRL_WORKER_OBJECT_STORE_SECRET_KEY}"
+        mc admin policy attach local xbrl-worker --user "$${XBRL_WORKER_OBJECT_STORE_ACCESS_KEY}"
+    networks: [backend]
 
   api:
     profiles: ["application", "monitoring"]
@@ -118,9 +137,12 @@ services:
       XBRL_API_CLICKHOUSE_PASSWORD: ${XBRL_API_CLICKHOUSE_PASSWORD:-xbrl_api_dev_password}
       XBRL_API_HOST: 0.0.0.0
       XBRL_API_PORT: 8080
+      # The container port is published on 127.0.0.1 only; production requires a key.
+      XBRL_API_ALLOW_UNAUTHENTICATED_REMOTE: ${XBRL_API_ALLOW_UNAUTHENTICATED_REMOTE:-true}
     command: ["api", "serve"]
     ports:
       - "127.0.0.1:${XBRL_API_PORT:-8080}:8080"
+    networks: [default, backend]
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,15 +164,29 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
     env_file: .env
-    environment:
-      XBRL_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-xbrl}:${POSTGRES_PASSWORD:-xbrl_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
+    environment: &worker-identity
+      # Least privilege: DML-only PostgreSQL role, SELECT/INSERT ClickHouse user,
+      # and an object-store user without delete (provision: OPERATIONS.md). The
+      # owner, admin, and root credentials that `.env` carries are blanked here.
+      XBRL_POSTGRES_DSN: postgresql+asyncpg://xbrl_worker:${XBRL_WORKER_POSTGRES_PASSWORD:-xbrl_worker_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
       XBRL_CLICKHOUSE_HOST: clickhouse
       XBRL_CLICKHOUSE_PORT: 8123
+      XBRL_CLICKHOUSE_USERNAME: xbrl_writer
+      XBRL_CLICKHOUSE_PASSWORD: ${XBRL_WRITER_CLICKHOUSE_PASSWORD:-xbrl_writer_dev_password}
       XBRL_OBJECT_STORE_ENDPOINT: http://minio:9000
+      XBRL_OBJECT_STORE_ACCESS_KEY: ${XBRL_WORKER_OBJECT_STORE_ACCESS_KEY:-xbrl_worker}
+      XBRL_OBJECT_STORE_SECRET_KEY: ${XBRL_WORKER_OBJECT_STORE_SECRET_KEY:-xbrl_worker_dev_password}
+      POSTGRES_PASSWORD: ""
+      CLICKHOUSE_PASSWORD: ""
+      MINIO_ROOT_PASSWORD: ""
+      XBRL_API_KEY: ""
+      XBRL_API_CLICKHOUSE_PASSWORD: ""
+      XBRL_API_POSTGRES_DSN: ""
       XBRL_WORKER_METRICS_HOST: 0.0.0.0
     volumes:
       - app_data:/app/data
     command: ["worker", "run"]
+    networks: [default, backend]
     depends_on:
       postgres:
         condition: service_healthy
@@ -178,10 +214,7 @@ services:
       dockerfile: docker/app.Dockerfile
     env_file: .env
     environment:
-      XBRL_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-xbrl}:${POSTGRES_PASSWORD:-xbrl_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
-      XBRL_CLICKHOUSE_HOST: clickhouse
-      XBRL_CLICKHOUSE_PORT: 8123
-      XBRL_OBJECT_STORE_ENDPOINT: http://minio:9000
+      <<: *worker-identity
       XBRL_WORKER_ID: worker-parse
       XBRL_WORKER_CONCURRENCY: ${XBRL_PARSE_WORKER_CONCURRENCY:-2}
       XBRL_ARELLE_OFFLINE: "true"
@@ -189,6 +222,8 @@ services:
     volumes:
       - app_data:/app/data
     command: ["worker", "run", "--job-type", "parse_filing"]
+    # Internal network only: offline Arelle needs no internet, so it gets none.
+    networks: [backend]
     depends_on:
       postgres:
         condition: service_healthy
@@ -200,6 +235,36 @@ services:
         condition: service_completed_successfully
     logging: *bounded-logging
     restart: unless-stopped
+
+  # Operator service with the owner/admin credentials from `.env`: migrations,
+  # ClickHouse DDL and upgrades, taxonomy sync, doctor, and storage maintenance.
+  # Run on demand (`docker compose run --rm admin ...`); never long-running.
+  admin:
+    profiles: ["admin"]
+    mem_limit: ${WORKER_MEMORY_LIMIT:-4g}
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    env_file: .env
+    environment:
+      XBRL_POSTGRES_DSN: postgresql+asyncpg://${POSTGRES_USER:-xbrl}:${POSTGRES_PASSWORD:-xbrl_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
+      XBRL_CLICKHOUSE_HOST: clickhouse
+      XBRL_CLICKHOUSE_PORT: 8123
+      XBRL_OBJECT_STORE_ENDPOINT: http://minio:9000
+    volumes:
+      - app_data:/app/data
+    command: ["doctor"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: [default, backend]
+    logging: *bounded-logging
 
   prometheus:
     profiles: ["monitoring"]
@@ -234,6 +299,11 @@ services:
       - prometheus
     logging: *bounded-logging
     restart: unless-stopped
+
+networks:
+  # Storage and parse traffic. `internal` means no route to the internet.
+  backend:
+    internal: true
 
 volumes:
   postgres_data:

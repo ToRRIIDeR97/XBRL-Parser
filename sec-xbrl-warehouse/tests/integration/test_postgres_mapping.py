@@ -68,6 +68,21 @@ async def test_mapping_specificity_and_review_workflow(postgres_settings: Settin
         assert [item.id for item in issuer] == [cik_mapping.id]
         assert [item.id for item in taxonomy] == [taxonomy_mapping.id]
         assert [item.id for item in fallback] == [global_mapping.id]
+        # Looking up many keys in one query gives each key its single-key result.
+        keys = [
+            (namespace, "Revenues", "2025"),
+            (namespace, "Revenues", "2024"),
+            (namespace, "Revenues", None),
+            ("http://example.com/ext", "Revenues", "2025"),
+            (namespace, "Unmapped", "2025"),
+        ]
+        for cik in (1, 2):
+            batched = await repository.approved_mappings_for_concepts(keys, cik, date(2026, 2, 15))
+            for key in keys:
+                single = await repository.approved_mappings_for_concept(
+                    *key, cik, date(2026, 2, 15)
+                )
+                assert [m.id for m in batched[key]] == [m.id for m in single]
 
         filing = FilingRef(
             accession="0000000001-26-000099",

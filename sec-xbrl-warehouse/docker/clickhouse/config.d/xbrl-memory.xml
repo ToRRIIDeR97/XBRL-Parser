@@ -13,17 +13,29 @@
   - Cache defaults (5-8 GiB each) are larger than the container itself.
 
   Other system logs had no retention; trace_log alone reached 130 million rows.
+  trace_log (sampling profiler) is turned off, text_log keeps information and
+  above, and the server log files rotate at 50 MB x 3 (the image default is
+  1000 MB x 10, which grew to 1 GB on this volume).
 -->
 <clickhouse>
     <metric_log remove="1"/>
     <query_metric_log remove="1"/>
 
-    <trace_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></trace_log>
-    <text_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></text_log>
+    <trace_log remove="1"/>
+    <text_log>
+        <level>information</level>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </text_log>
     <query_log><ttl>event_date + INTERVAL 14 DAY DELETE</ttl></query_log>
     <part_log><ttl>event_date + INTERVAL 14 DAY DELETE</ttl></part_log>
     <processors_profile_log><ttl>event_date + INTERVAL 3 DAY DELETE</ttl></processors_profile_log>
     <asynchronous_metric_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></asynchronous_metric_log>
+
+    <logger>
+        <level>information</level>
+        <size>50M</size>
+        <count>3</count>
+    </logger>
 
     <mark_cache_size>268435456</mark_cache_size>
     <uncompressed_cache_size>268435456</uncompressed_cache_size>

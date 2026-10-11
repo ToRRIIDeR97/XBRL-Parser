@@ -432,3 +432,28 @@ async def test_xbrl_zip_without_instance_is_rejected_and_archive_retained(
     assert not store.exists(
         filing_object_key(_filing(), "example-20251231.xsd", sha256(b"<schema/>").hexdigest())
     )
+
+
+def test_xbrl_zip_over_filing_budget_is_rejected_before_decompression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import zipfile
+
+    from sec_xbrl_warehouse.ingestion import filing_downloader
+
+    archive = tmp_path / "0000000001-26-000001-xbrl.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("example.xml", os.urandom(2 * 1024 * 1024))
+
+    def no_decompression(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a member was decompressed before the budget check")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", no_decompression)
+    with pytest.raises(ArtifactIntegrityError, match="expanded byte limit"):
+        filing_downloader._expand_filing_archive(
+            archive,
+            tmp_path / "out",
+            Settings(env="test"),
+            filing_downloader._ByteBudget(1024 * 1024),
+        )

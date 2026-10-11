@@ -59,3 +59,7 @@ class SecRetryDeferred(SecAccessError):
 
 class DiskReserveError(XbrlWarehouseError):
     """Retained data needs more free space before ingestion may continue."""
+
+
+class UnsupportedSourceError(XbrlWarehouseError):
+    """A filing's source has no adapter in this component (never retried)."""

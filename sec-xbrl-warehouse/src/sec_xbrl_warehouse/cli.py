@@ -13,7 +13,7 @@ import uvicorn
 from rich.console import Console
 from rich.table import Table
 
-from sec_xbrl_warehouse.config import Settings, get_settings
+from sec_xbrl_warehouse.config import Settings, get_settings, is_loopback_host
 from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.enums import DatasetKind, JobState, JobType
 from sec_xbrl_warehouse.domain.models import (
@@ -147,6 +147,13 @@ def doctor(skip_sec_identity: bool = False) -> None:
             checks.append(("SEC identity", True, settings.sec_user_agent))
         except Exception as exc:
             checks.append(("SEC identity", False, str(exc)))
+
+    if settings.env == "production":
+        try:
+            settings.assert_production_ready()
+            checks.append(("Production settings", True, "no development credentials, TLS on"))
+        except Exception as exc:
+            checks.append(("Production settings", False, str(exc)))
 
     required_configs = (
         "sources.yml",
@@ -385,9 +392,21 @@ def api_serve(
     reload: bool = False,
 ) -> None:
     settings = get_settings()
+    bind = host or settings.api_host
+    if (
+        settings.api_key is None
+        and not is_loopback_host(bind)
+        and not settings.api_allow_unauthenticated_remote
+    ):
+        console.print(
+            f"[red]Refusing to serve the API on {bind} without XBRL_API_KEY.[/red] "
+            "Bind to 127.0.0.1, set XBRL_API_KEY, or set "
+            "XBRL_API_ALLOW_UNAUTHENTICATED_REMOTE=true behind a loopback-only port."
+        )
+        raise typer.Exit(code=1)
     uvicorn.run(
         "sec_xbrl_warehouse.api.app:app",
-        host=host or settings.api_host,
+        host=bind,
         port=port or settings.api_port,
         reload=reload,
     )
@@ -904,3 +923,53 @@ def storage_report_command(
     if keys_file is not None:
         keys_file.write_text("".join(f"{key}\n" for key in keys), encoding="utf-8")
     console.print_json(data=report)
+
+
+@storage_app.command("retire-revisions")
+def storage_retire_revisions(
+    yes: bool = typer.Option(False, "--yes", help="Delete the rows; without it, dry run."),
+) -> None:
+    """Delete ClickHouse rows of superseded extraction revisions (admin credentials).
+
+    Only revisions older than a filing's published one whose saved extraction is
+    still in the object store are retired.
+    """
+    from sec_xbrl_warehouse.infrastructure.storage.maintenance import retire_superseded_revisions
+
+    settings = get_settings()
+    warehouse = ClickHouseWarehouse(settings)
+    try:
+        report = retire_superseded_revisions(warehouse, create_object_store(settings), apply=yes)
+    finally:
+        warehouse.close()
+    console.print_json(data=report)
+
+
+@storage_app.command("recompress-extractions")
+def storage_recompress_extractions(
+    yes: bool = typer.Option(False, "--yes", help="Rewrite and repoint; without it, dry run."),
+    delete_legacy: bool = typer.Option(
+        False, "--delete-legacy", help="Delete each plain .json once nothing points to it."
+    ),
+) -> None:
+    """Rewrite legacy plain-JSON saved extractions as zstd (admin credentials)."""
+    from sec_xbrl_warehouse.infrastructure.storage.maintenance import (
+        recompress_extraction_checkpoints,
+    )
+
+    settings = get_settings()
+
+    async def run() -> dict[str, object]:
+        control = PostgresControlRepository(settings)
+        try:
+            return await recompress_extraction_checkpoints(
+                control,
+                create_object_store(settings),
+                settings,
+                apply=yes,
+                delete_legacy=delete_legacy,
+            )
+        finally:
+            await control.close()
+
+    console.print_json(data=asyncio.run(run()))

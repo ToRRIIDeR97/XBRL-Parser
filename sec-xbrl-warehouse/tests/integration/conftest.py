@@ -10,6 +10,7 @@ from uuid import uuid4
 import asyncpg
 import clickhouse_connect
 import pytest
+from pydantic import SecretStr
 from sqlalchemy.engine import make_url
 
 from sec_xbrl_warehouse.config import Settings
@@ -31,7 +32,7 @@ def postgres_settings() -> Settings:
         pytest.skip("Set RUN_XBRL_INTEGRATION=1 after starting Docker services")
     base = Settings(env="test")
     database = f"xbrl_test_{uuid4().hex[:16]}"
-    url = make_url(base.postgres_dsn)
+    url = make_url(base.postgres_dsn.get_secret_value())
     admin_dsn = url.set(drivername="postgresql", database="postgres").render_as_string(
         hide_password=False
     )
@@ -52,7 +53,7 @@ def postgres_settings() -> Settings:
             capture_output=True,
             text=True,
         )
-        yield base.model_copy(update={"postgres_dsn": test_dsn})
+        yield base.model_copy(update={"postgres_dsn": SecretStr(test_dsn)})
     finally:
         asyncio.run(
             _postgres_command(admin_dsn, f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
@@ -69,7 +70,7 @@ def clickhouse_settings() -> Settings:
         host=base.clickhouse_host,
         port=base.clickhouse_port,
         username=base.clickhouse_username,
-        password=base.clickhouse_password,
+        password=base.clickhouse_password.get_secret_value(),
         database=base.clickhouse_database,
         secure=base.clickhouse_secure,
     )

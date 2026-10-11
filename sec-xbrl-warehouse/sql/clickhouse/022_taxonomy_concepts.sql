@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.taxonomy_concepts
 )
 ENGINE = ReplacingMergeTree(labels_rank)
 ORDER BY (concept_namespace, concept_name, ifNull(taxonomy_version, ''))
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 -- A filing's labels for standard concepts it labels itself: the concept's full label
 -- set as the filing's DTS defines it (filer labels plus any it inherits).
@@ -46,4 +46,4 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_concept_labels
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
 ORDER BY (accession, extraction_revision, concept_namespace, concept_name)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';

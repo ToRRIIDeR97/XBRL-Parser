@@ -21,15 +21,17 @@ text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fil
 <text x="38" y="137" font-size="11" text-anchor="start">name: str</text>
 <text x="38" y="152" font-size="11" text-anchor="start">tickers: tuple[str]</text>
 <text x="38" y="167" font-size="11" text-anchor="start">fiscal_year_end: str?</text>
-<rect x="290" y="80" width="250" height="128" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
+<rect x="290" y="80" width="250" height="158" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
 <text x="415.0" y="98" font-size="13" text-anchor="middle" font-weight="600">FilingRef</text>
 <path d="M290,106 L540,106" stroke="#3d444d" stroke-width="1"/>
-<text x="298" y="122" font-size="11" text-anchor="start">accession: str  {id}</text>
-<text x="298" y="137" font-size="11" text-anchor="start">cik: int</text>
+<text x="298" y="122" font-size="11" text-anchor="start">accession: str  {id, filing key}</text>
+<text x="298" y="137" font-size="11" text-anchor="start">cik: int  {entity key}</text>
 <text x="298" y="152" font-size="11" text-anchor="start">form: str</text>
 <text x="298" y="167" font-size="11" text-anchor="start">filed_date: date</text>
 <text x="298" y="182" font-size="11" text-anchor="start">fiscal_year, fiscal_period</text>
 <text x="298" y="197" font-size="11" text-anchor="start">is_amendment: bool</text>
+<text x="298" y="212" font-size="11" text-anchor="start">/source: str  (from accession)</text>
+<text x="298" y="227" font-size="11" text-anchor="start" class="m">{source = sec ⇔ cik &lt; 10^10}</text>
 <rect x="620" y="80" width="260" height="98" rx="0" fill="#f3f0ff" stroke="#3d444d" stroke-width="1.2"/>
 <text x="750.0" y="98" font-size="13" text-anchor="middle" font-weight="600">FilingPackageManifest</text>
 <path d="M620,106 L880,106" stroke="#3d444d" stroke-width="1"/>
@@ -151,7 +153,7 @@ text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fil
 <path d="M880,130 L960,130" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
 <text x="952" y="124" font-size="11" text-anchor="end" class="halo">1..*</text>
 <text x="920" y="146" font-size="11" text-anchor="middle" class="halo">members</text>
-<path d="M415,320 L415,208" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
+<path d="M415,320 L415,238" fill="none" stroke="#3d444d" stroke-width="1.3" marker-end="url(#open)"/>
 <text x="421" y="270" font-size="11" text-anchor="start" class="halo">filing 1</text>
 <path d="M540,355 L620,355" fill="none" stroke="#3d444d" stroke-width="1.3" marker-start="url(#diamond)"/>
 <text x="612" y="349" font-size="11" text-anchor="end" class="halo">facts 0..*</text>

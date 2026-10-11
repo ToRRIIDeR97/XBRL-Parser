@@ -118,3 +118,70 @@ def test_parser_process_timeout_cleans_up(tmp_path):
         ArelleExtractor(settings).extract(FIXTURE, filing)
     assert {child.pid for child in multiprocessing.active_children()} == before
     assert not list(settings.temp_dir.glob("arelle-*"))
+
+
+def test_warm_child_is_reused_and_matches_a_fresh_process(tmp_path) -> None:
+    settings = Settings(
+        env="test",
+        data_dir=tmp_path / "data",
+        temp_dir=tmp_path / "tmp",
+        arelle_cache_dir=Path("data/cache/arelle"),
+        arelle_taxonomy_packages_dir=Path("data/taxonomy-packages"),
+    )
+    filing = FilingRef(
+        accession="0000000001-26-000001",
+        cik=1,
+        company_name="Example Corp",
+        form="10-K",
+        filed_date=date(2026, 2, 15),
+        archive_directory_url="https://www.sec.gov/Archives/edgar/data/1/1",
+    )
+
+    def comparable(item):
+        dumped = item.model_dump(mode="json")
+        dumped["metadata"].pop("extracted_at")
+        return dumped
+
+    warm = ArelleExtractor(settings)
+    fresh = ArelleExtractor(settings.model_copy(update={"arelle_child_max_tasks": 1}))
+    try:
+        first = warm.extract(FIXTURE, filing)
+        pid = warm._idle[0].process.pid
+        checkpoint = tmp_path / "extraction.json.zst"
+        second = warm.extract(FIXTURE, filing, checkpoint_path=checkpoint)
+        assert warm._idle[0].process.pid == pid  # the same child ran both
+        assert checkpoint.read_bytes()[:4] == b"\x28\xb5\x2f\xfd"  # kept, zstd
+        baseline = fresh.extract(FIXTURE, filing)
+        assert not fresh._idle  # max_tasks=1: a new process per filing
+        assert comparable(first) == comparable(second) == comparable(baseline)
+    finally:
+        warm.close()
+        fresh.close()
+
+
+def test_child_settings_carry_no_credentials() -> None:
+    from sec_xbrl_warehouse.infrastructure.xbrl.arelle_adapter import child_settings
+
+    settings = Settings(
+        _env_file=None,
+        postgres_dsn="postgresql+asyncpg://w:pg-secret@db/x",
+        clickhouse_password="ch-secret",
+        object_store_access_key="s3-user",
+        object_store_secret_key="s3-secret",
+        api_key="k" * 32,
+        api_clickhouse_password="reader-secret",
+    )
+    scrubbed = child_settings(settings)
+    values = str(
+        [
+            scrubbed.postgres_dsn.get_secret_value(),
+            scrubbed.clickhouse_password.get_secret_value(),
+            scrubbed.object_store_access_key,
+            scrubbed.object_store_secret_key.get_secret_value(),
+            scrubbed.api_key,
+            scrubbed.api_clickhouse_password,
+        ]
+    )
+    for secret in ("pg-secret", "ch-secret", "s3-user", "s3-secret", "k" * 32, "reader-secret"):
+        assert secret not in values
+    assert scrubbed.sec_user_agent == settings.sec_user_agent

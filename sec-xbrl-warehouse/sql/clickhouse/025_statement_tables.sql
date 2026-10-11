@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_roles
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
 ORDER BY (accession, extraction_revision, role_uri)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';
 
 -- One row per statement line; the line's values are parallel arrays (one entry per
 -- period, or per concept and period on `member` lines). Read lines with
@@ -50,4 +50,4 @@ CREATE TABLE IF NOT EXISTS {{database}}.xbrl_statement_lines
 )
 ENGINE = ReplacingMergeTree(extraction_revision)
 ORDER BY (accession, extraction_revision, role_uri, line_number)
-SETTINGS index_granularity = 8192;
+SETTINGS index_granularity = 8192, default_compression_codec = 'ZSTD(3)';

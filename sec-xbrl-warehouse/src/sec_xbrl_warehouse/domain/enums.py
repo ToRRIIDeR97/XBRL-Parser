@@ -63,6 +63,7 @@ class JobType(StrEnum):
     RECONCILE_ARTIFACT = "reconcile_artifact"
     RECONCILE_FILING = "reconcile_filing"
     MAP_CANONICAL = "map_canonical"
+    REBUILD_SERIES = "rebuild_series"  # one company's metric_series, coalesced per CIK
 
 
 class Severity(StrEnum):

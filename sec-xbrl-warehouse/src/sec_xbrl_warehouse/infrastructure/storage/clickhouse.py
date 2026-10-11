@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack
@@ -14,12 +15,13 @@ from uuid import UUID, uuid4
 
 import clickhouse_connect
 import pyarrow as pa
+from clickhouse_connect.driver.exceptions import ProgrammingError
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.canonical import CanonicalFact
 from sec_xbrl_warehouse.domain.enums import FactValueKind, RelationshipType, SecTable
 from sec_xbrl_warehouse.domain.models import Company
-from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle, XbrlFact
+from sec_xbrl_warehouse.domain.xbrl import XbrlConcept, XbrlExtractionBundle, XbrlFact
 from sec_xbrl_warehouse.exceptions import ConfigurationError, WarehouseWriteError
 from sec_xbrl_warehouse.infrastructure.storage.arrow_schemas import (
     canonical_fact_schema,
@@ -72,6 +74,15 @@ class ClickHouseWarehouse:
     ) -> None:
         self.settings = settings
         self.database = settings.clickhouse_database
+        # `taxonomy_concepts` row hashes inserted by this process (see insert_xbrl_bundle).
+        self._taxonomy_rows: set[str] = set()
+        self._taxonomy_lock = threading.Lock()
+        if read_only and not settings.api_clickhouse_username and settings.env == "production":
+            raise ConfigurationError(
+                "The API reader needs XBRL_API_CLICKHOUSE_USERNAME; it never uses the writer"
+            )
+        if read_only and not settings.api_clickhouse_username:
+            logger.warning("api_clickhouse_writer_fallback", env=settings.env)
         query_settings = (
             {
                 "readonly": 1,
@@ -90,20 +101,31 @@ class ClickHouseWarehouse:
             if read_only
             else {}
         )
-        self.client = client or clickhouse_connect.get_client(
-            host=settings.clickhouse_host,
-            port=settings.clickhouse_port,
-            username=(settings.api_clickhouse_username or settings.clickhouse_username)
+        connection: dict[str, Any] = {
+            "host": settings.clickhouse_host,
+            "port": settings.clickhouse_port,
+            "username": (settings.api_clickhouse_username or settings.clickhouse_username)
             if read_only
             else settings.clickhouse_username,
-            password=settings.api_clickhouse_password.get_secret_value()
+            "password": settings.api_clickhouse_password.get_secret_value()
             if read_only and settings.api_clickhouse_password is not None
-            else settings.clickhouse_password,
-            database=settings.clickhouse_database,
-            secure=settings.clickhouse_secure,
-            autogenerate_session_id=False,
-            settings=query_settings,
-        )
+            else settings.clickhouse_password.get_secret_value(),
+            "database": settings.clickhouse_database,
+            "secure": settings.clickhouse_secure,
+            "autogenerate_session_id": False,
+        }
+        if client is not None:
+            self.client = client
+        else:
+            try:
+                self.client = clickhouse_connect.get_client(**connection, settings=query_settings)
+            except ProgrammingError as exc:
+                if not read_only or "readonly" not in str(exc):
+                    raise
+                # A `readonly = 1` reader profile fixes every setting, so the budgets
+                # can't be sent per query; the check below confirms the profile
+                # enforces them instead.
+                self.client = clickhouse_connect.get_client(**connection)
         if read_only:
             try:
                 effective = {
@@ -505,7 +527,8 @@ class ClickHouseWarehouse:
             )
         )
         # Standard concepts are shared across filings (not part of the revision's
-        # published row counts).
+        # published row counts). A row's hash covers the stored row alone, so a row
+        # this process already inserted is skipped: re-inserting it changes nothing.
         for table in iter_xbrl_tables(
             bundle,
             "taxonomy_concepts",
@@ -513,7 +536,18 @@ class ClickHouseWarehouse:
             self.settings.arrow_batch_bytes,
             target="clickhouse",
         ):
-            self._insert_arrow("taxonomy_concepts", table)
+            hashes = table.column("_row_hash").to_pylist()
+            with self._taxonomy_lock:
+                fresh = [hash_ not in self._taxonomy_rows for hash_ in hashes]
+            if not any(fresh):
+                continue
+            self._insert_arrow("taxonomy_concepts", table.filter(pa.array(fresh)))
+            with self._taxonomy_lock:
+                if len(self._taxonomy_rows) > _TAXONOMY_ROW_CACHE:
+                    self._taxonomy_rows.clear()
+                self._taxonomy_rows.update(
+                    hash_ for hash_, new in zip(hashes, fresh, strict=True) if new
+                )
         return counts
 
     def insert_canonical_facts(self, facts: Sequence[CanonicalFact]) -> int:
@@ -547,15 +581,30 @@ class ClickHouseWarehouse:
         """Verify all raw entities before exposing this immutable revision to readers.
 
         Entities missing from `counts` (written before the derived entities existed)
-        are not checked.
+        are not checked. All counts run as one query; `xbrl_facts` is sorted by CIK,
+        so its count also filters on the filing's CIK.
         """
-        for entity in (entity for entity in (*XBRL_ENTITIES, "concept_labels") if entity in counts):
-            result = self.query(
-                f"SELECT count() AS count FROM xbrl_{entity} FINAL WHERE accession = %(accession)s AND extraction_revision = %(revision)s",
-                {"accession": bundle.filing.accession, "revision": bundle.extraction_revision},
-            )
-            if not result or int(result[0]["count"]) != counts[entity]:
-                raise WarehouseWriteError(f"Extraction row count mismatch for {entity}")
+        entities = [entity for entity in (*XBRL_ENTITIES, "concept_labels") if entity in counts]
+        if entities:
+            found = {
+                str(row["entity"]): int(row["count"])
+                for row in self.query(
+                    " UNION ALL ".join(
+                        f"SELECT '{entity}' AS entity, count() AS count FROM xbrl_{entity} FINAL "
+                        "WHERE accession = %(accession)s AND extraction_revision = %(revision)s"
+                        + (" AND cik = %(cik)s" if entity == "facts" else "")
+                        for entity in entities
+                    ),
+                    {
+                        "accession": bundle.filing.accession,
+                        "revision": bundle.extraction_revision,
+                        "cik": bundle.filing.cik,
+                    },
+                )
+            }
+            for entity in entities:
+                if found.get(entity) != counts[entity]:
+                    raise WarehouseWriteError(f"Extraction row count mismatch for {entity}")
         schema = pa.schema(
             [
                 pa.field("accession", pa.string(), False),
@@ -573,7 +622,7 @@ class ClickHouseWarehouse:
                         "accession": bundle.filing.accession,
                         "extraction_revision": bundle.extraction_revision,
                         "entity_counts_json": _json(counts),
-                        "metadata_json": bundle.metadata.model_dump_json(),
+                        "metadata_json": extraction_metadata_json(bundle),
                         "completed_at": bundle.metadata.extracted_at,
                     }
                 ],
@@ -650,6 +699,10 @@ class ClickHouseWarehouse:
         return tuple(part.strip() for part in cleaned.split(";") if part.strip())
 
 
+# Upper bound on remembered `taxonomy_concepts` row hashes per process (each pinned
+# taxonomy year holds about 20,000 concepts).
+_TAXONOMY_ROW_CACHE = 1_000_000
+
 # SHA-256 identity and row hashes stored as FixedString(32) bytes in ClickHouse; the
 # v_* views return lower-case hex. SEC bulk tables keep their hex `_row_hash`.
 HASH_COLUMNS: dict[str, frozenset[str]] = {
@@ -721,6 +774,20 @@ def encode_hash_columns(table_name: str, table: pa.Table) -> pa.Table:
     return table
 
 
+def extraction_metadata_json(bundle: XbrlExtractionBundle) -> str:
+    """`xbrl_extractions.metadata_json`: the bundle metadata without Arelle's log.
+
+    The full validation log (about 1 MB per filing) stays in the saved extraction
+    checkpoint, and its issues are grouped in PostgreSQL `validation_issues`; here
+    only its record count is kept.
+    """
+    provenance = dict(bundle.metadata.provenance)
+    log = provenance.pop("validation_log", None)
+    if isinstance(log, list | tuple):
+        provenance["validation_log_records"] = len(log)
+    return bundle.metadata.model_copy(update={"provenance": provenance}).model_dump_json()
+
+
 def validate_canonical_facts(facts: Sequence[CanonicalFact]) -> None:
     """Reject canonical facts missing mapping lineage before any database write."""
     for fact in facts:
@@ -751,7 +818,8 @@ def iter_xbrl_tables(
     clickhouse = target == "clickhouse"
     build = {
         "contexts": contexts_table,
-        "concepts": concepts_table if clickhouse else silver_concepts_table,
+        # ClickHouse rows are selected below, so both targets share the builder.
+        "concepts": silver_concepts_table,
         "taxonomy_concepts": taxonomy_concepts_table,
         "concept_labels": concept_labels_table,
         "facts": facts_table if clickhouse else silver_facts_table,
@@ -764,18 +832,20 @@ def iter_xbrl_tables(
     }[entity]
 
     def bounded(table: pa.Table) -> Iterator[pa.Table]:
-        if table.nbytes <= batch_bytes:
-            yield table
-        elif table.num_rows == 1:
-            raise WarehouseWriteError(f"Single {entity} row exceeds Arrow byte budget")
-        else:
-            middle = table.num_rows // 2
-            yield from bounded(table.slice(0, middle))
-            yield from bounded(table.slice(middle))
+        return _bounded(table, batch_bytes, entity)
 
+    selected = xbrl_entity_records(bundle, entity)
+    if clickhouse and entity == "concepts":
+        # Only extension concepts go to `xbrl_concepts`; filter before building and
+        # hashing rows instead of building the whole DTS and discarding most of it.
+        selected = tuple(concept for concept in selected if concept.is_extension)
+    elif entity == "concepts":
+        # Silver keeps the filing's own concepts here; the shared standard ones are
+        # written once per taxonomy version (`iter_shared_concept_tables`).
+        selected = filing_concepts(bundle)
     records: list[Any] = []
     size = 0
-    for record in xbrl_entity_records(bundle, entity):
+    for record in selected:
         record_size = _record_size(record)
         if record_size > batch_bytes:
             raise WarehouseWriteError(f"Single {entity} record exceeds Arrow byte budget")
@@ -821,6 +891,60 @@ def xbrl_entity_records(bundle: XbrlExtractionBundle, entity: str) -> Sequence[A
     if entity == "segment_facts":
         return segment_rows(bundle)
     return tuple(getattr(bundle, entity))
+
+
+def filing_concepts(bundle: XbrlExtractionBundle) -> tuple[XbrlConcept, ...]:
+    """Concepts whose silver rows belong to this filing: extensions, and standard
+    concepts the filing labels itself (their labels are the filer's)."""
+    filer = filer_labelled_concepts(bundle)
+    return tuple(
+        concept for concept in bundle.concepts if concept.is_extension or concept.qname in filer
+    )
+
+
+SHARED_CONCEPTS_PREFIX = "silver/xbrl/taxonomy_concepts"
+
+
+def iter_shared_concept_tables(
+    bundle: XbrlExtractionBundle, batch_rows: int, batch_bytes: int
+) -> Iterator[tuple[str, pa.Table]]:
+    """`(prefix, table)` for the bundle's shared standard concepts, per taxonomy.
+
+    Rows are `taxonomy_concepts` rows without an ingest time, sorted by name, under
+    a prefix per namespace and taxonomy version. Filings that load the same
+    taxonomy produce the same bytes and so the same content-addressed object,
+    stored once. Together with `filing_concepts` they cover every concept.
+    """
+    filer = filer_labelled_concepts(bundle)
+    groups: dict[tuple[str, str], list[XbrlConcept]] = {}
+    for concept in bundle.concepts:
+        if not concept.is_extension and concept.qname not in filer:
+            key = (concept.namespace, concept.taxonomy_version or "")
+            groups.setdefault(key, []).append(concept)
+    for (namespace, version), concepts in sorted(groups.items()):
+        prefix = (
+            f"{SHARED_CONCEPTS_PREFIX}/namespace_sha256="
+            f"{hashlib.sha256(namespace.encode('utf-8')).hexdigest()[:16]}"
+            f"/taxonomy_version={version or 'none'}"
+        )
+        ordered = tuple(sorted(concepts, key=lambda item: (item.name, item.qname)))
+        table = taxonomy_concepts_table(bundle.model_copy(update={"concepts": ordered}))
+        table = table.drop_columns(["_ingested_at"])
+        for start in range(0, table.num_rows, batch_rows):
+            for chunk in _bounded(table.slice(start, batch_rows), batch_bytes, "concepts"):
+                yield prefix, chunk
+
+
+def _bounded(table: pa.Table, batch_bytes: int, entity: str) -> Iterator[pa.Table]:
+    """`table` split in halves until every piece fits `batch_bytes`."""
+    if table.nbytes <= batch_bytes:
+        yield table
+    elif table.num_rows == 1:
+        raise WarehouseWriteError(f"Single {entity} row exceeds Arrow byte budget")
+    else:
+        middle = table.num_rows // 2
+        yield from _bounded(table.slice(0, middle), batch_bytes, entity)
+        yield from _bounded(table.slice(middle), batch_bytes, entity)
 
 
 def _record_size(record: Any) -> int:
@@ -1426,7 +1550,7 @@ def _ddl_columns(statement: str) -> dict[str, tuple[str, str, str]]:
     columns = {}
     for line in body.splitlines():
         declaration = line.strip().rstrip(",")
-        if not declaration or declaration.startswith("--"):
+        if not declaration or declaration.startswith(("--", "INDEX ")):
             continue
         name, kind = declaration.split(" ", 1)
         kind = re.split(r"\s+CODEC\(", kind, maxsplit=1)[0]

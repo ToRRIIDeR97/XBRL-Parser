@@ -19,6 +19,7 @@ from sec_xbrl_warehouse.exceptions import (
     SchemaDriftError,
     SecRetryDeferred,
     StateTransitionError,
+    UnsupportedSourceError,
 )
 from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.postgres import (
@@ -40,6 +41,10 @@ SEC_JOB_TYPES = frozenset(
         JobType.DISCOVER_FILINGS,
         JobType.DOWNLOAD_BULK,
     }
+)
+# Job types whose completion queues a `rebuild_series` job for the company.
+SERIES_SOURCE_JOB_TYPES = frozenset(
+    {JobType.INGEST_FILING, JobType.PARSE_FILING, JobType.MAP_CANONICAL}
 )
 # Job types that run Arelle (online Arelle may resolve taxonomies from SEC hosts).
 EXTRACTION_JOB_TYPES = frozenset({JobType.INGEST_FILING, JobType.PARSE_FILING})
@@ -89,6 +94,7 @@ async def runtime_services(
     await asyncio.to_thread(store.ensure_bucket)
     control.object_store = store  # parse jobs load stored manifests
     warehouse = await asyncio.to_thread(ClickHouseWarehouse, settings)
+    extractor = ArelleExtractor(settings)
     lazy_egress: LazyEgress | None = None
     try:
         async with contextlib.AsyncExitStack() as stack:
@@ -138,7 +144,7 @@ async def runtime_services(
                 "ingestor": IncrementalFilingIngestor(
                     control,
                     FilingPackageDownloader(settings, http, store),
-                    ArelleExtractor(settings),
+                    extractor,
                     writer,
                     warehouse,
                     settings=settings,
@@ -164,6 +170,7 @@ async def runtime_services(
     finally:
         if lazy_egress is not None:
             await lazy_egress.close()
+        await asyncio.to_thread(extractor.close)
         await asyncio.to_thread(warehouse.close)
 
 
@@ -181,6 +188,10 @@ class Worker:
         self.control = control
         self.handlers = handlers
         self.job_types = tuple(job_types) if job_types else None
+        if self.job_types and SERIES_SOURCE_JOB_TYPES.intersection(self.job_types):
+            # Jobs that queue a series rebuild bring their follow-up job type along,
+            # so `--job-type parse_filing` workers also run the rebuilds.
+            self.job_types = tuple(dict.fromkeys((*self.job_types, JobType.REBUILD_SERIES)))
         self._stopping = asyncio.Event()
 
     def stop(self) -> None:
@@ -374,7 +385,7 @@ def build_handlers(
                 filing, extraction_revision=revision, job_id=job.id
             )
             if result is not None and result.get("status") == "complete":
-                result = {**result, "series": await _rebuild_series(services, filing.cik)}
+                result = {**result, "series": await _queue_series(services, settings, filing.cik)}
             return result
 
         handlers[JobType.INGEST_FILING] = _ingest_filing
@@ -407,7 +418,10 @@ def build_handlers(
             if result is not None and result.get("status") == "complete":
                 cik = result.get("cik") or await _filing_cik(services, accession)
                 if cik is not None:
-                    result = {**result, "series": await _rebuild_series(services, int(cik))}
+                    result = {
+                        **result,
+                        "series": await _queue_series(services, settings, int(cik)),
+                    }
             return result
 
         handlers[JobType.PARSE_FILING] = _parse_filing
@@ -443,10 +457,20 @@ def build_handlers(
                 "extraction_revision": revision,
                 "mapped": mapped,
                 "unmapped": len(bundle.facts) - mapped,
-                "series": await _rebuild_series(services, bundle.filing.cik),
+                "series": await _queue_series(services, settings, bundle.filing.cik),
             }
 
         handlers[JobType.MAP_CANONICAL] = _map_canonical
+
+    async def _rebuild_series_job(job: JobRecord) -> dict[str, Any] | None:
+        cik = int(job.payload["cik"])
+        result = await _rebuild_series(services, cik)
+        if result["status"] == "failed":
+            # A queued rebuild is retried like any job (the inline one was not).
+            raise RuntimeError(f"Series rebuild failed for CIK {cik}: {result['error']}")
+        return {"cik": cik, **result}
+
+    handlers[JobType.REBUILD_SERIES] = _rebuild_series_job
     if services.get("discovery") is not None:
 
         async def _discover(job: JobRecord) -> dict[str, Any] | None:
@@ -511,6 +535,26 @@ class _MirroredCompanies:
         await self.control.upsert_company(company)
         if self.warehouse is not None and hasattr(self.warehouse, "upsert_company_mirror"):
             await asyncio.to_thread(self.warehouse.upsert_company_mirror, company)
+
+
+async def _queue_series(
+    services: dict[str, Any], settings: Settings | None, cik: int
+) -> dict[str, Any]:
+    """Queue the company's coalesced `rebuild_series` job, or rebuild inline.
+
+    Control repositories without `enqueue_series_rebuild` (test doubles) rebuild
+    inline as before.
+    """
+    enqueue = getattr(services.get("control"), "enqueue_series_rebuild", None)
+    if enqueue is None:
+        return await _rebuild_series(services, cik)
+    delay = (settings or Settings()).series_rebuild_delay_seconds
+    try:
+        job_id = await enqueue(cik, delay)
+    except Exception as exc:
+        logger.exception("series_rebuild_enqueue_failed", cik=cik)
+        return {"status": "failed", "error": str(exc)[:2000]}
+    return {"status": "queued", "job_id": str(job_id) if job_id is not None else None}
 
 
 async def _rebuild_series(services: dict[str, Any], cik: int) -> dict[str, Any]:
@@ -611,7 +655,7 @@ def is_retryable_exception(exc: BaseException) -> bool:
     or S3 error) are classified by their `__cause__`. Integrity, schema drift,
     ClickHouse syntax/missing-table, and S3 permission/bucket errors stay permanent.
     """
-    if isinstance(exc, (ArtifactIntegrityError, SchemaDriftError)):
+    if isinstance(exc, (ArtifactIntegrityError, SchemaDriftError, UnsupportedSourceError)):
         return False
     if isinstance(
         exc,

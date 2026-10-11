@@ -59,7 +59,7 @@ def _review(accession: str, fact_id: str, namespace: str, concept: str, state: s
 def test_review_and_issue_migrations_upgrade_and_downgrade() -> None:
     base = Settings(env="test")
     database = f"xbrl_migration_{uuid4().hex[:12]}"
-    url = make_url(base.postgres_dsn)
+    url = make_url(base.postgres_dsn.get_secret_value())
     admin = url.set(drivername="postgresql", database="postgres").render_as_string(
         hide_password=False
     )
@@ -147,6 +147,77 @@ def test_review_and_issue_migrations_upgrade_and_downgrade() -> None:
             )
         )
         assert columns == []
+        _alembic(dsn, "upgrade", "head")
+    finally:
+        asyncio.run(_run(admin, f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'))
+
+
+def test_filing_entity_key_migration_upgrade_and_downgrade() -> None:
+    base = Settings(env="test")
+    database = f"xbrl_migration_{uuid4().hex[:12]}"
+    url = make_url(base.postgres_dsn.get_secret_value())
+    admin = url.set(drivername="postgresql", database="postgres").render_as_string(
+        hide_password=False
+    )
+    plain = url.set(drivername="postgresql", database=database).render_as_string(
+        hide_password=False
+    )
+    dsn = url.set(database=database).render_as_string(hide_password=False)
+    widths = (
+        "SELECT table_name, character_maximum_length AS n FROM information_schema.columns "
+        "WHERE column_name = 'accession' AND table_schema = 'public' ORDER BY table_name"
+    )
+    tables = ["filings", "mapping_review_observations", "mapping_reviews", "validation_issues"]
+    insert = (
+        "INSERT INTO filings (accession, cik, company_name, form, filed_date, "
+        "archive_directory_url, is_amendment, latest_extraction_revision, created_at, "
+        "updated_at) VALUES ($1, $2, 'Example', '10-K', '2026-01-02', 'https://x', false, 0, "
+        "now(), now())"
+    )
+    asyncio.run(_run(admin, f'CREATE DATABASE "{database}"'))
+    try:
+        _alembic(dsn, "upgrade", "0007_drop_prefix_indexes")
+        asyncio.run(_run(plain, insert, "0000000001-26-000001", 1))
+        assert [(r["table_name"], r["n"]) for r in asyncio.run(_run(plain, widths))] == [
+            (table, 20) for table in tables
+        ]
+        _alembic(dsn, "upgrade", "head")
+        assert [(r["table_name"], r["n"]) for r in asyncio.run(_run(plain, widths))] == [
+            (table, 128) for table in tables
+        ]
+        (first,) = asyncio.run(
+            _run(
+                plain,
+                "INSERT INTO entity_keys (scheme, identifier) VALUES ('s', 'i') "
+                "RETURNING entity_key",
+            )
+        )
+        assert first["entity_key"] == 10_000_000_000
+        key = "esef-" + "x" * 123
+        asyncio.run(_run(plain, insert, key, 10_000_000_000))
+
+        # Non-SEC keys block the downgrade: the columns would truncate them.
+        with pytest.raises(subprocess.CalledProcessError) as refused:
+            _alembic(dsn, "downgrade", "0007_drop_prefix_indexes")
+        assert "Refusing to downgrade 0008" in refused.value.stderr
+        asyncio.run(_run(plain, "DELETE FROM filings WHERE accession = $1", key))
+        with pytest.raises(subprocess.CalledProcessError):
+            _alembic(dsn, "downgrade", "0007_drop_prefix_indexes")  # entity_keys row left
+        asyncio.run(_run(plain, "DELETE FROM entity_keys"))
+
+        _alembic(dsn, "downgrade", "0007_drop_prefix_indexes")
+        assert [(r["table_name"], r["n"]) for r in asyncio.run(_run(plain, widths))] == [
+            (table, 20) for table in tables
+        ]
+        gone = asyncio.run(
+            _run(
+                plain,
+                "SELECT to_regclass('entity_keys') AS t, to_regclass('entity_key_seq') AS s",
+            )
+        )
+        assert (gone[0]["t"], gone[0]["s"]) == (None, None)
+        rows = asyncio.run(_run(plain, "SELECT accession FROM filings"))
+        assert [row["accession"] for row in rows] == ["0000000001-26-000001"]
         _alembic(dsn, "upgrade", "head")
     finally:
         asyncio.run(_run(admin, f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)'))

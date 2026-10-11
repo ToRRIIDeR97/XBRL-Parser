@@ -65,6 +65,7 @@ python -m pip install -e ".[dev]"
 ```bash
 alembic upgrade head
 xbrl-warehouse db init-clickhouse
+./ops/provision/provision_identities.sh   # worker, writer, and API identities
 xbrl-warehouse doctor
 ```
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -10,13 +11,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.ports import Warehouse
+from sec_xbrl_warehouse.domain.sources import (
+    FILING_KEY_MAX_LENGTH,
+    FILING_KEY_PATTERN,
+    is_filing_key,
+)
 
 
 class FactQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cik: int | None = Field(default=None, ge=0)
-    accession: str | None = Field(default=None, pattern=r"^\d{10}-\d{2}-\d{6}$")
+    accession: str | None = Field(
+        default=None, pattern=FILING_KEY_PATTERN, max_length=FILING_KEY_MAX_LENGTH
+    )
     concept_namespace: str | None = Field(default=None, max_length=2048)
     concept_name: str | None = Field(default=None, max_length=512)
     filed_from: date | None = None
@@ -263,8 +271,7 @@ class QueryService:
     def filing_summary(
         self, accession: str, *, cik: int | None = None, filed_date: date | None = None
     ) -> dict[str, Any] | None:
-        if re.fullmatch(r"\d{10}-\d{2}-\d{6}", accession) is None:
-            raise ValueError("Invalid accession")
+        _check_accession(accession)
         filters = ""
         params: dict[str, Any] = {"accession": accession}
         if cik is not None:
@@ -292,6 +299,170 @@ class QueryService:
             params,
         )
         return rows[0] if rows else None
+
+    def cover_page(self, accession: str) -> dict[str, Any] | None:
+        """The filing's cover page from its newest published extraction revision."""
+        _check_accession(accession)
+        rows = self.warehouse.query(
+            """
+            SELECT accession, cik, form, filed_date, document_type, period_end_date,
+                   registrant_name, filer_category, amendment, trading_symbol, exchange,
+                   auditor_name, shares_outstanding, shares_outstanding_date, public_float,
+                   security_members, security_titles, security_symbols, security_exchanges,
+                   extraction_revision
+            FROM v_cover_pages_latest
+            WHERE accession = %(accession)s
+            LIMIT 1
+            """,
+            {"accession": accession},
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        securities = zip(
+            row.pop("security_members"),
+            row.pop("security_titles"),
+            row.pop("security_symbols"),
+            row.pop("security_exchanges"),
+            strict=True,
+        )
+        if row["amendment"] is not None:
+            row["amendment"] = bool(row["amendment"])
+        for column in ("shares_outstanding", "public_float"):
+            row[column] = _json_number(row[column])
+        row["securities"] = [
+            {"member": member, "title": title, "symbol": symbol, "exchange": exchange}
+            for member, title, symbol, exchange in securities
+        ]
+        return row
+
+    def segment_facts(
+        self,
+        accession: str,
+        *,
+        kinds: Sequence[str] | None = None,
+        concept: str | None = None,
+        include_eliminations: bool = True,
+        limit: int = 1_000,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Segment, product, geographic, and consolidation rows of one filing."""
+        _check_accession(accession)
+        _check_page(limit, offset, max_limit=10_000)
+        selected = sorted(set(kinds or ()))
+        if not set(selected) <= BREAKDOWN_KINDS:
+            raise ValueError("Unknown breakdown kind")
+        params: dict[str, Any] = {"accession": accession, "limit": limit, "offset": offset}
+        filters = ""
+        if selected:
+            filters += " AND hasAny(member_axes, %(kinds)s)"
+            params["kinds"] = selected
+        if concept is not None:
+            filters += " AND concept_qname = %(concept)s"
+            params["concept"] = _check_qname(concept)
+        if not include_eliminations:
+            filters += " AND is_elimination = 0"
+        rows = self.warehouse.query(
+            f"""
+            SELECT fact_id, concept_qname, axis AS kind, member_label,
+                   member_axes, member_qnames, member_labels,
+                   value, unit, period_start, period_end, period_instant, is_elimination
+            FROM v_segment_facts_latest
+            WHERE accession = %(accession)s{filters}
+            ORDER BY concept_qname, kind, member_label,
+                     coalesce(period_end, period_instant), fact_id
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            params,
+        )
+        for row in rows:
+            members = zip(
+                row.pop("member_axes"),
+                row.pop("member_qnames"),
+                row.pop("member_labels"),
+                strict=True,
+            )
+            row["members"] = [
+                {"kind": kind, "qname": qname, "label": label} for kind, qname, label in members
+            ]
+            row["is_elimination"] = bool(row["is_elimination"])
+            row["value"] = _json_number(row["value"])
+        return rows
+
+    def text_blocks(
+        self,
+        accession: str,
+        *,
+        policy: bool | None = None,
+        concept: str | None = None,
+        include_text: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Text blocks of one filing; the HTML itself only when `include_text` is set.
+
+        `limit` defaults to 200, or 100 with `include_text`, which also caps it at 100.
+        """
+        _check_accession(accession)
+        limit = text_block_limit(limit, include_text=include_text)
+        _check_page(limit, offset, max_limit=100 if include_text else 1_000)
+        params: dict[str, Any] = {"accession": accession, "limit": limit, "offset": offset}
+        filters = ""
+        if policy is not None:
+            filters += " AND is_policy = %(policy)s"
+            params["policy"] = int(policy)
+        if concept is not None:
+            filters += " AND concept_qname = %(concept)s"
+            params["concept"] = _check_qname(concept)
+        text = ", value_text AS text" if include_text else ""
+        rows = self.warehouse.query(
+            f"""
+            SELECT fact_id, concept_qname, is_policy, period_start, period_end, period_instant,
+                   language, dimensions_json,
+                   lengthUTF8(coalesce(value_text, '')) AS text_length{text}
+            FROM v_text_blocks_latest
+            WHERE accession = %(accession)s{filters}
+            ORDER BY concept_qname, fact_id
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            params,
+        )
+        for row in rows:
+            row["is_policy"] = bool(row["is_policy"])
+        return rows
+
+
+BREAKDOWN_KINDS = frozenset({"segment", "product", "geography", "consolidation"})
+QNAME_PATTERN = r"^[A-Za-z_][\w.-]*:[A-Za-z_][\w.-]*$"
+
+
+def text_block_limit(limit: int | None, *, include_text: bool) -> int:
+    if limit is not None:
+        return limit
+    return 100 if include_text else 200
+
+
+def _json_number(value: Decimal | None) -> int | float | None:
+    """A stored decimal as a JSON number: exact when integral, else the nearest float."""
+    if value is None:
+        return None
+    return int(value) if value == value.to_integral_value() else float(value)
+
+
+def _check_accession(accession: str) -> None:
+    if not is_filing_key(accession):
+        raise ValueError("Invalid accession")
+
+
+def _check_page(limit: int, offset: int, *, max_limit: int) -> None:
+    if not 1 <= limit <= max_limit or not 0 <= offset <= 10_000:
+        raise ValueError(f"limit must be 1-{max_limit} and offset 0-10000")
+
+
+def _check_qname(concept: str) -> str:
+    if len(concept) > 512 or re.fullmatch(QNAME_PATTERN, concept) is None:
+        raise ValueError("concept must be a prefix:LocalName qname")
+    return concept
 
 
 def _derived_metrics(path: Path) -> dict[str, tuple[str, str, str, str]]:

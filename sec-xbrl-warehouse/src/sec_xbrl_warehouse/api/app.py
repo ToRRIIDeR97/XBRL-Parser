@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise ConfigurationError(
             "Production API requires an API key and separate reader credentials"
         )
+    settings.assert_production_ready()
     warehouse = await asyncio.to_thread(ClickHouseWarehouse, settings, read_only=True)
     control = PostgresControlRepository(settings)
     app.state.warehouse = warehouse

@@ -250,3 +250,74 @@ Limitations:
   accession. It was not benchmarked on the full AAPL corpus here.
 
 ### Verifier record
+
+Verifier session, 11 October 2026, branch `verify/16-disclosure-api` at the
+implementer's commit 1686654 (`verification/` copied in from the main checkout; `.env`
+symlinked, not committed). Commands run from `sec-xbrl-warehouse/` with the main
+checkout's `.venv`:
+
+| Command | Result |
+|---|---|
+| `RUN_XBRL_INTEGRATION=1 pytest -c pyproject.toml --rootdir . ../Implementations/16-disclosure-api/acceptance` | 16 passed |
+| `RUN_XBRL_INTEGRATION=1 pytest -c pyproject.toml --rootdir . ../Implementations/16-disclosure-api/verification` | 14 passed |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` | pass |
+| `ruff format --check .` | pass (177 files) |
+| `mypy src` | pass (79 files) |
+| `pytest -m "not integration"` | 436 passed, 1 skipped (taxonomy package not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 47 passed |
+
+Review of `git diff c52c2ea..1686654`:
+
+- `acceptance/` and `diagrams/disclosure-api.svg` are byte-identical to the main
+  checkout's copies.
+- SQL reads only `v_cover_pages_latest`, `v_segment_facts_latest`, and
+  `v_text_blocks_latest`, always scoped by `accession = %(accession)s`. The f-string
+  parts are fixed fragments; every user value (`accession`, `kinds`, `concept`,
+  `policy`, `limit`, `offset`) is a `%(name)s` parameter.
+- Limits match the contract: segments `limit` 1–10,000 (default 1,000), text blocks
+  1–1,000 (default 200), `offset` 0–10,000, include-text cap 100. FastAPI rejects
+  malformed accession, kind, concept, bools, and ranges before the handler; the
+  100-row cap raises `ValueError` in the service before `warehouse.query`, mapped
+  to 422.
+- No DDL, migration, grant, or `sql/` changes.
+- AC-7: `create_app().openapi()` lists the three routes with a description on every
+  parameter (accession, kind, concept, include_eliminations, policy, include_text,
+  limit, offset) and a docstring with an example call. DATA_MODEL.md has `curl`
+  examples and the response shapes; ARCHITECTURE.md names the routes.
+
+Probes beyond the tests (temporary test file, removed afterwards):
+
+- `kind=product` returns a segment × product row (`kind` "segment", members
+  `[segment, product]`); `kind=geography` and `kind=consolidation` exclude it;
+  repeated `kind` unions; `kind` + `concept` combine.
+- Order follows the contract (`concept_qname, kind, member_label, …`).
+- A cover page with no class-of-stock facts returns `securities: []` and
+  `amendment: null`.
+- `public_float` of 123456789012345678901234567890 comes back as that exact JSON
+  integer.
+- `text_length` counts characters: `<p>café 🍎</p>` gives 13.
+- Text blocks without `limit` report `limit` 200, or 100 with `include_text`;
+  `include_text=true&limit=101` is 422.
+
+Findings (none blocking):
+
+- Contract says "Numbers are JSON numbers equal to the stored decimal". A
+  non-integral `Decimal256(18)` with more significant digits than a double holds is
+  rounded: 1.123456789012345678 is returned as 1.1234567890123457. Values like 6.08
+  and every integral value are exact. The implementer recorded this limitation; no
+  test covers it. If exact fractions matter, it needs a custom JSON encoder.
+- The text-block default with `include_text=true` is 100, not 200. The contract is
+  ambiguous on this point (default 200, cap 100), and the visible AC-3 test requires
+  `?policy=true&include_text=true` to succeed, so this reading is consistent with it.
+  The OpenAPI description and DATA_MODEL.md state the behavior.
+- Out of scope, from plan 12's writer: a member whose concept isn't in the bundle's
+  concept list is stored with a Clark-notation qname (`{ns}ChinaMember`), and the
+  route returns it as stored.
+
+Limitations: synthetic bundles only; not run against the AAPL corpus, so the
+text-block route's cost over `v_text_blocks_latest` isn't measured. AC-7 `/docs` was
+checked through the OpenAPI schema, not in a browser.
+
+Verdict: ACCEPT.

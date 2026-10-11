@@ -11,7 +11,7 @@
 7. worker
 8. API
 
-![UML deployment view of the Compose services: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker-parse has no other network; prometheus and grafana in the monitoring profile](diagrams/deployment-compose.svg)
+![UML deployment view of the Compose services: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker-parse has no other network; prometheus and grafana in the monitoring profile; the worker reaches SEC EDGAR, filings.xbrl.org (with esef enabled), and taxonomy hosts](diagrams/deployment-compose.svg)
 
 ## Identities and the admin service
 
@@ -101,8 +101,65 @@ SEC) and defers the job exactly as described above.
 - **Taxonomy coverage.** `config/taxonomy_packages.yml` may list
   `source_required_prefixes: {<code>: [prefixes]}`. `doctor` and offline extraction
   require the US `required_prefixes` plus those of each enabled source.
-- Only the `sec` adapter exists so far; enabling any other code makes `worker run` stop
-  at startup with `ConfigurationError` until that source's adapter is added.
+- Adapters exist for `sec` and `esef`; enabling any other code makes `worker run` stop
+  at startup with `ConfigurationError` until that source's adapter is added. The
+  sources' host allowlists may not overlap (checked at startup).
+
+## ESEF filings
+
+`esef` fetches EU and UK annual reports in ESEF (inline XBRL, IFRS) from XBRL
+International's free JSON:API at `https://filings.xbrl.org/api`. Keys and fields are
+in DATA_MODEL.md, "ESEF filings".
+
+**Reuse terms.** The API is free, "may be changed at any time", may be rate limited
+or withdrawn, and the site states no data licence. Before enabling `esef` in
+production, confirm reuse terms with XBRL International and record the answer.
+filings.xbrl.org is a third-party aggregator, not a regulator: it can be
+incomplete or late, and its digests prove only that the bytes are the ones it
+published (SECURITY.md).
+
+Enable it (each step that sends traffic needs the operator's approval):
+
+1. **Pin the taxonomies.** `config/taxonomy_packages.yml` lists
+   `source_required_prefixes.esef` (the ESMA ESEF taxonomy and IFRS Accounting
+   Taxonomy years) but no pinned entries, so with `esef` enabled `taxonomy status`
+   shows those prefixes `uncovered`, `doctor` fails, and offline extraction refuses to
+   start. For each ESEF taxonomy (`www.esma.europa.eu`) and IFRS Accounting Taxonomy
+   (`www.ifrs.org` or `xbrl.ifrs.org`) package: download it once from the publisher,
+   record its SHA-256 and size, and add an entry as in "Adding a taxonomy year"
+   (`package` when it carries `META-INF/taxonomyPackage.xml`). Then run
+   `taxonomy sync` and `taxonomy status` until no row is `uncovered`. Check the
+   listed years against the canary's filings and add newer ESMA years they import.
+2. **Allow the taxonomy hosts.** The default `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` now
+   includes `www.esma.europa.eu` and `www.ifrs.org`. An existing `.env` that sets the
+   variable keeps its old list: add both hosts there (the unit test
+   `test_repository_registry_entries_are_on_allowed_hosts` compares the effective list
+   with `network_policy.allowed_taxonomy_hosts` and fails until they match).
+3. **Enable the source** in every process: `XBRL_ENABLED_SOURCES=sec,esef`.
+   `XBRL_ESEF_PAGE_SIZE` (default 100), `XBRL_ESEF_MAX_PAGES` (default 50 per run, per
+   country) and `XBRL_ESEF_COUNTRIES` (comma-separated ISO codes; empty = one feed for
+   all countries) bound discovery.
+4. **Run one ESEF fetch worker.** Its traffic goes only to `filings.xbrl.org` at no
+   more than 2 requests/s with `XBRL_SEC_USER_AGENT`, under the `xbrl:esef-egress`
+   lock, so it can run beside the SEC worker. As with every source, a fetch worker
+   claims both sources' jobs (see "Sources and per-source egress"):
+
+   ```bash
+   XBRL_ENABLED_SOURCES=sec,esef xbrl-warehouse worker run --job-type fetch_filing --job-type discover_filings
+   XBRL_ENABLED_SOURCES=sec,esef XBRL_ARELLE_OFFLINE=true xbrl-warehouse worker run --job-type parse_filing
+   ```
+
+5. **Discover** by enqueueing a `discover_filings` job with
+   `{"source": "esef", "filed_from": "2024-04-01", "filed_to": "2024-04-30"}`
+   (dates are when filings.xbrl.org added the report; add `"entity": "<LEI>"` for one
+   issuer). It pages newest first and stops once past `filed_from`.
+6. **Canary (AC-6).** Discover one week, ingest three filings with offline parsing,
+   and confirm `ifrs-full` facts in `v_xbrl_facts_latest` and canonical revenue.
+
+Fetch re-reads the filing's record, downloads the package, and checks it against the
+published SHA-256 before storing it. A digest mismatch stores nothing and fails
+permanently; rediscover after filings.xbrl.org corrects the record. A package that
+fails the archive checks is kept under `quarantine/esef/` for diagnosis.
 
 ## Fetch and parse workers
 
@@ -232,14 +289,16 @@ xbrl-warehouse taxonomy sync     # download missing or corrupt enabled packages
 ### Adding a taxonomy year
 
 1. Find the official package URL on the publisher's site (FASB `xbrl.fasb.org`, SEC
-   `xbrl.sec.gov`). The host must be on the allowlist.
+   `xbrl.sec.gov`, ESMA `www.esma.europa.eu`, IFRS Foundation `www.ifrs.org` or
+   `xbrl.ifrs.org`). The host must be on the allowlist.
 2. Download it once and record its SHA-256 and size.
 3. If it contains `META-INF/taxonomyPackage.xml` and a catalog limited to that
    family/year, add a `package` entry with its `prefixes`. Otherwise add an `archive`
    entry whose `mappings` point each `https://<host>/<family>/<year>/` prefix at the
    matching directory in the zip (`""` for the zip root). Don't repackage the file.
    Two enabled entries may not claim the same prefix.
-4. Add the family/year to `required_prefixes`.
+4. Add the family/year to `required_prefixes` (or, for one source's taxonomies, to
+   `source_required_prefixes.<code>`).
 5. Run `taxonomy sync` and `taxonomy status`, then re-extract a filing that uses the
    year offline. Package changes alter extraction input, so they ship with an
    extraction revision bump.

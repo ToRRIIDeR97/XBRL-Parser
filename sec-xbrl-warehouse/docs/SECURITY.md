@@ -16,7 +16,7 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 
 ## Trust boundaries
 
-![Trust boundaries: untrusted SEC, taxonomy, and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
+![Trust boundaries: untrusted SEC, filings.xbrl.org (ESEF), taxonomy, and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
 
 - **SEC and taxonomy content is untrusted.** ZIP members, filing packages, TSV
   rows, and taxonomy responses are bounded before allocation. Unsafe names,
@@ -30,13 +30,31 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   `data.sec.gov` and `XBRL_SEC_USER_AGENT`. Only sources in `XBRL_ENABLED_SOURCES`
   get an adapter; a job for any other source fails permanently and never falls back
   to the SEC. Bytes from every source get the same bounds and checksums as SEC bytes.
+  `source_policies` refuses two policies that share a host, and `worker run` checks
+  it at startup.
+- **filings.xbrl.org (ESEF) is a third-party aggregator.** XBRL International
+  collects ESEF reports from national registries; it isn't the regulator, so a report
+  can be missing, late, or (in principle) altered upstream of the site. The `esef`
+  client may reach only `filings.xbrl.org` (HTTPS, at most 2 requests/s, sending
+  `XBRL_SEC_USER_AGENT`, the operator's contact identity, as the SEC client does) under its own `xbrl:esef-egress` lock, and never the SEC hosts.
+  Its JSON is untrusted input: records with an invalid filing key, LEI, date, or a
+  package URL that isn't a plain path on that host are skipped. A package must match
+  the SHA-256 the site publishes for it (nothing is stored on a mismatch or without a
+  digest), which proves the bytes are the ones the site published, not that the issuer
+  filed them. It then gets the same ZIP checks as SEC archives and is stored
+  byte-identical. A report package's own `META-INF/catalog.xml` may remap only its
+  extension taxonomy to files inside the package: a target outside the package, or a
+  prefix that overlaps a pinned taxonomy, fails the extraction. Reuse terms are
+  unconfirmed (OPERATIONS.md, "ESEF filings").
 - **Taxonomy packages are pinned.** `taxonomy sync` is a separate outbound path: it
   downloads only registry URLs that use HTTPS on port 443, carry no credentials, and
   name a host in `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`. It uses the rate-limited
   client and byte limits, and installs a file only after its SHA-256 matches the
   registry. Extraction re-verifies every package. `archive` and `file` entries are
   the publishers' unmodified files; only verified files are mapped into Arelle. `xbrl.sec.gov` is on the default
-  allowlist because it serves the SEC taxonomies (dei and others) and their packages.
+  allowlist because it serves the SEC taxonomies (dei and others) and their packages;
+  `www.esma.europa.eu` (ESEF taxonomy), `xbrl.ifrs.org` and `www.ifrs.org` (IFRS
+  Accounting Taxonomy) are on it for the `esef` source's pinned packages.
   The W3C `xml.xsd` schemas are shipped with the application, so `www.w3.org` is never
   contacted.
 - **The object store is trusted.** Manifest-cache and checkpoint verification detect
@@ -171,12 +189,13 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
 Run from `sec-xbrl-warehouse/` with the virtualenv active:
 
 ```bash
-pytest tests/unit/test_api.py tests/unit/test_config.py tests/unit/test_deployment.py tests/unit/test_bulk_security.py tests/unit/test_sec_client.py tests/unit/test_source_adapters.py tests/unit/test_object_store.py
+pytest tests/unit/test_api.py tests/unit/test_config.py tests/unit/test_deployment.py tests/unit/test_bulk_security.py tests/unit/test_sec_client.py tests/unit/test_source_adapters.py tests/unit/test_esef_source.py tests/unit/test_object_store.py
 ```
 
 These cover API auth and capacity, production credential checks, API environment
 isolation, bucket setup quoting, ZIP limits and unsafe names, SEC retry behavior,
-per-source host allowlists and redirect refusal, and bounded object restores. The full gates are listed in the root `AGENTS.md`.
+per-source host allowlists, disjoint source hosts and redirect refusal, ESEF digest
+checks, unsafe records and report package catalogs, and bounded object restores. The full gates are listed in the root `AGENTS.md`.
 
 ## Before public exposure
 

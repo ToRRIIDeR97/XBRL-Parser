@@ -854,11 +854,13 @@ def _choose_entrypoint(manifest: FilingPackageManifest) -> str:
         return _manifest_entrypoint(manifest, manifest.filing.instance_document)
     if manifest.filing.primary_document:
         return _manifest_entrypoint(manifest, manifest.filing.primary_document)
-    preferred = [
-        member.name
-        for member in manifest.members
-        if member.is_xbrl_entrypoint or member.name.endswith(".xml")
-    ]
+    # A flagged entrypoint (a report package's inline report) wins over other XML
+    # members such as `META-INF/catalog.xml`. SEC manifests reach this point only
+    # without primary and instance documents, so none of their members is flagged.
+    flagged = sorted(member.name for member in manifest.members if member.is_xbrl_entrypoint)
+    if flagged:
+        return _manifest_entrypoint(manifest, flagged[0])
+    preferred = [member.name for member in manifest.members if member.name.endswith(".xml")]
     if preferred:
         return _manifest_entrypoint(manifest, sorted(preferred)[0])
     raise ArtifactIntegrityError(f"No XBRL entrypoint found in {manifest.filing.accession}")

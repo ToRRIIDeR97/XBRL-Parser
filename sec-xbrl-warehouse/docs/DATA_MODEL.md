@@ -147,6 +147,8 @@ them, so discovery usually leaves them NULL.
   derived values as they are, including NULL for conflicting or invalid dei values,
   so PostgreSQL and the fact rows agree. A period that differs from discovery only in
   case isn't a mismatch.
+- These rules are the SEC adapter's. Each source adapter derives the fields
+  (`SourceRegistry.fiscal_focus`); ESEF's rules are under "ESEF filings" below.
 
 ### `xbrl_contexts`
 
@@ -220,6 +222,47 @@ keep their names, but hold source-neutral keys (`domain/sources.py`, migration
 - **Object keys** carry the source: `bronze/<source>/filings/<entity key>/<filing
   key>/...` and `manifests/<source>/filings/<filing key>/...`, so SEC keys stay
   `bronze/sec/...` and `manifests/sec/...`.
+
+## ESEF filings
+
+ESEF annual reports come from XBRL International's filings.xbrl.org
+(`sources/esef.py`, source code `esef`). Each filings.xbrl.org record becomes:
+
+| Field | Value |
+|---|---|
+| `accession` (filing key) | `esef-<fxo_id>`, e.g. `esef-213800H2PQMIF3OVZY47-2023-12-31-ESEF-GB-0`; a record whose key isn't valid is skipped and logged |
+| `cik` (entity key) | `resolve_entity_key("http://standards.iso.org/iso/17442", <LEI>)`; the LEI is trimmed and upper-cased first, so one issuer has one key |
+| `company_name` | the included entity's `name` (the LEI if it has none) |
+| `form` | `ESEF` |
+| `filed_date` | the date of `date_added` (when filings.xbrl.org added the report) |
+| `report_date` | `period_end` |
+| `archive_directory_url` | `https://filings.xbrl.org` + the directory of `package_url` |
+| `primary_document_url` | `https://filings.xbrl.org` + `report_url` |
+| `is_inline_xbrl` | true |
+| `fiscal_period`, `fiscal_year` | `FY` and `report_date`'s year; without a report date, the end year of the latest non-nil, non-dimensional duration fact (else NULL with a `warehouse:fiscalYearUnknown` warning) |
+
+Discovery stores one `companies` row per LEI (`cik` = entity key, `name`; the other
+columns stay NULL). Its facts carry the report's own entity scheme and identifier
+(the LEI scheme and LEI).
+
+- **Package.** The bronze package archive is the report package zip as published,
+  byte-identical, at `bronze/esef/filings/<entity key>/<filing key>/packages/sha256=<published
+  sha256>/package.zip`. Its bytes must match filings.xbrl.org's `sha256`; a mismatch
+  stores nothing. A package that matches but fails the ZIP checks (traversal,
+  member count, sizes, ratio) or has no single inline report under `reports/` is kept
+  at `quarantine/esef/filings/<filing key>/sha256=<sha256>/package.zip` and the fetch
+  fails permanently.
+- **Manifest.** Members are the zip entries (path inside the zip, size, SHA-256);
+  exactly one, the inline XBRL report under `<top>/reports/`, is the entrypoint
+  (`report_url` decides between several). It is stored at
+  `manifests/esef/filings/<filing key>/package-sha256=<sha256>/filing-sha256=<hash of
+  the FilingRef>.json`; a second fetch of the same bytes reuses it without
+  downloading the package again.
+- **Parse.** Arelle reads the report from the extracted package; references may reach
+  anything under the package's top directory, and the package's
+  `META-INF/catalog.xml` remaps its own extension taxonomy URLs to package files.
+  A catalog entry that leaves the package or overlaps a pinned taxonomy prefix fails
+  the extraction.
 
 ## Companies
 

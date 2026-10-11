@@ -83,8 +83,13 @@ async def runtime_services(
     lock lazily, before its first extraction; with offline Arelle it never touches it.
     """
     from sec_xbrl_warehouse.config_files import load_yaml
-    from sec_xbrl_warehouse.infrastructure.http.egress_lock import LazyEgress, SecEgressLock
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import (
+        LazyEgress,
+        SecEgressLock,
+        SourceEgressLock,
+    )
     from sec_xbrl_warehouse.infrastructure.http.sec_client import SecHttpClient
+    from sec_xbrl_warehouse.infrastructure.http.source_client import SourceHttpClient
     from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWarehouse
     from sec_xbrl_warehouse.infrastructure.storage.object_store import create_object_store
     from sec_xbrl_warehouse.infrastructure.storage.parquet import ParquetBatchWriter
@@ -102,13 +107,15 @@ async def runtime_services(
     from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
     from sec_xbrl_warehouse.mapping.postgres_repository import PostgresMappingRepository
     from sec_xbrl_warehouse.sources.base import SourceAdapter
-    from sec_xbrl_warehouse.sources.registry import SourceRegistry
+    from sec_xbrl_warehouse.sources.esef import ESEF_SOURCE, EsefSourceAdapter
+    from sec_xbrl_warehouse.sources.registry import SourceRegistry, source_policies
     from sec_xbrl_warehouse.sources.sec import SecSourceAdapter
 
-    unimplemented = [code for code in settings.enabled_sources if code != SEC_SOURCE]
+    # Each source plan adds its adapter (with a `SourceHttpClient` and
+    # `SourceEgressLock` when `requires_network`) here.
+    policies = source_policies(settings)
+    unimplemented = [code for code in settings.enabled_sources if code not in policies]
     if unimplemented:
-        # Each later source plan adds its adapter (with a `SourceHttpClient` and
-        # `SourceEgressLock` when `requires_network`) here.
         raise ConfigurationError(f"No adapter is implemented for enabled sources {unimplemented}")
     settings.ensure_directories()
     sources = load_yaml(settings.config_dir / "sources.yml")["sec"]
@@ -176,6 +183,19 @@ async def runtime_services(
                         company_refresh_days=settings.company_refresh_days,
                     )
                 )
+            if ESEF_SOURCE in settings.enabled_sources:
+                esef_http: SourceHttpClient | None = None
+                if requires_network(job_types, ESEF_SOURCE):
+                    # filings.xbrl.org gets the same operator identity as the SEC.
+                    settings.assert_sec_identity()
+                    esef_http = await stack.enter_async_context(
+                        SourceHttpClient(
+                            settings,
+                            policies[ESEF_SOURCE],
+                            egress_lock=SourceEgressLock(settings, source=ESEF_SOURCE),
+                        )
+                    )
+                adapters.append(EsefSourceAdapter(settings, esef_http, store, control))
             registry = SourceRegistry(adapters, packages=packages)
             services: dict[str, Any] = {
                 "control": control,

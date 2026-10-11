@@ -10,14 +10,14 @@ This file is the master architecture document. It holds the UML views listed und
 [UML views](#uml-views) and the [coverage index](#coverage-index). The diagram below is
 the component view; the other views follow the prose sections.
 
-![UML component view: CLI and worker dispatch bulk, filing, and mapping components, which use the source registry and per-source HTTP clients, Arelle, and validation and write PostgreSQL, MinIO/S3, and ClickHouse; the query API reads ClickHouse](diagrams/component-overview.svg)
+![UML component view: CLI and worker dispatch bulk, filing, and mapping components, which use the source registry (SEC and ESEF adapters) and per-source HTTP clients to SEC EDGAR and filings.xbrl.org, Arelle, and validation and write PostgreSQL, MinIO/S3, and ClickHouse; the query API reads ClickHouse](diagrams/component-overview.svg)
 
 | Component | Responsibility | Source |
 | --- | --- | --- |
 | CLI | Operator commands: migrations, catalog sync, backfill planning, filing enqueue and discovery, mapping review, taxonomy sync, job recovery. Writes jobs to PostgreSQL; never runs pipeline stages itself, except the SEC catalog and taxonomy syncs. | `cli.py` |
 | Worker | Claims jobs with `FOR UPDATE SKIP LOCKED`, heartbeats leases, dispatches one handler per `JobType`, classifies failures as retry or dead. | `worker.py` |
 | Source HTTP clients | `SourceHttpClient` enforces one source's `SourcePolicy` (host allowlist, also on every redirect hop; headers; rate; concurrency), byte limits, retries with jitter, `Retry-After`, and that source's PostgreSQL advisory lock `SourceEgressLock` (`xbrl:<source>-egress`), so one process sends each source's traffic. `SecHttpClient` is the SEC policy (user agent, `XBRL_SEC_*` rate) with `SecEgressLock` (`xbrl:sec-egress`). | `infrastructure/http/` |
-| Source registry and adapters | `SourceRegistry` holds one adapter per `XBRL_ENABLED_SOURCES` entry and routes by source code or filing key: discovery, package download, and filing fiscal fields. `SecSourceAdapter` wraps the SEC discovery, downloader, and dei fiscal focus unchanged. An unknown or disabled source raises `UnsupportedSourceError` (never retried). | `sources/` |
+| Source registry and adapters | `SourceRegistry` holds one adapter per `XBRL_ENABLED_SOURCES` entry and routes by source code or filing key: discovery, package download, and filing fiscal fields. `SecSourceAdapter` wraps the SEC discovery, downloader, and dei fiscal focus unchanged. `EsefSourceAdapter` pages filings.xbrl.org's JSON:API, allocates entity keys from LEIs, stores the digest-checked report package as published, and sets `FY` and the period-end year. Source policies' host allowlists are disjoint. An unknown or disabled source raises `UnsupportedSourceError` (never retried). | `sources/` |
 | Bulk backfill | FSNDS catalog, ZIP download to bronze, streaming TSV to Parquet and ClickHouse, reconciliation. SEC only; uses the SEC client directly. | `ingestion/bulk_*.py`, `ingestion/orchestrator.py`, `ingestion/sec_tsv.py` |
 | Filing ingestion | Discovery (`discover_filings`, through the source's adapter; SEC: daily indexes or submissions JSON), package download (`fetch_filing`, `SourceRegistry.download_package`), and extraction through publish (`parse_filing`, fiscal fields from `SourceRegistry.fiscal_focus`). | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
 | Arelle adapter | Runs Arelle in reusable child processes (a fresh controller per filing, no credentials) against pinned taxonomy packages and returns an `XbrlExtractionBundle`. | `infrastructure/xbrl/` |
@@ -43,6 +43,10 @@ The SEC bulk data is the fastest and most reliable historical backfill, but it i
   (`bronze/sec/filings/<cik>/<accession>/packages/sha256=<hash>/package.zip`). Keys
   are `bronze/<source>/filings/<entity key>/<filing key>/...`, where the source comes
   from the filing key, so SEC keys are as shown.
+- ESEF report packages from filings.xbrl.org, stored byte-identical under the same
+  key shape with the SHA-256 the site publishes (checked before storing). Its
+  manifest lists the zip entries and flags the inline report under `reports/` as the
+  entrypoint; `materialize_package` extracts and verifies them as below.
 - HTTP metadata, checksums, source URLs, and acquisition timestamps.
 - A manifest containing every member's SHA-256 and size, plus `package_object_key`
   and `package_checksum_sha256`.
@@ -148,7 +152,8 @@ Logical identity is the filing key: the dashed SEC accession number, or
 keys"). The source registry sends each filing to its source's adapter; a filing whose
 source isn't enabled fails with `UnsupportedSourceError` (never retried, never sent to
 the SEC), and the SEC package downloader itself still refuses a non-SEC filing before
-any request. Package bytes and extraction version are tracked independently, allowing a parser upgrade to produce a new extraction revision without changing the filing identity.
+any request. An ESEF fetch of bytes already stored reuses the stored package and
+manifest (keyed by the published SHA-256 and the `FilingRef`). Package bytes and extraction version are tracked independently, allowing a parser upgrade to produce a new extraction revision without changing the filing identity.
 
 ### ClickHouse
 
@@ -221,10 +226,12 @@ editor and keep node names consistent across views.
 The local and single-host topology from `docker-compose.yml`. Production additions are
 listed in [DEPLOYMENT.md](DEPLOYMENT.md). Storage and application containers share the
 internal `backend` network; `worker-parse` is on it alone, so it has no internet
-route. Each service connects with its own identity (OPERATIONS.md, "Identities and the
+route. With `XBRL_ENABLED_SOURCES=sec,esef` the fetch worker also reaches
+`filings.xbrl.org` (its own client and `xbrl:esef-egress` lock), and `taxonomy sync`
+reaches the ESMA and IFRS taxonomy hosts. Each service connects with its own identity (OPERATIONS.md, "Identities and the
 admin service").
 
-![UML deployment view: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker, admin, and api also join the default network; prometheus and grafana in the monitoring profile; SEC and taxonomy hosts outside the host](diagrams/deployment-compose.svg)
+![UML deployment view: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker, admin, and api also join the default network; prometheus and grafana in the monitoring profile; SEC and taxonomy hosts, filings.xbrl.org, and taxonomy hosts outside the host](diagrams/deployment-compose.svg)
 
 ### Class view
 
@@ -268,10 +275,10 @@ Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level fol
 | CLI | Component; filing and bulk activity | `cli.py` |
 | Worker and job queue | Component; job state machine; filing sequence; recovery activity | `worker.py`; `infrastructure/storage/postgres.py` (`claim_job`, `complete_job`, `fail_job`, `retry_job`) |
 | Source HTTP clients and egress locks | Component; filing sequence; job state machine; trust boundaries | `infrastructure/http/source_client.py`, `sec_client.py`, `egress_lock.py`, `rate_limiter.py` |
-| Source registry and adapters | Component; deployment (one fetch worker per source); filing sequence | `sources/base.py`, `registry.py`, `sec.py`; `worker.runtime_services`; `Settings.enabled_sources` |
+| Source registry and adapters | Component; deployment (one fetch worker per source); filing sequence | `sources/base.py` (`check_disjoint_hosts`), `registry.py` (`source_policies`), `sec.py`, `esef.py`; `worker.runtime_services`; `Settings.enabled_sources`, `esef_*` |
 | Bulk backfill | Component; bulk activity; artifact state machine | `ingestion/bulk_catalog.py`, `bulk_downloader.py`, `bulk_loader.py`, `orchestrator.py`, `sec_tsv.py` |
 | Filing ingestion | Component; class (FilingRef); filing activity; filing sequence | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py`; filing and entity keys in `domain/sources.py` |
-| Arelle and taxonomy packages | Component; filing activity and sequence; trust boundaries | `infrastructure/xbrl/arelle_adapter.py`, `taxonomy_packages.py` (`required_prefixes` adds `source_required_prefixes` of enabled sources), `sec_transforms.py`; `config/taxonomy_packages.yml` |
+| Arelle and taxonomy packages | Component; filing activity and sequence; trust boundaries | `infrastructure/xbrl/arelle_adapter.py` (report packages: `report_package_root`, catalog remappings), `taxonomy_packages.py` (`required_prefixes` adds `source_required_prefixes` of enabled sources), `sec_transforms.py`; `config/taxonomy_packages.yml` |
 | Validation | Component; filing and bulk activity | `validation/` |
 | Statements, disclosures, fiscal fields | Class (bundle); filing activity (publish step) | `normalization/statements.py`, `disclosures.py`, `fiscal_focus.py`; `ClickHouseWarehouse.insert_xbrl_bundle` |
 | Canonical mapping and series | Component; class; filing activity and sequence | `mapping/`, `query/series.py`, `normalization/series.py`; `config/canonical_metrics.yml`, `concept_seed.yml` |
@@ -281,6 +288,7 @@ Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level fol
 | Storage maintenance | Deployment (admin service) | `infrastructure/storage/maintenance.py`, `inventory.py`; `cli.py` `storage` commands |
 | ClickHouse | Component; deployment; filing and API sequences | `infrastructure/storage/clickhouse.py`; `sql/clickhouse/`; `docker/clickhouse/` |
 | SEC EDGAR (external) | Component; deployment; filing sequence; trust boundaries | `config/sources.yml` |
+| filings.xbrl.org (external, ESEF) | Component; deployment; trust boundaries | `sources/esef.py` (`ESEF_POLICY`) |
 | Taxonomy hosts (external) | Component; deployment; trust boundaries | `config/taxonomy_packages.yml` |
 | Prometheus and Grafana | Component; deployment | `observability/metrics.py`; `ops/` |
 | Workflow: filing ingest | Filing activity; filing sequence | as above |

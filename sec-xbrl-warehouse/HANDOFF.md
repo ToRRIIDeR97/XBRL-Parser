@@ -62,6 +62,14 @@ agent, rate, lock name, object keys, and job keys are unchanged, and there's no
 migration. Only the `sec` adapter exists; enabling another code stops `worker run` at
 startup until its plan lands (OPERATIONS.md, "Sources and per-source egress").
 
+Plan 19 adds the `esef` adapter (EU/UK ESEF reports from filings.xbrl.org), off by
+default, with no migration. It isn't enabled anywhere yet. Before enabling it the
+operator confirms filings.xbrl.org's reuse terms, pins the ESEF and IFRS taxonomy
+packages (`source_required_prefixes.esef` is listed but has no pinned entries, so
+`taxonomy status` shows `uncovered` rows and `doctor` fails once `esef` is enabled),
+adds `www.esma.europa.eu,www.ifrs.org` to `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` in
+`.env`, and runs the AC-6 canary (OPERATIONS.md, "ESEF filings").
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.

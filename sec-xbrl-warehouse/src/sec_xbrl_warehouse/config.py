@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     # process sharing a control database should use the same list: a job for a source
     # that isn't enabled fails permanently.
     enabled_sources: Annotated[tuple[str, ...], NoDecode] = ("sec",)
+    # filings.xbrl.org (ESEF) discovery: records per page, pages per discovery run (per
+    # country when `esef_countries` is set), and ISO country codes (empty: all).
+    esef_page_size: int = Field(default=100, ge=1, le=500)
+    esef_max_pages: int = Field(default=50, ge=1, le=10_000)
+    esef_countries: Annotated[tuple[str, ...], NoDecode] = ()
 
     sec_user_agent: str = "Your Name or Organization monitored-email@example.com"
     sec_max_requests_per_second: float = Field(default=8.0, gt=0, le=10)
@@ -90,7 +95,8 @@ class Settings(BaseSettings):
     arelle_taxonomy_packages_dir: Path = Path("data/taxonomy-packages")
     arelle_offline: bool = False
     arelle_allowed_taxonomy_hosts: str = (
-        "www.sec.gov,xbrl.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org"
+        "www.sec.gov,xbrl.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org,"
+        "www.esma.europa.eu,www.ifrs.org"
     )
     arelle_timeout_seconds: float = Field(default=600, gt=0)
     arelle_memory_limit_bytes: int = Field(default=2 * 1024**3, gt=0)
@@ -158,6 +164,22 @@ class Settings(BaseSettings):
         if len(set(value)) != len(value):
             raise ValueError("enabled_sources lists a source more than once")
         return value
+
+    @field_validator("esef_countries", mode="before")
+    @classmethod
+    def split_esef_countries(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(part for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("esef_countries")
+    @classmethod
+    def validate_esef_countries(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        codes = tuple(dict.fromkeys(code.strip().upper() for code in value))
+        invalid = [code for code in codes if re.fullmatch(r"[A-Z]{2}", code) is None]
+        if invalid:
+            raise ValueError(f"esef_countries must be two-letter country codes: {invalid}")
+        return codes
 
     @field_validator("log_level")
     @classmethod

@@ -6,11 +6,12 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.models import FilingPackageManifest, FilingRef, ValidationIssue
 from sec_xbrl_warehouse.domain.sources import filing_source, is_source_code
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import ConfigurationError, UnsupportedSourceError
-from sec_xbrl_warehouse.sources.base import SourceAdapter
+from sec_xbrl_warehouse.sources.base import SourceAdapter, SourcePolicy, check_disjoint_hosts
 
 
 class PackageArchive(Protocol):
@@ -82,3 +83,13 @@ class SourceRegistry:
         if self._packages is None:
             raise ConfigurationError("This source registry has no package archive handler")
         return self._packages
+
+
+def source_policies(settings: Settings) -> dict[str, SourcePolicy]:
+    """Every implemented source's HTTP policy by code; their host allowlists are disjoint."""
+    from sec_xbrl_warehouse.infrastructure.http.sec_client import sec_policy
+    from sec_xbrl_warehouse.sources.esef import esef_policy
+
+    policies = (sec_policy(settings), esef_policy(settings))
+    check_disjoint_hosts(policies)
+    return {policy.code: policy for policy in policies}

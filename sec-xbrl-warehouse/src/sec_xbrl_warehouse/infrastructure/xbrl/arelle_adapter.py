@@ -378,11 +378,21 @@ class ArelleExtractor:
         return controller, records
 
     def _load_model(self, controller: Any, entrypoint: Path) -> Any:
-        """Load the local entrypoint and return `ModelXbrl`."""
+        """Load the local entrypoint and return `ModelXbrl`.
+
+        Local references may reach anywhere under the filing root: the entrypoint's
+        directory, or for a report in an XBRL report package (`<top>/reports/...`)
+        the package's top directory, whose `META-INF/catalog.xml` remappings are
+        registered too.
+        """
+        from arelle import PackageManager
         from arelle.FileSource import FileSource
         from arelle.UrlUtil import IXDS_DOC_SEPARATOR, IXDS_SURROGATE
 
-        controller.webCache._filing_root = entrypoint.parent.resolve()
+        package_root = report_package_root(entrypoint)
+        controller.webCache._filing_root = (package_root or entrypoint.parent).resolve()
+        if package_root is not None:
+            _register_report_package(PackageManager.packagesConfig, package_root)
         source = str(entrypoint)
         if entrypoint.suffix.lower() in {".htm", ".html"}:
             # Only inline XBRL documents join the document set; exhibits and
@@ -977,6 +987,59 @@ def _register_prefix_sources(packages_config: Any, sources: list[TaxonomyPackage
                     f"Taxonomy sources overlap on {prefix}: {remappings[prefix]} and {target}"
                 )
             remappings[prefix] = target
+
+
+_CATALOG_NS = "{urn:oasis:names:tc:entity:xmlns:xml:catalog}"
+
+
+def report_package_root(entrypoint: Path) -> Path | None:
+    """The top directory of the XBRL report package holding `entrypoint`, if any.
+
+    A report package keeps its reports in `<top>/reports/` (one subdirectory per
+    multi-document report) and its metadata in `<top>/META-INF/`.
+    """
+    for directory in entrypoint.parents[:2]:
+        if directory.name.lower() == "reports" and (directory.parent / "META-INF").is_dir():
+            return directory.parent
+    return None
+
+
+def _register_report_package(packages_config: Any, root: Path) -> None:
+    """Map the report package's own catalog rewrites (its extension taxonomy) locally.
+
+    Targets must stay inside the package, and a filer's catalog can't remap a prefix
+    that a pinned taxonomy source already serves.
+    """
+    from lxml import etree
+
+    catalog = root / "META-INF" / "catalog.xml"
+    if not catalog.is_file():
+        return
+    parser = etree.XMLParser(
+        resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False
+    )
+    try:
+        tree = etree.parse(str(catalog), parser)
+    except etree.XMLSyntaxError as exc:
+        raise XbrlExtractionError(f"Malformed report package catalog: {exc}") from exc
+    base = root.resolve()
+    remappings: dict[str, str] = packages_config["remappings"]
+    pinned = tuple(remappings)
+    for element in tree.getroot().iter(f"{_CATALOG_NS}rewriteURI", f"{_CATALOG_NS}rewriteSystem"):
+        prefix = element.get("uriStartString") or element.get("systemIdStartString") or ""
+        rewrite = element.get("rewritePrefix") or ""
+        if not prefix.startswith(("http://", "https://")) or not rewrite:
+            raise XbrlExtractionError(f"Unsupported report package catalog entry: {prefix}")
+        target = (catalog.parent / rewrite).resolve()
+        if not target.is_relative_to(base):
+            raise XbrlExtractionError(f"Report package catalog escapes the package: {rewrite}")
+        mapped = str(target) + ("/" if rewrite.endswith("/") else "")
+        for variant in uri_scheme_variants(prefix):
+            if any(variant.startswith(item) or item.startswith(variant) for item in pinned):
+                raise XbrlExtractionError(
+                    f"Report package catalog remaps a pinned taxonomy prefix: {variant}"
+                )
+            remappings[variant] = mapped
 
 
 _W3C_SCHEMA_DIR = Path(__file__).resolve().parent / "schemas" / "www.w3.org"

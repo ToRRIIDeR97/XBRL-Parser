@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <title>Plan 19: ESEF adapter flow from filings.xbrl.org to the warehouse</title>
+  <rect width="960" height="360" fill="#ffffff"/>
+  <defs>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f5fbf"/>
+    </marker>
+  </defs>
+  <text x="20" y="28" font-size="16" font-weight="bold" fill="#222">ESEF adapter (new, blue) on the plan 18 registry (grey, unchanged)</text>
+
+  <rect x="20" y="50" width="200" height="90" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="72" font-weight="bold" fill="#222">filings.xbrl.org</text>
+  <text x="32" y="92" fill="#222">/api/filings (JSON:API)</text>
+  <text x="32" y="110" fill="#222">sort=-date_added, include=entity</text>
+  <text x="32" y="128" fill="#222">package_url, sha256, LEI</text>
+
+  <rect x="270" y="50" width="300" height="130" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="282" y="72" font-weight="bold" fill="#1f5fbf">EsefSourceAdapter (sources/esef.py)</text>
+  <text x="282" y="92" fill="#1f5fbf">discover: window, LEI filter, page cap (AC-1)</text>
+  <text x="282" y="112" fill="#1f5fbf">key esef-&lt;fxo_id&gt;; LEI → entity key</text>
+  <text x="282" y="132" fill="#1f5fbf">download: SHA-256, zip limits, one</text>
+  <text x="282" y="150" fill="#1f5fbf">report entrypoint (AC-2)</text>
+  <text x="282" y="170" fill="#1f5fbf">fiscal_focus: FY, period-end year (AC-3)</text>
+
+  <rect x="620" y="50" width="320" height="70" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="632" y="72" font-weight="bold" fill="#222">SourceRegistry + worker (plan 18)</text>
+  <text x="632" y="92" fill="#222">discover_filings {"source": "esef"}</text>
+  <text x="632" y="110" fill="#222">fetch_filing esef-… → parse_filing</text>
+
+  <rect x="620" y="140" width="320" height="60" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="632" y="162" fill="#222">bronze/esef/filings/&lt;entity key&gt;/esef-…/</text>
+  <text x="632" y="182" fill="#222">packages/sha256=…/package.zip (plan 17)</text>
+
+  <rect x="270" y="210" width="300" height="130" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="282" y="232" font-weight="bold" fill="#1f5fbf">Taxonomies (AC-5, operator step)</text>
+  <text x="282" y="252" fill="#1f5fbf">pinned ESMA ESEF packages</text>
+  <text x="282" y="272" fill="#1f5fbf">pinned IFRS Accounting Taxonomy</text>
+  <text x="282" y="292" fill="#1f5fbf">hosts: www.esma.europa.eu,</text>
+  <text x="282" y="312" fill="#1f5fbf">xbrl.ifrs.org, www.ifrs.org</text>
+  <text x="282" y="332" fill="#1f5fbf">source_required_prefixes.esef</text>
+
+  <rect x="620" y="220" width="320" height="100" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="632" y="242" font-weight="bold" fill="#222">Arelle parse (offline) → ClickHouse</text>
+  <text x="632" y="262" fill="#222">ifrs-full facts; canonical mapping</text>
+  <text x="632" y="282" fill="#222">already has ifrs-full candidates (plan 06)</text>
+  <text x="632" y="302" fill="#1f5fbf">AC-6: operator canary on 3 real filings</text>
+
+  <line x1="220" y1="95" x2="268" y2="95" stroke="#1f5fbf" marker-end="url(#b)"/>
+  <line x1="570" y1="85" x2="618" y2="85" stroke="#1f5fbf" marker-end="url(#b)"/>
+  <line x1="570" y1="140" x2="618" y2="165" stroke="#1f5fbf" marker-end="url(#b)"/>
+  <line x1="570" y1="275" x2="618" y2="270" stroke="#1f5fbf" marker-end="url(#b)"/>
+</svg>

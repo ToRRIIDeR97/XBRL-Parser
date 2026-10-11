@@ -8,7 +8,7 @@ Storage, extraction, validation, and publishing stay source-neutral.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Protocol
@@ -38,6 +38,24 @@ class SourcePolicy:
             raise ValueError(f"Invalid source code: {self.code!r}")
         if self.max_requests_per_second <= 0 or self.max_concurrency <= 0:
             raise ValueError(f"Source {self.code} needs a positive rate and concurrency")
+
+
+def check_disjoint_hosts(policies: Iterable[SourcePolicy]) -> None:
+    """Refuse policies whose host allowlists overlap (or that repeat a source code).
+
+    One source's client must never reach another source's hosts, so the SEC policy
+    and every other source's policy share no host.
+    """
+    owners: dict[str, str] = {}
+    codes: set[str] = set()
+    for policy in policies:
+        if policy.code in codes:
+            raise ValueError(f"Source {policy.code} has more than one policy")
+        codes.add(policy.code)
+        for host in policy.allowed_hosts:
+            owner = owners.setdefault(host.lower(), policy.code)
+            if owner != policy.code:
+                raise ValueError(f"Sources {owner} and {policy.code} both allow host {host}")
 
 
 @dataclass(frozen=True)

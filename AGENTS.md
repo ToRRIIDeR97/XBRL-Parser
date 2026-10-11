@@ -1,6 +1,7 @@
 # SEC XBRL Warehouse
 
-The application lives in `sec-xbrl-warehouse/`. It downloads SEC filings, extracts
+The application lives in `sec-xbrl-warehouse/`. It downloads SEC filings (and, with
+the `esef` source enabled, EU/UK ESEF reports from filings.xbrl.org), extracts
 XBRL and inline XBRL facts with Arelle, stores them in PostgreSQL, ClickHouse, and
 MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 
@@ -23,6 +24,8 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
   makes a second SEC-active process fail fast with `SecEgressBusyError`. Every other
   source in `XBRL_ENABLED_SOURCES` has its own lock (`xbrl:<source>-egress`), so run
   one fetch worker per source (OPERATIONS.md, "Sources and per-source egress").
+  Don't enable `esef` until filings.xbrl.org's reuse terms are confirmed and the
+  ESEF/IFRS taxonomies are pinned (OPERATIONS.md, "ESEF filings").
 - `worker run --job-type <type>` (repeatable) claims only those job types and leaves
   other queued jobs untouched. Filings are two jobs: `fetch_filing` (SEC download,
   then it queues the parse) and `parse_filing` (no SEC client), e.g.

@@ -674,6 +674,25 @@ required_prefixes:
   - xbrl.sec.gov/cyd/2026/
   - xbrl.sec.gov/invest/2013/
 
+# Extra prefixes per source, required only while that source is in
+# XBRL_ENABLED_SOURCES. ESEF (filings.xbrl.org): the ESMA ESEF taxonomy and the IFRS
+# Accounting Taxonomy years the ESEF RTS name. They have no pinned entry yet, so with
+# `esef` enabled `taxonomy status` and `doctor` report them `uncovered` and offline
+# extraction refuses to start until the operator pins the packages (OPERATIONS.md,
+# "ESEF filings"). Keep this list equal to `ESEF_TAXONOMY_PREFIXES` in sources/esef.py.
+source_required_prefixes:
+  esef:
+    - www.esma.europa.eu/taxonomy/2019-03-27/
+    - www.esma.europa.eu/taxonomy/2020-03-16/
+    - www.esma.europa.eu/taxonomy/2021-03-24/
+    - www.esma.europa.eu/taxonomy/2022-03-24/
+    - xbrl.ifrs.org/taxonomy/2019-03-27/
+    - xbrl.ifrs.org/taxonomy/2020-03-16/
+    - xbrl.ifrs.org/taxonomy/2021-03-24/
+    - xbrl.ifrs.org/taxonomy/2022-03-24/
+    - xbrl.ifrs.org/taxonomy/2023-03-23/
+    - xbrl.ifrs.org/taxonomy/2024-03-27/
+
 network_policy:
   # Filing documents themselves must come from the checksum-addressed filing
   # package. These hosts are the candidates for taxonomy downloads and for
@@ -685,5 +704,7 @@ network_policy:
     - xbrl.fasb.org
     - xbrl.ifrs.org
     - www.xbrl.org
+    - www.esma.europa.eu
+    - www.ifrs.org
   reject_unlisted_hosts: true
   require_https: true

@@ -15,14 +15,14 @@ from sec_xbrl_warehouse.infrastructure.http.egress_lock import EgressLock
 from sec_xbrl_warehouse.infrastructure.http.source_client import SourceHttpClient
 from sec_xbrl_warehouse.sources.base import SourcePolicy
 
+SEC_HOSTS = frozenset({"www.sec.gov", "sec.gov", "data.sec.gov"})
+
 
 def sec_policy(settings: Settings, allowed_hosts: Iterable[str] | None = None) -> SourcePolicy:
     """The SEC's source policy: SEC hosts, `XBRL_SEC_*` rate and concurrency, user agent."""
     return SourcePolicy(
         code=SEC_SOURCE,
-        allowed_hosts=(
-            frozenset(allowed_hosts) if allowed_hosts is not None else SecHttpClient.ALLOWED_HOSTS
-        ),
+        allowed_hosts=(frozenset(allowed_hosts) if allowed_hosts is not None else SEC_HOSTS),
         max_requests_per_second=settings.sec_max_requests_per_second,
         max_concurrency=settings.sec_max_concurrency,
         headers={
@@ -36,7 +36,7 @@ def sec_policy(settings: Settings, allowed_hosts: Iterable[str] | None = None) -
 class SecHttpClient(SourceHttpClient):
     """Rate-limited HTTP client for `sec.gov` and `data.sec.gov` (the SEC policy)."""
 
-    ALLOWED_HOSTS = frozenset({"www.sec.gov", "sec.gov", "data.sec.gov"})
+    ALLOWED_HOSTS = SEC_HOSTS
     error = SecAccessError
 
     def __init__(

@@ -326,3 +326,96 @@ change: 6 passed on every run.
    filings with offline parsing, confirm `ifrs-full` facts and canonical revenue.
 
 ### Verifier record
+
+Independent verifier, branch `verify/19-esef-source` from candidate a29cc21 (base
+f74a993), 11 October 2026. The held-back `verification/` folder was copied from the
+main checkout and no test was edited. This tree's `acceptance/` is identical to the
+main checkout's copy (`diff -r`). Commands ran from `sec-xbrl-warehouse/` with the
+main checkout's venv and `.env` (symlinked, not committed). No external network
+traffic was sent, no container was restarted, and alembic was not run.
+
+**Verdict: ACCEPT.**
+
+| Command | Result |
+| --- | --- |
+| `pytest -c pyproject.toml --rootdir . ../Implementations/19-esef-source/verification` | 9 passed |
+| same for `acceptance`, 5 consecutive runs | 6 passed on every run |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` / `ruff format --check .` | pass / 188 files formatted |
+| `mypy src` | pass (86 files) |
+| `pytest -m "not integration"` with the live `.env` | 517 passed, 1 failed (`test_repository_registry_entries_are_on_allowed_hosts`), 1 skipped |
+| same with `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` set to the new default | 518 passed, 1 skipped (sec-2024.zip not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 52 passed |
+
+The single live-`.env` failure comes from the environment, not the code: the live
+`.env` pins the old host list. The new default (old list plus `www.esma.europa.eu` and
+`www.ifrs.org`; `xbrl.ifrs.org` was already present) matches the plan's Scope and the
+"Taxonomy packages are pinned" entry in SECURITY.md. It equals
+`network_policy.allowed_taxonomy_hosts` in `taxonomy_packages.yml` and `.env.example`.
+Updating `.env` is operator step 2.
+
+**Review of `git diff f74a993..a29cc21` and probes beyond the tests** (33 scratch
+probes, not committed, all pass):
+
+- *SEC unchanged.* `_choose_entrypoint`: SEC flags a loose member only when its name
+  equals the primary or instance document, and either of those returns earlier. SEC
+  flags an expanded `-xbrl.zip` member only together with `source_archive`, which the
+  `archived` branch returns first. So the new `flagged` branch never sees an SEC
+  flag, and the `.xml` fallback matches the old code. An exhaustive probe over
+  SEC-shaped manifests (primary and instance present or absent, every
+  archived/loose split, every flagged expanded member) gave the same result from the
+  old and new functions in every case. `report_package_root` returns None for SEC
+  staging layouts (`filing-*/<file>`), including when a `META-INF/` directory is
+  present. It needs the entrypoint's parent or grandparent to be named `reports` with
+  a sibling `META-INF/`. Without `catalog.xml`, `_register_report_package` does
+  nothing. `SEC_HOSTS` is the same three hosts. With `esef` disabled,
+  `required_prefixes` and `coverage_gaps` are unchanged (probe).
+- *Catalog guards.* These all raise `XbrlExtractionError`: rewrite targets `/etc/`,
+  `../../../`, a sibling directory, a symlink to `/etc`, and an empty rewrite;
+  prefixes under, over, or equal to a pinned prefix (either scheme); and an
+  upper-case, `file:`, or empty prefix. The parser doesn't expand entities. One edge:
+  a rejected entry can leave a scheme twin in `remappings` before it raises. That
+  doesn't persist, because the extraction fails, the child process isn't reused after
+  a failure, and every new controller runs `rebuildRemappings`, which clears
+  `remappings` before `_load_model` registers anything.
+- *Archive safety.* The download checks the digest before anything is stored. On a
+  digest mismatch nothing is written, quarantine included (probe). Traversal, absolute
+  names, non-zip input, and member and byte limits go through `validate_zip_integrity`
+  scoped to the filing limits and `_safe_package_name`. A deflate ratio bomb that
+  passes the digest check is rejected and quarantined, never put in `bronze/` (probe).
+  Retrying an invalid package still raises `ArtifactIntegrityError` and leaves one
+  quarantine object.
+- *LEI.* LEIs that differ only in case or whitespace, across four records, resolve to
+  one key and one company. A lower-case, padded request entity matches them (probe).
+- *Hosts and user agent.* `check_disjoint_hosts` refuses a case-variant overlap and a
+  repeated code. Every request carries `XBRL_SEC_USER_AGENT` through
+  `esef_policy(settings)`. Every request URL is `FXO_BASE` plus a validated path:
+  `_site_path` rejects other hosts, `//` netlocs, `http`, non-443 ports, `..`,
+  queries, and backslashes. `SourceHttpClient` validates each redirect hop against
+  `{"filings.xbrl.org"}`. `links.next` is never followed.
+- *AC-5 fail-closed.* With `enabled_sources=("sec", "esef")`, `coverage_gaps` returns
+  exactly `ESEF_TAXONOMY_PREFIXES`, so `taxonomy status` and `doctor` report
+  `uncovered`, and offline or production extraction refuses to start. With `sec`
+  alone the gaps are empty.
+
+**Deviation rulings.**
+
+1. Clock-dependent acceptance fixture: acceptable. The implementer reported it without
+   editing the fixture, and the plan author fixed it (ruling 6).
+2. Taxonomy host allowlist vs. live `.env`: acceptable. The default is correct per the
+   plan and SECURITY.md, and the failure is an operator `.env` update.
+3. Quarantine of digest-valid invalid packages: acceptable. It follows hard
+   constraint 5 and the SEC `-xbrl.zip` precedent. A digest mismatch still stores
+   nothing, and the worker's object-store policy allows `PutObject` on the bucket.
+4. Names and choices beyond the contract: acceptable. They are additive and covered
+   by tests. Notes, none blocking: `_site_path` keeps a `/./` segment (same host,
+   harmless). A multi-document report under `reports/<sub>/` isn't recognised as a
+   report, so the package is refused and quarantined, which fails closed. `report_url`
+   can't settle multiple reports in a package without a top folder.
+5. AC-5 partly left to the operator: acceptable, as the plan expected. AC-5 and AC-6
+   stay open until pins and the canary are done.
+6. Plan-author fixture correction: acceptable. It is byte-identical to the main
+   checkout, and no assertion changed.
+
+**Defects:** none.

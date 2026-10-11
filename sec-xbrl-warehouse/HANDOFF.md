@@ -51,6 +51,11 @@ profile `parse`); give the SEC-active worker `XBRL_WORKER_CONCURRENCY=4` too. Re
 the images (`docker compose build api worker admin`) before starting them. Then benchmark the AAPL re-ingest against the 43-minute serial
 baseline (OPERATIONS.md, capacity tuning).
 
+Plan 17 (source-neutral filing and entity keys) adds Alembic
+`0008_filing_entity_keys`, not yet applied to the live control database: back up
+PostgreSQL (BACKUP_RESTORE.md), run `alembic upgrade head` through the `admin`
+service, then `doctor`. ClickHouse and existing SEC rows and object keys are unchanged.
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.

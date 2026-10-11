@@ -39,7 +39,9 @@ The SEC bulk data is the fastest and most reliable historical backfill, but it i
 
 - SEC bulk ZIPs.
 - EDGAR filing packages, stored as **one** deterministic package ZIP per filing
-  (`bronze/sec/filings/<cik>/<accession>/packages/sha256=<hash>/package.zip`).
+  (`bronze/sec/filings/<cik>/<accession>/packages/sha256=<hash>/package.zip`). Keys
+  are `bronze/<source>/filings/<entity key>/<filing key>/...`, where the source comes
+  from the filing key, so SEC keys are as shown.
 - HTTP metadata, checksums, source URLs, and acquisition timestamps.
 - A manifest containing every member's SHA-256 and size, plus `package_object_key`
   and `package_checksum_sha256`.
@@ -140,7 +142,10 @@ Logical identity is `(dataset_kind, source_period, source_url, checksum)`. If th
 
 ### Filings
 
-Logical identity is the dashed accession number. Package bytes and extraction version are tracked independently, allowing a parser upgrade to produce a new extraction revision without changing the filing identity.
+Logical identity is the filing key: the dashed SEC accession number, or
+`<source>-<native id>` for another source (DATA_MODEL.md, "Filing keys and entity
+keys"). The SEC package downloader refuses a non-SEC filing with
+`UnsupportedSourceError` (never retried) before any request. Package bytes and extraction version are tracked independently, allowing a parser upgrade to produce a new extraction revision without changing the filing identity.
 
 ### ClickHouse
 
@@ -210,6 +215,8 @@ admin service").
 ### Class view
 
 Core Pydantic types from `domain/`. Persisted columns are in [DATA_MODEL.md](DATA_MODEL.md).
+`FilingRef.accession` is a filing key and `FilingRef.cik` an entity key whose range
+matches the key's source (`domain/sources.py`).
 
 ![UML class view: FilingRef, FilingPackageManifest, PackageMember, XbrlExtractionBundle and its parts, XbrlFact, CanonicalFact, ConceptMapping, CanonicalMetric, ValidationIssue, SourceArtifactRef, DatasetArtifact, and JobRecord](diagrams/class-domain.svg)
 
@@ -248,7 +255,7 @@ Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level fol
 | Worker and job queue | Component; job state machine; filing sequence; recovery activity | `worker.py`; `infrastructure/storage/postgres.py` (`claim_job`, `complete_job`, `fail_job`, `retry_job`) |
 | SEC HTTP client and egress lock | Component; filing sequence; trust boundaries | `infrastructure/http/sec_client.py`, `egress_lock.py`, `rate_limiter.py` |
 | Bulk backfill | Component; bulk activity; artifact state machine | `ingestion/bulk_catalog.py`, `bulk_downloader.py`, `bulk_loader.py`, `orchestrator.py`, `sec_tsv.py` |
-| Filing ingestion | Component; filing activity; filing sequence | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
+| Filing ingestion | Component; class (FilingRef); filing activity; filing sequence | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py`; filing and entity keys in `domain/sources.py` |
 | Arelle and taxonomy packages | Component; filing activity and sequence; trust boundaries | `infrastructure/xbrl/arelle_adapter.py`, `taxonomy_packages.py`, `sec_transforms.py`; `config/taxonomy_packages.yml` |
 | Validation | Component; filing and bulk activity | `validation/` |
 | Statements, disclosures, fiscal fields | Class (bundle); filing activity (publish step) | `normalization/statements.py`, `disclosures.py`, `fiscal_focus.py`; `ClickHouseWarehouse.insert_xbrl_bundle` |

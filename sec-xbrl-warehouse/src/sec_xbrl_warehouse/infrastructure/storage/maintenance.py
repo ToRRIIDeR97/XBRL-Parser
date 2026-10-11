@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from sec_xbrl_warehouse.config import Settings
+from sec_xbrl_warehouse.domain.sources import is_filing_key
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle
 
@@ -30,7 +31,6 @@ REVISIONED_TABLES = (
     "xbrl_concept_labels",
     "canonical_facts",
 )
-_ACCESSION = re.compile(r"\d{10}-\d{2}-\d{6}")
 _CHUNK = 500
 
 
@@ -72,9 +72,8 @@ def retire_superseded_revisions(
     kept: list[tuple[str, int]] = []
     for accession, revision in sorted(found):
         prefix = f"silver/xbrl/extractions/accession={accession}/revision={revision}/"
-        saved = _ACCESSION.fullmatch(accession) is not None and any(
-            True for _ in store.list_objects(prefix)
-        )
+        # A valid filing key has no quotes or spaces, so the DELETE below can format it.
+        saved = is_filing_key(accession) and any(True for _ in store.list_objects(prefix))
         (retire if saved else kept).append((accession, revision))
     rows: dict[str, int] = {
         table: sum(found[pair].get(table, 0) for pair in retire) for table in REVISIONED_TABLES

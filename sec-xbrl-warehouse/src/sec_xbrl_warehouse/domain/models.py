@@ -5,7 +5,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from sec_xbrl_warehouse.domain.enums import (
     ArtifactState,
@@ -13,6 +13,13 @@ from sec_xbrl_warehouse.domain.enums import (
     JobState,
     JobType,
     Severity,
+)
+from sec_xbrl_warehouse.domain.sources import (
+    ENTITY_KEY_BASE,
+    FILING_KEY_MAX_LENGTH,
+    FILING_KEY_PATTERN,
+    SEC_SOURCE,
+    filing_source,
 )
 
 
@@ -69,7 +76,8 @@ class SourceArtifactRef(DomainModel):
 
 
 class FilingRef(DomainModel):
-    accession: str = Field(pattern=r"^\d{10}-\d{2}-\d{6}$")
+    # `accession` is a filing key and `cik` an entity key (domain/sources.py).
+    accession: str = Field(pattern=FILING_KEY_PATTERN, max_length=FILING_KEY_MAX_LENGTH)
     cik: int = Field(ge=0)
     company_name: str
     form: str
@@ -84,6 +92,18 @@ class FilingRef(DomainModel):
     primary_document_url: str | None = None
     is_amendment: bool = False
     is_inline_xbrl: bool | None = None
+
+    @model_validator(mode="after")
+    def entity_key_matches_source(self) -> FilingRef:
+        if (filing_source(self.accession) == SEC_SOURCE) != (self.cik < ENTITY_KEY_BASE):
+            raise ValueError(
+                "SEC filings need a CIK below 10^10 and other sources an entity key at or above it"
+            )
+        return self
+
+    @property
+    def source(self) -> str:
+        return filing_source(self.accession)
 
 
 class FormerName(DomainModel):

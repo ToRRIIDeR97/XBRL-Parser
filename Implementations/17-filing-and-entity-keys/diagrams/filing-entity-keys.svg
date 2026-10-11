@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <title>Plan 17: source-neutral filing keys and entity keys, current and proposed</title>
+  <rect width="960" height="470" fill="#ffffff"/>
+  <text x="20" y="28" font-size="16" font-weight="bold" fill="#222">Current: every identifier is SEC-shaped</text>
+  <text x="500" y="28" font-size="16" font-weight="bold" fill="#222">Proposed (changes in blue)</text>
+
+  <rect x="20" y="45" width="440" height="90" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="67" font-weight="bold" fill="#222">Domain</text>
+  <text x="32" y="88" fill="#222">FilingRef.accession  ^\d{10}-\d{2}-\d{6}$</text>
+  <text x="32" y="108" fill="#222">FilingRef.cik / Company.cik  = SEC CIK</text>
+  <text x="32" y="126" fill="#888">same regex copied in API, FactQuery, maintenance</text>
+
+  <rect x="20" y="150" width="440" height="70" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="172" font-weight="bold" fill="#222">PostgreSQL</text>
+  <text x="32" y="193" fill="#222">filings, validation_issues, mapping_reviews,</text>
+  <text x="32" y="211" fill="#222">mapping_review_observations: accession VARCHAR(20)</text>
+
+  <rect x="20" y="235" width="440" height="70" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="257" font-weight="bold" fill="#222">Object store</text>
+  <text x="32" y="278" fill="#222">bronze/sec/filings/{cik}/{accession}/...</text>
+  <text x="32" y="296" fill="#888">"sec" hard-coded; inventory regex SEC-only</text>
+
+  <rect x="20" y="320" width="440" height="70" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="342" font-weight="bold" fill="#222">Fetch</text>
+  <text x="32" y="363" fill="#222">FilingPackageDownloader builds sec.gov URLs</text>
+  <text x="32" y="381" fill="#222">from any FilingRef</text>
+
+  <rect x="20" y="405" width="440" height="50" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="427" fill="#222">ClickHouse: accession String, cik UInt64 in sort keys</text>
+  <text x="32" y="445" fill="#888">(unchanged by this plan)</text>
+
+  <rect x="500" y="45" width="440" height="90" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="512" y="67" font-weight="bold" fill="#1f5fbf">domain/sources.py (AC-1, AC-2)</text>
+  <text x="512" y="88" fill="#1f5fbf">filing key: SEC accession | &lt;source&gt;-&lt;native id&gt;, ≤ 128</text>
+  <text x="512" y="108" fill="#1f5fbf">filing_source(key); ENTITY_KEY_BASE = 10^10</text>
+  <text x="512" y="126" fill="#1f5fbf">cik column = entity key: CIK below, others above</text>
+
+  <rect x="500" y="150" width="440" height="70" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="512" y="172" font-weight="bold" fill="#1f5fbf">Alembic 0008 (AC-3, AC-4)</text>
+  <text x="512" y="193" fill="#1f5fbf">accession VARCHAR(128) on all four tables</text>
+  <text x="512" y="211" fill="#1f5fbf">entity_keys (scheme, identifier) → key ≥ 10^10</text>
+
+  <rect x="500" y="235" width="440" height="70" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="512" y="257" font-weight="bold" fill="#1f5fbf">Object store (AC-5)</text>
+  <text x="512" y="278" fill="#1f5fbf">bronze/{source}/filings/{entity key}/{filing key}/...</text>
+  <text x="512" y="296" fill="#1f5fbf">SEC keys byte-identical; inventory + retire accept both</text>
+
+  <rect x="500" y="320" width="440" height="70" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="512" y="342" font-weight="bold" fill="#1f5fbf">Fetch guard (AC-6)</text>
+  <text x="512" y="363" fill="#1f5fbf">non-SEC filing → UnsupportedSourceError, no request,</text>
+  <text x="512" y="381" fill="#1f5fbf">not retried (adapters arrive in plan 18)</text>
+
+  <rect x="500" y="405" width="440" height="50" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="512" y="427" fill="#222">ClickHouse unchanged: no DDL, no rebuild;</text>
+  <text x="512" y="445" fill="#1f5fbf">API/FactQuery accept both key forms (AC-7)</text>
+</svg>

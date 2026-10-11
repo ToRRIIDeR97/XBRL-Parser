@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -31,6 +32,7 @@ from sec_xbrl_warehouse.domain.models import (
     SourceArtifactRef,
     ValidationIssue,
 )
+from sec_xbrl_warehouse.domain.sources import SEC_CIK_SCHEME
 from sec_xbrl_warehouse.exceptions import (
     ArtifactIntegrityError,
     ConfigurationError,
@@ -38,6 +40,7 @@ from sec_xbrl_warehouse.exceptions import (
 )
 from sec_xbrl_warehouse.infrastructure.storage.postgres_models import (
     CompanyRow,
+    EntityKeyRow,
     FilingRow,
     IngestionJobRow,
     JobCheckpointRow,
@@ -858,6 +861,41 @@ class PostgresControlRepository:
             row.locked_by = None
             row.heartbeat_at = None
             return JobState(row.state)
+
+    async def resolve_entity_key(self, scheme: str, identifier: str) -> int:
+        """Return the entity key of an issuer identifier, allocating one on first use.
+
+        An SEC CIK (`SEC_CIK_SCHEME`) is its own key and is never stored. Any other
+        `(scheme, identifier)` gets a key from `entity_key_seq` (at or above
+        `ENTITY_KEY_BASE`) that never changes. Concurrent first calls agree: the
+        unique constraint keeps one row and the losers read it back.
+        """
+        if not scheme or not scheme.strip() or not identifier or not identifier.strip():
+            raise ValueError("Entity key scheme and identifier must not be empty")
+        if scheme == SEC_CIK_SCHEME:
+            if re.fullmatch(r"[0-9]{1,10}", identifier) is None:
+                raise ValueError(f"Invalid CIK: {identifier!r}")
+            return int(identifier)
+        values = {"scheme": scheme, "identifier": identifier}
+        lookup = select(EntityKeyRow.entity_key).where(
+            EntityKeyRow.scheme == scheme, EntityKeyRow.identifier == identifier
+        )
+        async with self.sessions.begin() as session:
+            key = await session.scalar(lookup)
+            if key is None:
+                key = await session.scalar(
+                    pg_insert(EntityKeyRow)
+                    .values(**values)
+                    .on_conflict_do_nothing(constraint="uq_entity_keys_scheme_identifier")
+                    .returning(EntityKeyRow.entity_key)
+                )
+        if key is None:
+            # Another transaction inserted it first; it has committed by now.
+            async with self.sessions() as session:
+                key = await session.scalar(lookup)
+        if key is None:
+            raise RuntimeError(f"Entity key for {scheme} {identifier} was not stored")
+        return int(key)
 
     async def upsert_filing(self, filing: FilingRef, *, keep_derived: bool = False) -> None:
         values = {

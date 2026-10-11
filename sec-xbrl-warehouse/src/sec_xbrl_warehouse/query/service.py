@@ -11,13 +11,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.ports import Warehouse
+from sec_xbrl_warehouse.domain.sources import (
+    FILING_KEY_MAX_LENGTH,
+    FILING_KEY_PATTERN,
+    is_filing_key,
+)
 
 
 class FactQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cik: int | None = Field(default=None, ge=0)
-    accession: str | None = Field(default=None, pattern=r"^\d{10}-\d{2}-\d{6}$")
+    accession: str | None = Field(
+        default=None, pattern=FILING_KEY_PATTERN, max_length=FILING_KEY_MAX_LENGTH
+    )
     concept_namespace: str | None = Field(default=None, max_length=2048)
     concept_name: str | None = Field(default=None, max_length=512)
     filed_from: date | None = None
@@ -264,8 +271,7 @@ class QueryService:
     def filing_summary(
         self, accession: str, *, cik: int | None = None, filed_date: date | None = None
     ) -> dict[str, Any] | None:
-        if re.fullmatch(r"\d{10}-\d{2}-\d{6}", accession) is None:
-            raise ValueError("Invalid accession")
+        _check_accession(accession)
         filters = ""
         params: dict[str, Any] = {"accession": accession}
         if cik is not None:
@@ -444,7 +450,7 @@ def _json_number(value: Decimal | None) -> int | float | None:
 
 
 def _check_accession(accession: str) -> None:
-    if re.fullmatch(r"\d{10}-\d{2}-\d{6}", accession) is None:
+    if not is_filing_key(accession):
         raise ValueError("Invalid accession")
 
 

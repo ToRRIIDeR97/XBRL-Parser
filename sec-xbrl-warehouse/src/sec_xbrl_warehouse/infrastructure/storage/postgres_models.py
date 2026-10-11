@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -72,7 +73,7 @@ class FilingRow(TimestampMixin, Base):
         Index("ix_filings_form_filed_date", "form", "filed_date"),
     )
 
-    accession: Mapped[str] = mapped_column(String(20), primary_key=True)
+    accession: Mapped[str] = mapped_column(String(128), primary_key=True)
     cik: Mapped[int] = mapped_column(BigInteger, nullable=False)
     company_name: Mapped[str] = mapped_column(Text, nullable=False)
     form: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -155,7 +156,7 @@ class ValidationIssueRow(Base):
     severity: Mapped[str] = mapped_column(String(16), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     accession: Mapped[str | None] = mapped_column(
-        String(20), ForeignKey("filings.accession", ondelete="SET NULL")
+        String(128), ForeignKey("filings.accession", ondelete="SET NULL")
     )
     artifact_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("source_artifacts.id", ondelete="SET NULL")
@@ -259,7 +260,7 @@ class MappingReviewRow(Base):
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
-    accession: Mapped[str] = mapped_column(String(20), nullable=False)
+    accession: Mapped[str] = mapped_column(String(128), nullable=False)
     fact_id: Mapped[str] = mapped_column(String(64), nullable=False)
     concept_namespace: Mapped[str] = mapped_column(Text, nullable=False)
     concept_name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -284,10 +285,32 @@ class MappingReviewObservationRow(Base):
         ForeignKey("mapping_reviews.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    accession: Mapped[str] = mapped_column(String(20), primary_key=True)
+    accession: Mapped[str] = mapped_column(String(128), primary_key=True)
     fact_count: Mapped[int] = mapped_column(Integer, nullable=False)
     sample_fact_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class EntityKeyRow(Base):
+    """Entity key allocated to a non-SEC `(scheme, identifier)`; never reused (0008)."""
+
+    __tablename__ = "entity_keys"
+    __table_args__ = (
+        UniqueConstraint("scheme", "identifier", name="uq_entity_keys_scheme_identifier"),
+        CheckConstraint("entity_key >= 10000000000", name="ck_entity_keys_range"),
+    )
+
+    entity_key: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=False,
+        server_default=text("nextval('entity_key_seq')"),
+    )
+    scheme: Mapped[str] = mapped_column(Text, nullable=False)
+    identifier: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 

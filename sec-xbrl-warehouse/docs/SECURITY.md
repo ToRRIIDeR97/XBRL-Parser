@@ -124,6 +124,13 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
   most 366 days. Offsets are capped, accessions are syntax-checked, and per-process
   concurrency is bounded. ClickHouse queries carry time, memory, rows-read, and
   result-byte budgets.
+- Filing keys (the `accession` path and query parameter, `FilingRef.accession`) must
+  match `FILING_KEY_PATTERN` in `domain/sources.py` and be at most 128 characters: an
+  SEC accession or `<source>-<native id>` of ASCII letters, digits, `.`, `_`, and `-`.
+  The API rejects anything else with 422 before a query. A valid key has no quotes,
+  spaces, slashes, or control characters, which is what lets `storage
+  retire-revisions` format keys into its `ALTER TABLE ... DELETE` and the downloader
+  put them in object keys. Keep that property if the pattern changes.
 - Each API process runs one readiness probe at a time. Overlapping probes get 503.
 - SEC requests use the configured user agent. They default to 8 req/s with jitter and
   honor `Retry-After`. **The limiter is process-local**, so a PostgreSQL advisory lock

@@ -862,3 +862,57 @@ async def test_legacy_extraction_pointers_are_repointed(postgres_settings: Setti
         assert await repo.extraction_checkpoint(accession, 2) == {"object_key": new, "sha256": "bb"}
     finally:
         await repo.close()
+
+
+async def test_resolve_entity_key_is_stable_under_concurrent_first_use(
+    postgres_settings: Settings,
+) -> None:
+    lei = f"TEST{uuid4().hex[:16].upper()}"
+    scheme = "http://standards.iso.org/iso/17442"
+    repos = [PostgresControlRepository(postgres_settings) for _ in range(4)]
+    try:
+        keys = await asyncio.gather(
+            *(repo.resolve_entity_key(scheme, lei) for repo in repos for _ in range(5))
+        )
+        assert len(set(keys)) == 1 and keys[0] >= 10_000_000_000
+        # Same identifier under another scheme is another entity.
+        other = await repos[0].resolve_entity_key("urn:example", lei)
+        assert other != keys[0]
+        async with repos[0].engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("SELECT count(*) FROM entity_keys WHERE identifier = :i"), {"i": lei}
+                )
+            ).scalar_one()
+        assert rows == 2
+        assert await repos[1].resolve_entity_key("http://www.sec.gov/CIK", "320193") == 320193
+        for scheme_, identifier in (
+            ("", lei),
+            (scheme, ""),
+            (scheme, "  "),
+            ("http://www.sec.gov/CIK", "12345678901"),
+            ("http://www.sec.gov/CIK", "12a"),
+        ):
+            with pytest.raises(ValueError):
+                await repos[1].resolve_entity_key(scheme_, identifier)
+    finally:
+        for repo in repos:
+            await repo.close()
+
+
+async def test_upsert_filing_stores_non_sec_filing_keys(postgres_settings: Settings) -> None:
+    key = f"esef-{uuid4().hex}-{'Z' * 80}"
+    filing = _filing().model_copy(update={"accession": key, "cik": 10_000_000_007})
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        await repo.upsert_filing(filing)
+        await repo.upsert_filing(filing)
+        async with repo.engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("SELECT accession, cik FROM filings WHERE accession = :k"), {"k": key}
+                )
+            ).all()
+        assert [tuple(row) for row in rows] == [(key, 10_000_000_007)]
+    finally:
+        await repo.close()

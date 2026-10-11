@@ -23,7 +23,7 @@ def _validate_max_bytes(max_bytes: int | None) -> None:
 class LocalObjectStore:
     """Filesystem implementation with the same immutable-key contract as S3."""
 
-    def __init__(self, root: Path, bucket: str) -> None:
+    def __init__(self, root: Path, bucket: str = "sec-xbrl") -> None:
         self.root = root
         self.bucket = bucket
 

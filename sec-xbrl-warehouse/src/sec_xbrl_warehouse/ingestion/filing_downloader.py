@@ -19,7 +19,12 @@ from sec_xbrl_warehouse.domain.models import (
     PackageMember,
 )
 from sec_xbrl_warehouse.domain.ports import ObjectStore
-from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, SecAccessError
+from sec_xbrl_warehouse.domain.sources import SEC_SOURCE, filing_source
+from sec_xbrl_warehouse.exceptions import (
+    ArtifactIntegrityError,
+    SecAccessError,
+    UnsupportedSourceError,
+)
 from sec_xbrl_warehouse.infrastructure.http.sec_client import SecHttpClient
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha256_file
 from sec_xbrl_warehouse.ingestion.bulk_downloader import validate_zip_integrity
@@ -56,6 +61,7 @@ class FilingPackageDownloader:
 
     async def fetch_index(self, filing: FilingRef) -> dict[str, Any]:
         """Fetch and validate the accession directory index JSON."""
+        _require_sec(filing)
         return await self._sec().get_json(f"{filing.archive_directory_url}/index.json")
 
     def select_xbrl_entrypoints(
@@ -85,6 +91,7 @@ class FilingPackageDownloader:
         archive (`package_object_key`); no member is stored loose. The manifest
         records each member's SHA-256 and size.
         """
+        _require_sec(filing)
         self.settings.ensure_directories()
         index_payload = await self.fetch_index(filing)
         index_checksum = sha256_bytes(
@@ -101,7 +108,7 @@ class FilingPackageDownloader:
             ).encode()
         )
         cache_key = (
-            f"manifests/sec/filings/{filing.accession}/"
+            f"{_manifest_prefix(filing)}"
             f"selection-v{PACKAGE_SELECTION_POLICY_VERSION}/index-sha256={index_checksum}/"
             f"filing-sha256={filing_checksum}.json"
         )
@@ -425,9 +432,7 @@ class FilingPackageDownloader:
             updated = archived
             updated_bytes = updated.model_dump_json().encode("utf-8")
             updated_checksum = sha256_bytes(updated_bytes)
-            updated_key = (
-                f"manifests/sec/filings/{manifest.filing.accession}/sha256={updated_checksum}.json"
-            )
+            updated_key = f"{_manifest_prefix(manifest.filing)}sha256={updated_checksum}.json"
             self.object_store.put_bytes(
                 updated_bytes,
                 updated_key,
@@ -761,16 +766,31 @@ def _archive_entrypoint(names: list[str], filing: FilingRef) -> str | None:
     return instances[0] if instances else None
 
 
+def _require_sec(filing: FilingRef) -> None:
+    """Refuse a non-SEC filing before any SEC request (or client lookup)."""
+    source = filing_source(filing.accession)
+    if source != SEC_SOURCE:
+        raise UnsupportedSourceError(
+            f"The SEC downloader can't fetch {source} filing {filing.accession}"
+        )
+
+
+# Object and manifest keys are `<kind>/<source>/filings/...`; SEC keys are unchanged.
+def _filing_prefix(filing: FilingRef) -> str:
+    return f"bronze/{filing_source(filing.accession)}/filings/{filing.cik}/{filing.accession}/"
+
+
+def _manifest_prefix(filing: FilingRef) -> str:
+    return f"manifests/{filing_source(filing.accession)}/filings/{filing.accession}/"
+
+
 def filing_object_key(filing: FilingRef, filename: str, checksum: str) -> str:
     safe_name = _safe_package_name(filename)
-    return f"bronze/sec/filings/{filing.cik}/{filing.accession}/sha256={checksum}/{safe_name}"
+    return f"{_filing_prefix(filing)}sha256={checksum}/{safe_name}"
 
 
 def filing_package_key(filing: FilingRef, archive_checksum: str) -> str:
-    return (
-        f"bronze/sec/filings/{filing.cik}/{filing.accession}/"
-        f"packages/sha256={archive_checksum}/package.zip"
-    )
+    return f"{_filing_prefix(filing)}packages/sha256={archive_checksum}/package.zip"
 
 
 # Package archives written since the storage audit use LZMA (about 30% smaller than

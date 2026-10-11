@@ -194,6 +194,33 @@ Silver Parquet holds every concept of every filing, each stored once:
 
 One row per arc. Includes network type, link role, arc role, source/target QName, order, priority, weight, preferred label, and dimensional flags.
 
+## Filing keys and entity keys
+
+The `accession` and `cik` columns (PostgreSQL, ClickHouse, Parquet) and API fields
+keep their names, but hold source-neutral keys (`domain/sources.py`, migration
+`0008_filing_entity_keys`). Every SEC value is unchanged.
+
+- **Filing key** (`accession`): an SEC accession (`0000320193-25-000079`) or
+  `<source>-<native id>` for any other source, for example
+  `esef-5493001KJTIIGC8Y1R12-2023-12-31-ESEF-GB-0`. `source` is `[a-z][a-z0-9]{1,15}`
+  and the native id `[A-Za-z0-9][A-Za-z0-9._-]*`, 128 characters at most in total.
+  SEC accessions start with a digit, so the forms never overlap, and `sec-...` is
+  invalid. `filing_source(key)` returns `sec` or the prefix and raises `ValueError`
+  for anything else. No `source` column is stored; it is read from the key.
+- **Entity key** (`cik`): the SEC CIK for SEC issuers (every CIK is below 10^10) and a
+  number at or above `ENTITY_KEY_BASE = 10_000_000_000` for everything else.
+  `FilingRef` checks the range against the filing's source.
+- **`entity_keys`** (PostgreSQL): `entity_key` (from `entity_key_seq`, starting at
+  10^10), `scheme`, `identifier` (unique together, for example the LEI scheme
+  `http://standards.iso.org/iso/17442` and an LEI), `created_at`.
+  `PostgresControlRepository.resolve_entity_key(scheme, identifier)` returns the CIK
+  for `SEC_CIK_SCHEME` (`http://www.sec.gov/CIK`) without a row and otherwise the
+  existing or a newly allocated key, the same one for concurrent first calls. Keys are
+  never reused or renumbered, and SEC CIKs are never written here.
+- **Object keys** carry the source: `bronze/<source>/filings/<entity key>/<filing
+  key>/...` and `manifests/<source>/filings/<filing key>/...`, so SEC keys stay
+  `bronze/sec/...` and `manifests/sec/...`.
+
 ## Companies
 
 `companies` in PostgreSQL (migration `0004_companies`) holds one row per CIK from

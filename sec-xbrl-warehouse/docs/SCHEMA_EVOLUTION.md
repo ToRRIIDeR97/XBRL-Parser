@@ -62,6 +62,22 @@ check free space (at least 110% of the affected tables), run
 
 Use Alembic for every control-plane change. Migrations must be reversible unless data volume or semantics make reversal unsafe; document those exceptions.
 
+### 0008: filing keys and entity keys (plan 17)
+
+`0008_filing_entity_keys` widens `accession` from `VARCHAR(20)` to `VARCHAR(128)` on
+`filings`, `validation_issues` (its foreign key to `filings`), `mapping_reviews`, and
+`mapping_review_observations`, and creates `entity_keys` with the sequence
+`entity_key_seq` starting at 10,000,000,000 (DATA_MODEL.md, "Filing keys and entity
+keys"). Widening a VARCHAR is a catalog change in PostgreSQL, so no table is
+rewritten. ClickHouse is unchanged: its `accession` columns are `String` and `cik` is
+`UInt64`.
+
+The downgrade is refused while any `accession` isn't an SEC accession, any
+`filings.cik` is at or above 10^10, or `entity_keys` has a row: narrowing the columns
+would truncate keys, and dropping `entity_keys` would let a later upgrade allocate the
+same numbers again. Otherwise it restores `VARCHAR(20)` and drops `entity_keys` and its
+sequence.
+
 ## Parser versions
 
 A new Arelle/extraction implementation increments `extraction_revision`. It does not replace package bytes or old extraction lineage. Reprocess a representative corpus before broad rollout.

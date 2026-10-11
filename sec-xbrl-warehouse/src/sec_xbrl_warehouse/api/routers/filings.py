@@ -7,12 +7,20 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 from sec_xbrl_warehouse.api.dependencies import get_query_service
+from sec_xbrl_warehouse.domain.sources import FILING_KEY_MAX_LENGTH, FILING_KEY_PATTERN
 from sec_xbrl_warehouse.query.service import QNAME_PATTERN, QueryService, text_block_limit
 
 router = APIRouter(prefix="/v1/filings", tags=["filings"])
 
 Accession = Annotated[
-    str, Path(pattern=r"^\d{10}-\d{2}-\d{6}$", description="e.g. 0000320193-25-000079")
+    str,
+    Path(
+        pattern=FILING_KEY_PATTERN,
+        max_length=FILING_KEY_MAX_LENGTH,
+        description=(
+            "Filing key: an SEC accession (0000320193-25-000079) or <source>-<native id>."
+        ),
+    ),
 ]
 BreakdownKind = Literal["segment", "product", "geography", "consolidation"]
 Concept = Annotated[

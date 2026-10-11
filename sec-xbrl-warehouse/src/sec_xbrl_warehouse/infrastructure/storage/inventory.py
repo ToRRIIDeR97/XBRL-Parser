@@ -15,8 +15,10 @@ from typing import Any, Protocol
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.models import FilingPackageManifest
 
-_PACKAGE = re.compile(r"^bronze/sec/filings/\d+/[^/]+/packages/sha256=[0-9a-f]{64}/package\.zip$")
-_LOOSE = re.compile(r"^bronze/sec/filings/\d+/[^/]+/sha256=[0-9a-f]{64}/.+$")
+# `bronze/<source>/filings/<entity key>/<filing key>/...` (SEC: `bronze/sec/...`).
+_FILING = r"^bronze/[a-z][a-z0-9]{1,15}/filings/\d+/[^/]+/"
+_PACKAGE = re.compile(_FILING + r"packages/sha256=[0-9a-f]{64}/package\.zip$")
+_LOOSE = re.compile(_FILING + r"sha256=[0-9a-f]{64}/.+$")
 _EXTRACTION = re.compile(
     r"^silver/xbrl/extractions/accession=(?P<accession>[^/]+)/revision=(?P<revision>\d+)/"
     r"sha256=[0-9a-f]{64}\.json(?P<zst>\.zst)?$"

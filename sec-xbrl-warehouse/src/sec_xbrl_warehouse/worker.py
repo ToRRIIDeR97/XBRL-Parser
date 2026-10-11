@@ -19,6 +19,7 @@ from sec_xbrl_warehouse.exceptions import (
     SchemaDriftError,
     SecRetryDeferred,
     StateTransitionError,
+    UnsupportedSourceError,
 )
 from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.postgres import (
@@ -654,7 +655,7 @@ def is_retryable_exception(exc: BaseException) -> bool:
     or S3 error) are classified by their `__cause__`. Integrity, schema drift,
     ClickHouse syntax/missing-table, and S3 permission/bucket errors stay permanent.
     """
-    if isinstance(exc, (ArtifactIntegrityError, SchemaDriftError)):
+    if isinstance(exc, (ArtifactIntegrityError, SchemaDriftError, UnsupportedSourceError)):
         return False
     if isinstance(
         exc,

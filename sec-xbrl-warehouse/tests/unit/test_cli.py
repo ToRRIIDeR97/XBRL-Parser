@@ -41,7 +41,7 @@ class _Connection:
         return None
 
     async def scalar(self, statement: object) -> str:
-        return "0007_drop_prefix_indexes"
+        return "0008_filing_entity_keys"
 
 
 class _Engine:

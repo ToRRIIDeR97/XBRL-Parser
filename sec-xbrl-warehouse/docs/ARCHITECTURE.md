@@ -119,7 +119,8 @@ as written, so a bundle is serialized once. Legacy uncompressed `.json` checkpoi
 - Cover pages, segment/product/geographic breakdowns, and text blocks
   (`xbrl_cover_pages`, `xbrl_segment_facts`, `v_cover_pages_latest`,
   `v_segment_facts_latest`, `v_text_blocks_latest`), derived from dei and dimensional
-  facts and published the same way.
+  facts and published the same way. The API reads them per filing under
+  `/v1/filings/{accession}/cover-page`, `/segments`, and `/text-blocks`.
 - Query-optimized denormalization such as CIK, filing date, form, and period fields on facts.
 
 ### PostgreSQL control plane

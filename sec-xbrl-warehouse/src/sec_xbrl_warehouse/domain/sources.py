@@ -33,6 +33,9 @@ _SOURCE = (
     r"|sec[a-z0-9]{1,13})"
 )
 _NATIVE_ID = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+# A source code (`sec`, `esef`, ...): what `XBRL_ENABLED_SOURCES` and adapters use.
+SOURCE_CODE_PATTERN = r"^[a-z][a-z0-9]{1,15}$"
+_SOURCE_CODE = re.compile(SOURCE_CODE_PATTERN)
 # Shape only: pair it with `FILING_KEY_MAX_LENGTH` (pydantic/FastAPI `max_length`).
 FILING_KEY_PATTERN = rf"^(?:{_SEC_ACCESSION}|{_SOURCE}-{_NATIVE_ID})$"
 _FILING_KEY = re.compile(FILING_KEY_PATTERN)
@@ -58,3 +61,8 @@ def is_filing_key(key: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def is_source_code(code: object) -> bool:
+    """Whether `code` is a valid source code (`sec` included)."""
+    return isinstance(code, str) and _SOURCE_CODE.fullmatch(code) is not None

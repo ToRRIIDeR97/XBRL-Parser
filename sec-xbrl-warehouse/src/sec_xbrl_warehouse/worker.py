@@ -12,16 +12,21 @@ import httpx
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import JobState, JobType
 from sec_xbrl_warehouse.domain.models import JobRecord
+from sec_xbrl_warehouse.domain.sources import SEC_SOURCE
 from sec_xbrl_warehouse.domain.xbrl import CURRENT_EXTRACTION_REVISION
 from sec_xbrl_warehouse.exceptions import (
     ArtifactIntegrityError,
+    ConfigurationError,
     DiskReserveError,
     SchemaDriftError,
-    SecRetryDeferred,
+    SourceRetryDeferred,
     StateTransitionError,
     UnsupportedSourceError,
 )
-from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
+from sec_xbrl_warehouse.infrastructure.http.egress_lock import (
+    EgressBusyError,
+    SecEgressBusyError,
+)
 from sec_xbrl_warehouse.infrastructure.storage.postgres import (
     PostgresControlRepository,
     checkpoint_lease,
@@ -33,15 +38,16 @@ logger = get_logger(__name__)
 JobHandler = Callable[[JobRecord], Coroutine[Any, Any, dict[str, Any] | None]]
 
 
-# Job types that send SEC traffic (and so need the SEC client and egress lock).
-SEC_JOB_TYPES = frozenset(
+# Job types that send a filing source's traffic (its client and egress lock).
+SOURCE_JOB_TYPES = frozenset(
     {
         JobType.FETCH_FILING,
         JobType.INGEST_FILING,
         JobType.DISCOVER_FILINGS,
-        JobType.DOWNLOAD_BULK,
     }
 )
+# Job types that send SEC traffic: the filing jobs plus the SEC-only bulk download.
+SEC_JOB_TYPES = SOURCE_JOB_TYPES | {JobType.DOWNLOAD_BULK}
 # Job types whose completion queues a `rebuild_series` job for the company.
 SERIES_SOURCE_JOB_TYPES = frozenset(
     {JobType.INGEST_FILING, JobType.PARSE_FILING, JobType.MAP_CANONICAL}
@@ -50,9 +56,15 @@ SERIES_SOURCE_JOB_TYPES = frozenset(
 EXTRACTION_JOB_TYPES = frozenset({JobType.INGEST_FILING, JobType.PARSE_FILING})
 
 
+def requires_network(job_types: Sequence[JobType] | None, source: str) -> bool:
+    """Whether a worker claiming `job_types` (None: every type) needs `source`'s client."""
+    network = SEC_JOB_TYPES if source == SEC_SOURCE else SOURCE_JOB_TYPES
+    return job_types is None or bool(network.intersection(job_types))
+
+
 def requires_sec(job_types: Sequence[JobType] | None) -> bool:
     """Whether a worker claiming `job_types` (None: every type) needs an SEC client."""
-    return job_types is None or bool(SEC_JOB_TYPES.intersection(job_types))
+    return requires_network(job_types, SEC_SOURCE)
 
 
 @contextlib.asynccontextmanager
@@ -63,10 +75,12 @@ async def runtime_services(
 ) -> AsyncIterator[dict[str, Any]]:
     """Own the network clients used by the worker's job types.
 
-    The SEC client (and its egress lock) is built only when `requires_sec`.
-    A worker without one that may run Arelle in online mode
-    (`XBRL_ARELLE_OFFLINE=false`) still takes the egress lock lazily, before its
-    first extraction; with offline Arelle it never touches the lock.
+    The source registry holds one adapter per `XBRL_ENABLED_SOURCES` entry. A
+    source's client (and its egress lock, taken on the first request) is built only
+    when the worker's job types need it (`requires_network`); the SEC client also
+    serves the SEC-only bulk download. A worker without the SEC client that may run
+    Arelle in online mode (`XBRL_ARELLE_OFFLINE=false`) still takes the SEC egress
+    lock lazily, before its first extraction; with offline Arelle it never touches it.
     """
     from sec_xbrl_warehouse.config_files import load_yaml
     from sec_xbrl_warehouse.infrastructure.http.egress_lock import LazyEgress, SecEgressLock
@@ -87,7 +101,15 @@ async def runtime_services(
     from sec_xbrl_warehouse.ingestion.sec_tsv import SecTsvBatchReader
     from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
     from sec_xbrl_warehouse.mapping.postgres_repository import PostgresMappingRepository
+    from sec_xbrl_warehouse.sources.base import SourceAdapter
+    from sec_xbrl_warehouse.sources.registry import SourceRegistry
+    from sec_xbrl_warehouse.sources.sec import SecSourceAdapter
 
+    unimplemented = [code for code in settings.enabled_sources if code != SEC_SOURCE]
+    if unimplemented:
+        # Each later source plan adds its adapter (with a `SourceHttpClient` and
+        # `SourceEgressLock` when `requires_network`) here.
+        raise ConfigurationError(f"No adapter is implemented for enabled sources {unimplemented}")
     settings.ensure_directories()
     sources = load_yaml(settings.config_dir / "sources.yml")["sec"]
     store = create_object_store(settings)
@@ -100,7 +122,7 @@ async def runtime_services(
         async with contextlib.AsyncExitStack() as stack:
             http: SecHttpClient | None = None
             ensure_sec_egress = None
-            if requires_sec(job_types):
+            if SEC_SOURCE in settings.enabled_sources and requires_sec(job_types):
                 http = await stack.enter_async_context(
                     SecHttpClient(settings, egress_lock=SecEgressLock(settings))
                 )
@@ -126,11 +148,41 @@ async def runtime_services(
                 store,
                 settings=settings,
             )
+            # Without `http` this only materializes and archives stored packages.
+            packages = FilingPackageDownloader(settings, http, store)
+            adapters: list[SourceAdapter] = []
+            if SEC_SOURCE in settings.enabled_sources:
+                adapters.append(
+                    SecSourceAdapter(
+                        packages,
+                        submissions=(
+                            SecSubmissionsDiscovery(http, sources["data_api_base"])
+                            if http is not None
+                            else None
+                        ),
+                        daily_index=(
+                            SecDailyIndexDiscovery(
+                                http,
+                                sources["daily_index_base"],
+                                sources["archive_base"],
+                                object_store=store,
+                            )
+                            if http is not None
+                            else None
+                        ),
+                        http=http,
+                        companies=control,
+                        data_api_base=sources["data_api_base"],
+                        company_refresh_days=settings.company_refresh_days,
+                    )
+                )
+            registry = SourceRegistry(adapters, packages=packages)
             services: dict[str, Any] = {
                 "control": control,
                 "warehouse": warehouse,
                 "object_store": store,
                 "mapper": mapper,
+                "sources": registry,
                 "forms": sources["default_forms"],
                 "data_api_base": sources["data_api_base"],
                 "orchestrator": IngestionOrchestrator(
@@ -143,7 +195,7 @@ async def runtime_services(
                 ),
                 "ingestor": IncrementalFilingIngestor(
                     control,
-                    FilingPackageDownloader(settings, http, store),
+                    registry,
                     extractor,
                     writer,
                     warehouse,
@@ -151,21 +203,9 @@ async def runtime_services(
                     object_store=store,
                     mapper=mapper,
                     ensure_sec_egress=ensure_sec_egress,
+                    fiscal_focus=registry.fiscal_focus,
                 ),
             }
-            if http is not None:
-                services.update(
-                    {
-                        "discovery": SecDailyIndexDiscovery(
-                            http,
-                            sources["daily_index_base"],
-                            sources["archive_base"],
-                            object_store=store,
-                        ),
-                        "submissions": SecSubmissionsDiscovery(http, sources["data_api_base"]),
-                        "http": http,
-                    }
-                )
             yield services
     finally:
         if lazy_egress is not None:
@@ -278,9 +318,14 @@ class Worker:
             JOB_TRANSITIONS.labels(state="lease_lost", job_type=job.job_type.value).inc()
         except asyncio.CancelledError:
             raise
-        except SecEgressBusyError as exc:
-            # Another process is sending SEC traffic: defer without spending an attempt.
-            logger.warning("sec_egress_busy", job_id=str(job.id), job_type=job.job_type.value)
+        except EgressBusyError as exc:
+            # Another process is sending this source's traffic: defer without spending
+            # an attempt.
+            logger.warning(
+                "sec_egress_busy" if isinstance(exc, SecEgressBusyError) else "egress_busy",
+                job_id=str(job.id),
+                job_type=job.job_type.value,
+            )
             try:
                 deferred_state = await self.control.fail_job(
                     job.id,
@@ -300,7 +345,7 @@ class Worker:
             logger.exception("job_failed", job_id=str(job.id), job_type=job.job_type.value)
             retryable = is_retryable_exception(exc)
             deferral: dict[str, Any] = (
-                {"retry_at": exc.retry_at} if isinstance(exc, SecRetryDeferred) else {}
+                {"retry_at": exc.retry_at} if isinstance(exc, SourceRetryDeferred) else {}
             )
             try:
                 await self.control.fail_job(
@@ -471,38 +516,44 @@ def build_handlers(
         return {"cik": cik, **result}
 
     handlers[JobType.REBUILD_SERIES] = _rebuild_series_job
-    if services.get("discovery") is not None:
+    if services.get("sources") is not None or services.get("discovery") is not None:
 
         async def _discover(job: JobRecord) -> dict[str, Any] | None:
+            from sec_xbrl_warehouse.domain.sources import filing_source
+            from sec_xbrl_warehouse.sources.base import DiscoveryRequest
 
-            from sec_xbrl_warehouse.ingestion.filing_discovery import enrich_companies
-
-            forms = job.payload.get("forms", services["forms"])
-            companies = _MirroredCompanies(services["control"], services.get("warehouse"))
-            filed_from = _payload_date(job.payload.get("filed_from"))
-            filed_to = _payload_date(job.payload.get("filed_to"))
-            result: dict[str, Any] = {}
-            if job.payload.get("cik") is not None:
-                # One issuer from its submissions JSON: the same request yields the company.
-                company, filings = await services["submissions"].discover_with_company(
-                    int(job.payload["cik"]), forms=forms, filed_from=filed_from, filed_to=filed_to
+            source = str(job.payload.get("source") or SEC_SOURCE)
+            # An unknown or disabled source raises `UnsupportedSourceError` (never retried).
+            adapter = _discovery_adapter(services, settings, source)
+            forms = job.payload.get("forms")
+            if forms is None:
+                # The configured default forms are SEC form types.
+                forms = services.get("forms", ()) if source == SEC_SOURCE else ()
+            entity = job.payload.get("entity")
+            if entity is None and job.payload.get("cik") is not None:
+                entity = int(job.payload["cik"])  # legacy SEC payload
+            found = await adapter.discover(
+                DiscoveryRequest(
+                    filed_from=_payload_date(job.payload.get("filed_from")),
+                    filed_to=_payload_date(job.payload.get("filed_to")),
+                    entity=str(entity) if entity is not None else None,
+                    forms=tuple(str(form) for form in forms),
                 )
-                await companies.upsert_company(company)
-                result["companies_stored"] = 1
-            else:
-                if filed_from is None or filed_to is None:
-                    raise ValueError("Daily-index discovery needs filed_from and filed_to")
-                filings = await services["discovery"].discover_range(filed_from, filed_to, forms)
-                if services.get("http") is not None:
-                    # Daily indexes carry no company data: fetch submissions once per new CIK.
-                    result["companies_stored"] = await enrich_companies(
-                        companies,
-                        services["http"],
-                        ciks=[filing.cik for filing in filings],
-                        as_of=filed_to,
-                        data_api_base=services.get("data_api_base", "https://data.sec.gov"),
-                        max_age_days=(settings or Settings()).company_refresh_days,
-                    )
+            )
+            foreign = [
+                filing.accession
+                for filing in found.filings
+                if filing_source(filing.accession) != source
+            ]
+            if foreign:
+                raise ValueError(f"{source} discovery returned other sources' filings: {foreign}")
+            filings = found.filings
+            result: dict[str, Any] = {}
+            if found.companies:
+                companies = _MirroredCompanies(services["control"], services.get("warehouse"))
+                for company in found.companies:
+                    await companies.upsert_company(company)
+                result["companies_stored"] = len(found.companies)
             for filing in filings:
                 await services["control"].enqueue_job(
                     job_type=JobType.FETCH_FILING.value,
@@ -516,6 +567,32 @@ def build_handlers(
 
         handlers[JobType.DISCOVER_FILINGS] = _discover
     return handlers
+
+
+def _discovery_adapter(services: dict[str, Any], settings: Settings | None, source: str) -> Any:
+    """The source's adapter from the registry, or an SEC adapter over legacy services.
+
+    Services without a `sources` registry (older callers and test doubles) carry
+    `discovery`, `submissions`, and `http` directly; they serve SEC discovery only.
+    """
+    registry = services.get("sources")
+    if registry is not None:
+        return registry.adapter(source)
+    if source != SEC_SOURCE:
+        raise UnsupportedSourceError(f"Source {source!r} is not enabled here (enabled: sec)")
+    from sec_xbrl_warehouse.sources.sec import SecSourceAdapter
+
+    http = services.get("http")
+    return SecSourceAdapter(
+        submissions=services.get("submissions"),
+        daily_index=services.get("discovery"),
+        http=http,
+        companies=services.get("control"),
+        data_api_base=services.get("data_api_base", "https://data.sec.gov"),
+        company_refresh_days=(
+            (settings or Settings()).company_refresh_days if http is not None else None
+        ),
+    )
 
 
 class _MirroredCompanies:
@@ -660,9 +737,9 @@ def is_retryable_exception(exc: BaseException) -> bool:
     if isinstance(
         exc,
         (
-            SecEgressBusyError,
+            EgressBusyError,
             DiskReserveError,
-            SecRetryDeferred,
+            SourceRetryDeferred,
             TimeoutError,
             ConnectionError,
             httpx.TimeoutException,

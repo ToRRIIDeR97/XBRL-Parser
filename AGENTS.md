@@ -20,7 +20,9 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 - Check `HANDOFF.md` for live ingestion state before starting a worker, enqueueing
   jobs, or running discovery. Only one process can send SEC traffic at a time: the
   SEC rate limiter is process-local, so a PostgreSQL advisory lock (`SecEgressLock`)
-  makes a second SEC-active process fail fast with `SecEgressBusyError`.
+  makes a second SEC-active process fail fast with `SecEgressBusyError`. Every other
+  source in `XBRL_ENABLED_SOURCES` has its own lock (`xbrl:<source>-egress`), so run
+  one fetch worker per source (OPERATIONS.md, "Sources and per-source egress").
 - `worker run --job-type <type>` (repeatable) claims only those job types and leaves
   other queued jobs untouched. Filings are two jobs: `fetch_filing` (SEC download,
   then it queues the parse) and `parse_filing` (no SEC client), e.g.

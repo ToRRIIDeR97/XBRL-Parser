@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from sec_xbrl_warehouse.domain.sources import is_source_code
 from sec_xbrl_warehouse.exceptions import ConfigurationError
 
 
@@ -32,6 +33,11 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     temp_dir: Path = Path("data/tmp")
     config_dir: Path = Path("config")
+
+    # Regulators this deployment fetches from (`XBRL_ENABLED_SOURCES=sec,esef`). Every
+    # process sharing a control database should use the same list: a job for a source
+    # that isn't enabled fails permanently.
+    enabled_sources: Annotated[tuple[str, ...], NoDecode] = ("sec",)
 
     sec_user_agent: str = "Your Name or Organization monitored-email@example.com"
     sec_max_requests_per_second: float = Field(default=8.0, gt=0, le=10)
@@ -133,6 +139,25 @@ class Settings(BaseSettings):
     @classmethod
     def empty_api_key(cls, value: object) -> object:
         return None if value == "" else value
+
+    @field_validator("enabled_sources", mode="before")
+    @classmethod
+    def split_enabled_sources(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("enabled_sources")
+    @classmethod
+    def validate_enabled_sources(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("enabled_sources needs at least one source")
+        invalid = [code for code in value if not is_source_code(code)]
+        if invalid:
+            raise ValueError(f"enabled_sources has invalid source codes: {invalid}")
+        if len(set(value)) != len(value):
+            raise ValueError("enabled_sources lists a source more than once")
+        return value
 
     @field_validator("log_level")
     @classmethod

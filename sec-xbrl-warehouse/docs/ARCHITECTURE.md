@@ -10,15 +10,16 @@ This file is the master architecture document. It holds the UML views listed und
 [UML views](#uml-views) and the [coverage index](#coverage-index). The diagram below is
 the component view; the other views follow the prose sections.
 
-![UML component view: CLI and worker dispatch bulk, filing, and mapping components, which use the SEC client, Arelle, and validation and write PostgreSQL, MinIO/S3, and ClickHouse; the query API reads ClickHouse](diagrams/component-overview.svg)
+![UML component view: CLI and worker dispatch bulk, filing, and mapping components, which use the source registry and per-source HTTP clients, Arelle, and validation and write PostgreSQL, MinIO/S3, and ClickHouse; the query API reads ClickHouse](diagrams/component-overview.svg)
 
 | Component | Responsibility | Source |
 | --- | --- | --- |
 | CLI | Operator commands: migrations, catalog sync, backfill planning, filing enqueue and discovery, mapping review, taxonomy sync, job recovery. Writes jobs to PostgreSQL; never runs pipeline stages itself, except the SEC catalog and taxonomy syncs. | `cli.py` |
 | Worker | Claims jobs with `FOR UPDATE SKIP LOCKED`, heartbeats leases, dispatches one handler per `JobType`, classifies failures as retry or dead. | `worker.py` |
-| SEC HTTP client | User agent, rate limit, retries with jitter, `Retry-After`, and the PostgreSQL advisory lock `SecEgressLock`, so only one process sends SEC traffic. | `infrastructure/http/` |
-| Bulk backfill | FSNDS catalog, ZIP download to bronze, streaming TSV to Parquet and ClickHouse, reconciliation. | `ingestion/bulk_*.py`, `ingestion/orchestrator.py`, `ingestion/sec_tsv.py` |
-| Filing ingestion | Discovery from daily indexes or submissions JSON, package download (`fetch_filing`), and extraction through publish (`parse_filing`). | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
+| Source HTTP clients | `SourceHttpClient` enforces one source's `SourcePolicy` (host allowlist, also on every redirect hop; headers; rate; concurrency), byte limits, retries with jitter, `Retry-After`, and that source's PostgreSQL advisory lock `SourceEgressLock` (`xbrl:<source>-egress`), so one process sends each source's traffic. `SecHttpClient` is the SEC policy (user agent, `XBRL_SEC_*` rate) with `SecEgressLock` (`xbrl:sec-egress`). | `infrastructure/http/` |
+| Source registry and adapters | `SourceRegistry` holds one adapter per `XBRL_ENABLED_SOURCES` entry and routes by source code or filing key: discovery, package download, and filing fiscal fields. `SecSourceAdapter` wraps the SEC discovery, downloader, and dei fiscal focus unchanged. An unknown or disabled source raises `UnsupportedSourceError` (never retried). | `sources/` |
+| Bulk backfill | FSNDS catalog, ZIP download to bronze, streaming TSV to Parquet and ClickHouse, reconciliation. SEC only; uses the SEC client directly. | `ingestion/bulk_*.py`, `ingestion/orchestrator.py`, `ingestion/sec_tsv.py` |
+| Filing ingestion | Discovery (`discover_filings`, through the source's adapter; SEC: daily indexes or submissions JSON), package download (`fetch_filing`, `SourceRegistry.download_package`), and extraction through publish (`parse_filing`, fiscal fields from `SourceRegistry.fiscal_focus`). | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
 | Arelle adapter | Runs Arelle in reusable child processes (a fresh controller per filing, no credentials) against pinned taxonomy packages and returns an `XbrlExtractionBundle`. | `infrastructure/xbrl/` |
 | Validation | XBRL issues, filing reconciliation, data quality, schema drift, issue grouping. | `validation/` |
 | Canonical mapping | Applies approved concept mappings to raw facts, remaps published extractions, rebuilds `metric_series`. | `mapping/`, `query/series.py`, `normalization/series.py` |
@@ -144,8 +145,10 @@ Logical identity is `(dataset_kind, source_period, source_url, checksum)`. If th
 
 Logical identity is the filing key: the dashed SEC accession number, or
 `<source>-<native id>` for another source (DATA_MODEL.md, "Filing keys and entity
-keys"). The SEC package downloader refuses a non-SEC filing with
-`UnsupportedSourceError` (never retried) before any request. Package bytes and extraction version are tracked independently, allowing a parser upgrade to produce a new extraction revision without changing the filing identity.
+keys"). The source registry sends each filing to its source's adapter; a filing whose
+source isn't enabled fails with `UnsupportedSourceError` (never retried, never sent to
+the SEC), and the SEC package downloader itself still refuses a non-SEC filing before
+any request. Package bytes and extraction version are tracked independently, allowing a parser upgrade to produce a new extraction revision without changing the filing identity.
 
 ### ClickHouse
 
@@ -167,14 +170,21 @@ A completed parse, legacy ingest, or remap queues the company's `rebuild_series`
 (`series:<cik>`, delayed by `XBRL_SERIES_REBUILD_DELAY_SECONDS`), so one backfill of a
 company rebuilds its series once instead of once per filing.
 
-A filing is two jobs. `fetch_filing` downloads the package from the SEC into one
+A filing is two jobs. `fetch_filing` downloads the package from the filing's source
+(`SourceRegistry.download_package` picks the adapter from the filing key) into one
 archive, records the package and manifest pointers on the `filings` row, and enqueues
 `parse_filing`. `parse_filing` loads the stored manifest, runs Arelle, validation,
 silver and ClickHouse writes, and canonical mapping, queues the series rebuild, and never
 downloads (a missing package is a permanent `ArtifactIntegrityError`). Workers build
-the SEC client only for job types that send SEC traffic (`requires_sec`), so parse
-workers scale out beside the one SEC-active worker. Legacy `ingest_filing` jobs run
-both steps in one job.
+a source's client only for job types that send its traffic (`requires_network`; for the
+SEC also `download_bulk`, `requires_sec`), so parse workers scale out beside the
+network workers. Legacy `ingest_filing` jobs run both steps in one job.
+
+`discover_filings` reads `payload["source"]` (default `sec`) and calls that adapter
+with a `DiscoveryRequest` (a legacy `cik` payload becomes `entity`). It stores the
+companies the adapter returns, refuses filings whose key belongs to another source
+(`ValueError`, permanent), and enqueues `fetch:<filing key>:<revision>` jobs. A source
+that isn't enabled fails with `UnsupportedSourceError` and is never retried.
 
 This keeps the local deployment small and avoids Redis/Kafka until throughput evidence supports adding them.
 
@@ -241,7 +251,7 @@ The recovery activity (failed jobs and restore drills) lives with its procedures
 
 ### Sequence views
 
-![UML sequence view: discover_filings, fetch_filing, and parse_filing messages between the CLI, PostgreSQL, SecEgressLock, workers, SEC EDGAR, MinIO, Arelle, and ClickHouse, with egress-busy and rejected-extraction alternatives](diagrams/sequence-filing.svg)
+![UML sequence view: discover_filings, fetch_filing, and parse_filing messages between the CLI, PostgreSQL, the per-source SourceEgressLock, workers, SEC EDGAR, MinIO, Arelle, and ClickHouse, with egress-busy and rejected-extraction alternatives](diagrams/sequence-filing.svg)
 
 ![UML sequence view of GET /v1/facts: bearer check, concurrency limit, FactQuery validation, budgeted ClickHouse query, and the 401, 503, 422, and 200 replies](diagrams/sequence-api-query.svg)
 
@@ -253,10 +263,11 @@ Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level fol
 | --- | --- | --- |
 | CLI | Component; filing and bulk activity | `cli.py` |
 | Worker and job queue | Component; job state machine; filing sequence; recovery activity | `worker.py`; `infrastructure/storage/postgres.py` (`claim_job`, `complete_job`, `fail_job`, `retry_job`) |
-| SEC HTTP client and egress lock | Component; filing sequence; trust boundaries | `infrastructure/http/sec_client.py`, `egress_lock.py`, `rate_limiter.py` |
+| Source HTTP clients and egress locks | Component; filing sequence; job state machine; trust boundaries | `infrastructure/http/source_client.py`, `sec_client.py`, `egress_lock.py`, `rate_limiter.py` |
+| Source registry and adapters | Component; deployment (one fetch worker per source); filing sequence | `sources/base.py`, `registry.py`, `sec.py`; `worker.runtime_services`; `Settings.enabled_sources` |
 | Bulk backfill | Component; bulk activity; artifact state machine | `ingestion/bulk_catalog.py`, `bulk_downloader.py`, `bulk_loader.py`, `orchestrator.py`, `sec_tsv.py` |
 | Filing ingestion | Component; class (FilingRef); filing activity; filing sequence | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py`; filing and entity keys in `domain/sources.py` |
-| Arelle and taxonomy packages | Component; filing activity and sequence; trust boundaries | `infrastructure/xbrl/arelle_adapter.py`, `taxonomy_packages.py`, `sec_transforms.py`; `config/taxonomy_packages.yml` |
+| Arelle and taxonomy packages | Component; filing activity and sequence; trust boundaries | `infrastructure/xbrl/arelle_adapter.py`, `taxonomy_packages.py` (`required_prefixes` adds `source_required_prefixes` of enabled sources), `sec_transforms.py`; `config/taxonomy_packages.yml` |
 | Validation | Component; filing and bulk activity | `validation/` |
 | Statements, disclosures, fiscal fields | Class (bundle); filing activity (publish step) | `normalization/statements.py`, `disclosures.py`, `fiscal_focus.py`; `ClickHouseWarehouse.insert_xbrl_bundle` |
 | Canonical mapping and series | Component; class; filing activity and sequence | `mapping/`, `query/series.py`, `normalization/series.py`; `config/canonical_metrics.yml`, `concept_seed.yml` |

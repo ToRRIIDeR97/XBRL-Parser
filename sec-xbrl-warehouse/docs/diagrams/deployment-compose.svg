@@ -28,7 +28,7 @@ text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fil
 <text x="390.0" y="223" font-size="11" text-anchor="middle" class="m">cmd: worker run</text>
 <text x="390.0" y="237" font-size="11" text-anchor="middle" class="m">.env, admin secrets blanked</text>
 <text x="390.0" y="251" font-size="11" text-anchor="middle" class="m">volume app_data:/app/data</text>
-<text x="390.0" y="265" font-size="11" text-anchor="middle" class="m">SEC-active (fetch, discover, bulk)</text>
+<text x="390.0" y="265" font-size="11" text-anchor="middle" class="m">fetch, discover, bulk; 1 per source</text>
 <path d="M540,160 L550,150 L790,150 L790,278 L780,288 L780,160 Z" fill="#e6e9ed" stroke="#3d444d" stroke-width="1.2"/>
 <path d="M780,160 L790,150" stroke="#3d444d" stroke-width="1.2"/>
 <rect x="540" y="160" width="240" height="128" rx="0" fill="#f6f8fa" stroke="#3d444d" stroke-width="1.2"/>

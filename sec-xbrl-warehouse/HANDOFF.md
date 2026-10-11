@@ -56,6 +56,12 @@ Plan 17 (source-neutral filing and entity keys) adds Alembic
 PostgreSQL (BACKUP_RESTORE.md), run `alembic upgrade head` through the `admin`
 service, then `doctor`. ClickHouse and existing SEC rows and object keys are unchanged.
 
+Plan 18 (source adapters) routes discovery, fetch, and parse fiscal fields through a
+`SourceRegistry` built from `XBRL_ENABLED_SOURCES` (default `sec`). SEC requests, user
+agent, rate, lock name, object keys, and job keys are unchanged, and there's no
+migration. Only the `sec` adapter exists; enabling another code stops `worker run` at
+startup until its plan lands (OPERATIONS.md, "Sources and per-source egress").
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.

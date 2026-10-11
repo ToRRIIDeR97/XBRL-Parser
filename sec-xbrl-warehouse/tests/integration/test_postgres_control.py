@@ -916,3 +916,35 @@ async def test_upsert_filing_stores_non_sec_filing_keys(postgres_settings: Setti
         assert [tuple(row) for row in rows] == [(key, 10_000_000_007)]
     finally:
         await repo.close()
+
+
+async def test_source_egress_locks_are_per_source_and_retakable(
+    postgres_settings: Settings,
+) -> None:
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import (
+        EgressBusyError,
+        SecEgressBusyError,
+        SecEgressLock,
+        SourceEgressLock,
+    )
+
+    sec_holder = SourceEgressLock(postgres_settings, source="sec")
+    sec_second = SecEgressLock(postgres_settings)
+    demo_holder = SourceEgressLock(postgres_settings, source="demo")
+    demo_second = SourceEgressLock(postgres_settings, source="demo")
+    try:
+        await sec_holder.acquire()
+        await demo_holder.acquire()
+        # `SourceEgressLock(source="sec")` and `SecEgressLock` share xbrl:sec-egress.
+        with pytest.raises(SecEgressBusyError):
+            await sec_second.acquire()
+        with pytest.raises(EgressBusyError) as busy:
+            await demo_second.acquire()
+        assert not isinstance(busy.value, SecEgressBusyError)
+        await demo_holder.release()
+        await demo_second.acquire()  # a released lock can be retaken
+        await sec_holder.release()
+        await sec_second.acquire()
+    finally:
+        for lock in (sec_holder, sec_second, demo_holder, demo_second):
+            await lock.release()

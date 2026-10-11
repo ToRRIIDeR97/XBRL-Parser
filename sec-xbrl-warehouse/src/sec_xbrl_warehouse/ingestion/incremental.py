@@ -5,7 +5,7 @@ import inspect
 import json
 import tempfile
 import traceback
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -24,7 +24,7 @@ from sec_xbrl_warehouse.domain.ports import (
 )
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError, XbrlExtractionError
-from sec_xbrl_warehouse.infrastructure.http.egress_lock import SecEgressBusyError
+from sec_xbrl_warehouse.infrastructure.http.egress_lock import EgressBusyError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     XBRL_ENTITIES,
     iter_shared_concept_tables,
@@ -46,6 +46,19 @@ from sec_xbrl_warehouse.validation.filing_reconciliation import reconcile_filing
 from sec_xbrl_warehouse.validation.issue_grouping import group_issues
 from sec_xbrl_warehouse.validation.xbrl_validation import reject_configured_issues
 
+FiscalFocus = Callable[
+    [XbrlExtractionBundle], tuple[XbrlExtractionBundle, Sequence[ValidationIssue]]
+]
+
+
+def sec_fiscal_focus(
+    bundle: XbrlExtractionBundle,
+) -> tuple[XbrlExtractionBundle, Sequence[ValidationIssue]]:
+    """Default fiscal focus: the SEC dei facts (`derive_fiscal_focus`)."""
+    filing, issues = derive_fiscal_focus(bundle)
+    return bundle.model_copy(update={"filing": filing}), issues
+
+
 # Silver entities older completed jobs may lack.
 _ENTITIES_ADDED_LATER = frozenset({"roles", "statement_lines", "cover_pages", "segment_facts"})
 
@@ -65,6 +78,7 @@ class IncrementalFilingIngestor:
         object_store: ObjectStore | None = None,
         mapper: CanonicalMapper | None = None,
         ensure_sec_egress: Callable[[], Awaitable[None]] | None = None,
+        fiscal_focus: FiscalFocus | None = None,
     ) -> None:
         self.control = control
         self.package_store = package_store
@@ -77,6 +91,8 @@ class IncrementalFilingIngestor:
         # Online Arelle may fetch taxonomies from SEC hosts; hold the SEC egress
         # lock first so those requests count as this process's SEC traffic.
         self.ensure_sec_egress = ensure_sec_egress
+        # Filing fiscal fields per source (`SourceRegistry.fiscal_focus`); SEC dei by default.
+        self.fiscal_focus = fiscal_focus or sec_fiscal_focus
 
     async def ingest(
         self, filing: FilingRef, *, extraction_revision: int = 1, job_id: UUID | None = None
@@ -130,7 +146,7 @@ class IncrementalFilingIngestor:
             await self.control.update_filing_package(manifest)
             await self._save(job_id, "package", manifest.model_dump(mode="json"))
             return manifest
-        except SecEgressBusyError:
+        except EgressBusyError:
             raise
         except Exception as exc:
             await self._record_failure(filing.accession, exc, extraction_revision)
@@ -251,17 +267,15 @@ class IncrementalFilingIngestor:
                         )
                         await self._save(job_id, "extract", {"object_key": key, "sha256": checksum})
 
-                # Filing-level fiscal fields come from the bundle's dei facts. This
-                # runs on fresh and checkpointed extractions alike, so replay
-                # derives the same values; the saved extraction stays as extracted.
-                enriched, fiscal_issues = derive_fiscal_focus(bundle)
-                bundle = bundle.model_copy(
-                    update={
-                        "filing": enriched,
-                        "validation_issues": (*bundle.validation_issues, *fiscal_issues),
-                    }
+                # Filing-level fiscal fields come from the source adapter (SEC: the
+                # bundle's dei facts). This runs on fresh and checkpointed extractions
+                # alike, so replay derives the same values; the saved extraction stays
+                # as extracted.
+                focused, fiscal_issues = self.fiscal_focus(bundle)
+                bundle = focused.model_copy(
+                    update={"validation_issues": (*focused.validation_issues, *fiscal_issues)}
                 )
-                filing = enriched
+                filing = bundle.filing
                 await self.control.upsert_filing(filing)
                 if await self._checkpoint(job_id, "validation") is None:
                     # Repeated diagnostics are stored once per group; the reject
@@ -319,7 +333,7 @@ class IncrementalFilingIngestor:
                 }
                 await self._save(job_id, "complete", result)
                 return result
-        except SecEgressBusyError:
+        except EgressBusyError:
             # A deferral, not a failure: the worker reschedules the job, so record no
             # diagnostics here (they would repeat on every deferral).
             raise

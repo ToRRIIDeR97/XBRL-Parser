@@ -16,6 +16,16 @@ Do not ship the placeholder from `.env.example` into a running downloader.
 
 The application defaults to 8 requests per second and a concurrency of 4, leaving margin below the configured ceiling. The limiter is per process and shared by all SEC clients inside it.
 
+## Other sources
+
+Non-SEC regulators (enabled with `XBRL_ENABLED_SOURCES`) don't change any rule on this
+page. `SecHttpClient` is the generic `SourceHttpClient` with the SEC policy: the same
+hosts, user agent, rate, concurrency, retries, and byte limits as before. Another
+source's client has its own host allowlist, so it can't send requests to SEC hosts,
+and its own egress lock (`xbrl:<source>-egress`), so it neither takes nor waits for
+`xbrl:sec-egress`. SEC traffic still comes only from the SEC adapter (discovery and
+`fetch_filing`), bulk downloads, `catalog sync`, `taxonomy sync`, and online Arelle.
+
 ## One SEC-active process (enforced)
 
 Only one process may send SEC traffic at a time. Every `SecHttpClient` the worker

@@ -76,6 +76,34 @@ checks its lock connection at most every `XBRL_SEC_EGRESS_CHECK_SECONDS` (defaul
 before SEC requests; if the connection dropped (which releases the lock), it
 re-acquires the lock or stops with `SecEgressBusyError` instead of sending.
 
+## Sources and per-source egress
+
+`XBRL_ENABLED_SOURCES` (default `sec`, comma-separated source codes such as
+`sec,esef`) lists the regulators this deployment fetches from. Each enabled source gets
+an adapter in the worker's `SourceRegistry`, its own HTTP client (host allowlist, rate,
+headers), and its own egress lock, `xbrl:<source>-egress` (`xbrl:sec-egress` for the
+SEC, unchanged). Locks of different sources don't block each other; a second process
+sending the same source's traffic gets `EgressBusyError` (`SecEgressBusyError` for the
+SEC) and defers the job exactly as described above.
+
+- **Use the same `XBRL_ENABLED_SOURCES` in every worker and CLI process** that shares
+  the control database. A `discover_filings`, `fetch_filing`, or `parse_filing` job for
+  a source that isn't enabled fails permanently (`UnsupportedSourceError`) and is never
+  sent to the SEC instead.
+- **One fetch worker per source.** `--job-type` can't filter by source, so a fetch
+  worker claims fetch and discovery jobs for every enabled source and takes a source's
+  lock on its first request for it, holding it until it stops. Run one fetch worker
+  per enabled source; each source's jobs settle on the worker that first holds its
+  lock, and the others defer those jobs as busy without spending attempts.
+- **Discovery for a source:** enqueue `discover_filings` with `{"source": "<code>", ...}`.
+  Without `source` the job is SEC discovery as before (`filing discover`,
+  `filing discover-latest`); a legacy `cik` payload is the SEC entity.
+- **Taxonomy coverage.** `config/taxonomy_packages.yml` may list
+  `source_required_prefixes: {<code>: [prefixes]}`. `doctor` and offline extraction
+  require the US `required_prefixes` plus those of each enabled source.
+- Only the `sec` adapter exists so far; enabling any other code makes `worker run` stop
+  at startup with `ConfigurationError` until that source's adapter is added.
+
 ## Fetch and parse workers
 
 `fetch_filing`, `ingest_filing`, `discover_filings`, and `download_bulk` send SEC

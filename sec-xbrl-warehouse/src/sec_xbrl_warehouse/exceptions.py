@@ -15,7 +15,11 @@ class ConfigurationError(XbrlWarehouseError):
     """Configuration is missing or internally inconsistent."""
 
 
-class SecAccessError(XbrlWarehouseError):
+class SourceAccessError(XbrlWarehouseError):
+    """A source (regulator) request failed or violated a source-access invariant."""
+
+
+class SecAccessError(SourceAccessError):
     """SEC request failed or violated a source-access invariant."""
 
 
@@ -49,12 +53,19 @@ class WarehouseWriteError(XbrlWarehouseError):
     """A typed batch could not be written to the analytical warehouse."""
 
 
-class SecRetryDeferred(SecAccessError):
+class SourceRetryDeferred(SourceAccessError):
     """Release the worker while retaining the server's earliest retry time."""
 
-    def __init__(self, retry_at: datetime) -> None:
+    def __init__(self, retry_at: datetime, source: str = "source") -> None:
         self.retry_at = retry_at
-        super().__init__(f"SEC retry deferred until {retry_at.isoformat()}")
+        super().__init__(f"{source} retry deferred until {retry_at.isoformat()}")
+
+
+class SecRetryDeferred(SecAccessError, SourceRetryDeferred):
+    """Release the worker while retaining the SEC's earliest retry time."""
+
+    def __init__(self, retry_at: datetime) -> None:
+        SourceRetryDeferred.__init__(self, retry_at, "SEC")
 
 
 class DiskReserveError(XbrlWarehouseError):

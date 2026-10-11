@@ -21,6 +21,15 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 - **SEC and taxonomy content is untrusted.** ZIP members, filing packages, TSV
   rows, and taxonomy responses are bounded before allocation. Unsafe names,
   traversal paths, and symlinks are rejected, and checksums are verified before parsing.
+- **Each source (regulator) is its own outbound path.** A source's adapter reaches the
+  network only through its `SourceHttpClient`, whose `SourcePolicy` lists the hosts
+  it may contact (HTTPS on port 443, no credentials). Every redirect hop is checked
+  against the same allowlist before it is requested, so one source's client can't
+  reach another source's hosts; byte limits, retries, and `Retry-After` handling are
+  the same for every source. The SEC policy is unchanged: `www.sec.gov`, `sec.gov`,
+  `data.sec.gov` and `XBRL_SEC_USER_AGENT`. Only sources in `XBRL_ENABLED_SOURCES`
+  get an adapter; a job for any other source fails permanently and never falls back
+  to the SEC. Bytes from every source get the same bounds and checksums as SEC bytes.
 - **Taxonomy packages are pinned.** `taxonomy sync` is a separate outbound path: it
   downloads only registry URLs that use HTTPS on port 443, carry no credentials, and
   name a host in `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`. It uses the rate-limited
@@ -135,7 +144,10 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
 - SEC requests use the configured user agent. They default to 8 req/s with jitter and
   honor `Retry-After`. **The limiter is process-local**, so a PostgreSQL advisory lock
   (`SecEgressLock`, see SEC_ACCESS.md) lets only one process send SEC traffic at a
-  time. A second SEC-active process fails fast instead of doubling the rate.
+  time. A second SEC-active process fails fast instead of doubling the rate. Other
+  sources follow the same rule with their own policy rate and their own lock
+  (`SourceEgressLock`, `xbrl:<source>-egress`), so the SEC sender and, say, an ESEF
+  sender run side by side without sharing a limit.
 - The `api`, `worker`, and `worker-parse` containers run the application image as
   UID/GID `10001:10001` with all capabilities dropped and `no-new-privileges`. The
   third-party storage and monitoring images keep their own defaults. Host ports bind
@@ -159,12 +171,12 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
 Run from `sec-xbrl-warehouse/` with the virtualenv active:
 
 ```bash
-pytest tests/unit/test_api.py tests/unit/test_config.py tests/unit/test_deployment.py tests/unit/test_bulk_security.py tests/unit/test_sec_client.py tests/unit/test_object_store.py
+pytest tests/unit/test_api.py tests/unit/test_config.py tests/unit/test_deployment.py tests/unit/test_bulk_security.py tests/unit/test_sec_client.py tests/unit/test_source_adapters.py tests/unit/test_object_store.py
 ```
 
 These cover API auth and capacity, production credential checks, API environment
-isolation, bucket setup quoting, ZIP limits and unsafe names, SEC retry behavior, and
-bounded object restores. The full gates are listed in the root `AGENTS.md`.
+isolation, bucket setup quoting, ZIP limits and unsafe names, SEC retry behavior,
+per-source host allowlists and redirect refusal, and bounded object restores. The full gates are listed in the root `AGENTS.md`.
 
 ## Before public exposure
 

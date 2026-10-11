@@ -293,6 +293,14 @@ symlinked and not committed):
 5. **AC-5 left partly to the operator** (per the coordinating session): no package
    was downloaded and no pinned entry added.
 
+**Fixture correction (plan author).** Deviation 1 is resolved: the plan author fixed
+`acceptance/fxo_fixtures.py` so that `report_package()` writes every entry with
+`zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0))`. The same arguments now
+always give the same bytes, and no assertion or contract changed. The authoritative
+copy was copied byte-identical (`cmp` and `diff -r` against the main checkout's
+`acceptance/` both match). The acceptance set then ran 10 times in a row with no code
+change: 6 passed on every run.
+
 **Limitations.**
 
 - The ESEF and IFRS prefix list couldn't be checked against live filings. Verify it

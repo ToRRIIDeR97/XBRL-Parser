@@ -88,8 +88,15 @@ class SourceRegistry:
 def source_policies(settings: Settings) -> dict[str, SourcePolicy]:
     """Every implemented source's HTTP policy by code; their host allowlists are disjoint."""
     from sec_xbrl_warehouse.infrastructure.http.sec_client import sec_policy
+    from sec_xbrl_warehouse.sources.dart import dart_policy
+    from sec_xbrl_warehouse.sources.edinet import edinet_policy
     from sec_xbrl_warehouse.sources.esef import esef_policy
 
-    policies = (sec_policy(settings), esef_policy(settings))
+    policies = (
+        sec_policy(settings),
+        esef_policy(settings),
+        edinet_policy(settings),
+        dart_policy(settings),
+    )
     check_disjoint_hosts(policies)
     return {policy.code: policy for policy in policies}

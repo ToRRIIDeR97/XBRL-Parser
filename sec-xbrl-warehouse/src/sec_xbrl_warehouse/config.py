@@ -43,6 +43,24 @@ class Settings(BaseSettings):
     esef_page_size: int = Field(default=100, ge=1, le=500)
     esef_max_pages: int = Field(default=50, ge=1, le=10_000)
     esef_countries: Annotated[tuple[str, ...], NoDecode] = ()
+    # EDINET (Japan, FSA) and OpenDART (Korea, FSS) API keys. Each key is the
+    # operator's own and goes only into that regulator's requests: never into filing
+    # references, manifests, object keys, job payloads, or logs.
+    edinet_api_key: SecretStr | None = None
+    dart_api_key: SecretStr | None = None
+    # EDINET discovery reads one document list per day: at most this many days per
+    # run, keeping these document type codes when a run names no forms.
+    edinet_max_days: int = Field(default=31, ge=1, le=366)
+    edinet_doc_types: Annotated[tuple[str, ...], NoDecode] = (
+        "120",
+        "130",
+        "140",
+        "150",
+        "160",
+        "170",
+    )
+    # OpenDART disclosure-search page size (the API allows 1 to 100).
+    dart_page_count: int = Field(default=100, ge=1, le=100)
 
     sec_user_agent: str = "Your Name or Organization monitored-email@example.com"
     sec_max_requests_per_second: float = Field(default=8.0, gt=0, le=10)
@@ -96,7 +114,8 @@ class Settings(BaseSettings):
     arelle_offline: bool = False
     arelle_allowed_taxonomy_hosts: str = (
         "www.sec.gov,xbrl.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org,"
-        "www.esma.europa.eu,www.ifrs.org"
+        "www.esma.europa.eu,www.ifrs.org,disclosure.edinet-fsa.go.jp,"
+        "disclosure2dl.edinet-fsa.go.jp"
     )
     arelle_timeout_seconds: float = Field(default=600, gt=0)
     arelle_memory_limit_bytes: int = Field(default=2 * 1024**3, gt=0)
@@ -179,6 +198,29 @@ class Settings(BaseSettings):
         invalid = [code for code in codes if re.fullmatch(r"[A-Z]{2}", code) is None]
         if invalid:
             raise ValueError(f"esef_countries must be two-letter country codes: {invalid}")
+        return codes
+
+    @field_validator("edinet_api_key", "dart_api_key", mode="before")
+    @classmethod
+    def empty_source_key(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("edinet_doc_types", mode="before")
+    @classmethod
+    def split_edinet_doc_types(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("edinet_doc_types")
+    @classmethod
+    def validate_edinet_doc_types(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        codes = tuple(dict.fromkeys(value))
+        invalid = [code for code in codes if re.fullmatch(r"[0-9]{3}", code) is None]
+        if invalid or not codes:
+            raise ValueError(f"edinet_doc_types must be three-digit codes: {invalid}")
         return codes
 
     @field_validator("log_level")

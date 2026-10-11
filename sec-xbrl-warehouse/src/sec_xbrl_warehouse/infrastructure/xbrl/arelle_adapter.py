@@ -842,6 +842,8 @@ def child_settings(settings: Settings) -> Settings:
             "object_store_secret_key": SecretStr(""),
             "api_key": None,
             "api_clickhouse_password": None,
+            "edinet_api_key": None,
+            "dart_api_key": None,
         }
     )
 

@@ -11,7 +11,7 @@
 7. worker
 8. API
 
-![UML deployment view of the Compose services: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker-parse has no other network; prometheus and grafana in the monitoring profile; the worker reaches SEC EDGAR, filings.xbrl.org (with esef enabled), and taxonomy hosts](diagrams/deployment-compose.svg)
+![UML deployment view of the Compose services: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker-parse has no other network; prometheus and grafana in the monitoring profile; the worker reaches SEC EDGAR, filings.xbrl.org (with esef enabled), EDINET and OpenDART (with edinet or dart enabled), and taxonomy hosts](diagrams/deployment-compose.svg)
 
 ## Identities and the admin service
 
@@ -101,7 +101,7 @@ SEC) and defers the job exactly as described above.
 - **Taxonomy coverage.** `config/taxonomy_packages.yml` may list
   `source_required_prefixes: {<code>: [prefixes]}`. `doctor` and offline extraction
   require the US `required_prefixes` plus those of each enabled source.
-- Adapters exist for `sec` and `esef`; enabling any other code makes `worker run` stop
+- Adapters exist for `sec`, `esef`, `edinet` and `dart`; enabling any other code makes `worker run` stop
   at startup with `ConfigurationError` until that source's adapter is added. The
   sources' host allowlists may not overlap (checked at startup).
 
@@ -160,6 +160,78 @@ Fetch re-reads the filing's record, downloads the package, and checks it against
 published SHA-256 before storing it. A digest mismatch stores nothing and fails
 permanently; rediscover after filings.xbrl.org corrects the record. A package that
 fails the archive checks is kept under `quarantine/esef/` for diagnosis.
+
+## EDINET and DART filings
+
+`edinet` fetches Japanese securities reports from the FSA's EDINET API v2
+(`api.edinet-fsa.go.jp`); `dart` fetches Korean periodic reports from the FSS's
+OpenDART API (`opendart.fss.or.kr`). Keys, forms and fiscal rules are in
+DATA_MODEL.md, "EDINET filings" and "DART filings".
+
+**API keys.** Both APIs are free but need a per-user key: register on the EDINET
+site (EDINET API specification v2, 2-3) and on opendart.fss.or.kr. Use your own keys
+and don't share them (OpenDART's terms forbid it). Put them only in `.env` (or the
+deployment's secret store):
+
+```bash
+XBRL_EDINET_API_KEY=<your EDINET key>
+XBRL_DART_API_KEY=<your 40-character OpenDART key>
+```
+
+A worker whose job types send that source's traffic (`fetch_filing`,
+`discover_filings`, `ingest_filing`, or no `--job-type` filter) refuses to start
+with `ConfigurationError` when the key is missing; parse-only workers don't need it.
+The key goes only into the outgoing request (`Subscription-Key` / `crtfc_key`); it is
+masked in every log line, error and download sidecar, and is never part of a filing
+reference, manifest, object key, job payload or metric label (SECURITY.md). To rotate
+a key, reissue it on the regulator's site, update `.env`, and restart the workers.
+
+**Limits.** Each client sends at most 1 request/s, one at a time, under its own
+`xbrl:edinet-egress` / `xbrl:dart-egress` lock.
+
+- *OpenDART* allows about 20,000 calls per key per day (status `020`). A `020`
+  answer raises `SourceRateLimited`: the job goes back to the queue no earlier than
+  00:05 Korea time (the next day) and spends an attempt, so a long backfill should
+  stay under the daily budget (one call per result page of 100 reports, plus one per
+  package). Without a company (`entity`), OpenDART limits a search to three months;
+  a longer window comes back as an error status, so split it.
+- *EDINET* publishes no daily quota but answers bursts with status 429
+  (`SourceRateLimited`, retried after 15 minutes). One discovery run reads one
+  document list per day, at most `XBRL_EDINET_MAX_DAYS` (default 31) days.
+
+Enable them (each step that sends traffic needs the operator's approval):
+
+1. **Pin the taxonomies.** `source_required_prefixes` lists
+   `disclosure.edinet-fsa.go.jp/taxonomy/` for `edinet` and `dart.fss.or.kr/` for
+   `dart` (unverified: confirm DART's taxonomy namespaces with the canary) but no
+   pinned entries, so with either source enabled `taxonomy status` shows the prefix
+   `uncovered`, `doctor` fails, and offline extraction refuses to start. Download the
+   FSA's yearly EDINET taxonomy packages (from `disclosure2dl.edinet-fsa.go.jp`) and
+   the taxonomy DART filings import, record each SHA-256 and size, add pinned entries
+   as in "Adding a taxonomy year", then narrow the required prefixes to the releases
+   in use. Run `taxonomy sync` and `taxonomy status` until nothing is `uncovered`.
+2. **Allow the taxonomy hosts.** The default `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` now
+   includes `disclosure.edinet-fsa.go.jp` and `disclosure2dl.edinet-fsa.go.jp`. An
+   existing `.env` that sets the variable keeps its old list: add both hosts there.
+   Add DART's taxonomy host only after confirming it.
+3. **Set the keys** (above) and **enable the sources** in every process, e.g.
+   `XBRL_ENABLED_SOURCES=sec,edinet,dart`. `XBRL_EDINET_DOC_TYPES` (default
+   `120,130,140,150,160,170`) and `XBRL_DART_PAGE_COUNT` (default 100) bound discovery.
+4. **Run one fetch worker per source**, as for every source (see "Sources and
+   per-source egress"). Each fetch worker needs both keys when both sources are
+   enabled, because it claims both sources' jobs.
+5. **Discover** with `discover_filings` jobs:
+   `{"source": "edinet", "filed_from": "2024-06-24", "filed_to": "2024-06-28"}`
+   (EDINET file dates; `"entity": "E02144"` for one filer, `"forms": ["120"]` for one
+   document type) or
+   `{"source": "dart", "filed_from": "2024-03-01", "filed_to": "2024-03-31"}`
+   (receipt dates; `"entity": "00126380"` for one corp_code, `"forms": ["11011"]`).
+6. **Canary (AC-9).** With approval and your own keys, discover one week of each
+   source, ingest three filings each with offline parsing, and confirm their facts.
+
+A JSON or XML error body instead of a zip stores nothing; a zip that fails the
+archive checks or has no single instance is kept under `quarantine/edinet/` or
+`quarantine/dart/`.
 
 ## Fetch and parse workers
 

@@ -13,10 +13,11 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 | Warehouse facts | ClickHouse | Raw and canonical facts served by the API. |
 | Credentials | `.env` (local), secret manager (production) | Owner/admin/root credentials (admin service), the worker, writer, and reader identities, `XBRL_API_KEY`. Settings hold them as `SecretStr`, so reprs, dumps, and tracebacks don't print them. |
 | SEC identity | `XBRL_SEC_USER_AGENT` | The SEC identifies and throttles traffic by this identity. |
+| Regulator API keys | `XBRL_EDINET_API_KEY`, `XBRL_DART_API_KEY` in `.env` (local), secret manager (production) | Per-user keys for EDINET and OpenDART. The regulators' terms forbid sharing them; a leaked key can be used up (DART's daily cap) or revoked. |
 
 ## Trust boundaries
 
-![Trust boundaries: untrusted SEC, filings.xbrl.org (ESEF), taxonomy, and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
+![Trust boundaries: untrusted SEC, filings.xbrl.org (ESEF), EDINET, OpenDART, taxonomy, and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
 
 - **SEC and taxonomy content is untrusted.** ZIP members, filing packages, TSV
   rows, and taxonomy responses are bounded before allocation. Unsafe names,
@@ -46,6 +47,28 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   extension taxonomy to files inside the package: a target outside the package, or a
   prefix that overlaps a pinned taxonomy, fails the extraction. Reuse terms are
   unconfirmed (OPERATIONS.md, "ESEF filings").
+- **EDINET and OpenDART are regulators behind a per-user key.** The `edinet` client
+  may reach only `api.edinet-fsa.go.jp` and the `dart` client only
+  `opendart.fss.or.kr` (HTTPS, at most 1 request/s, one at a time, sending
+  `XBRL_SEC_USER_AGENT`), each under its own `xbrl:<source>-egress` lock. Their JSON
+  lists and zips are untrusted input: records with a malformed document or receipt
+  number, entity code, or date are skipped and logged; a JSON or XML error body
+  instead of a zip stores nothing; zips get the same checks as SEC archives, need
+  exactly one instance, and are quarantined otherwise. Neither API publishes a
+  digest, so the stored SHA-256 proves only what was received over TLS.
+- **API keys stay in the request.** `XBRL_EDINET_API_KEY` and `XBRL_DART_API_KEY` are
+  `SecretStr` settings, sent only as the `Subscription-Key` / `crtfc_key` query
+  parameter of that regulator's requests. The policy names those parameters
+  (`SourcePolicy.secret_params`), and `SourceHttpClient` masks their values
+  (`[REDACTED]`) in every URL it logs, raises, or writes to a download sidecar; a
+  logging filter does the same for the `httpx`/`httpcore` request logs, and library
+  exceptions are masked before they are chained. The adapters build every stored URL
+  (filing references, manifest members, object metadata, job payloads) without the
+  key and re-raise any failure that still mentions it masked and unchained. A missing
+  key raises `ConfigurationError` before any request, and a fetch-capable worker
+  refuses to start without it. The Arelle child gets settings with both keys blanked,
+  and the `worker-parse` container blanks them in its environment; the `api` service
+  never receives them. Rotate a key on the regulator's site if it leaks.
 - **Taxonomy packages are pinned.** `taxonomy sync` is a separate outbound path: it
   downloads only registry URLs that use HTTPS on port 443, carry no credentials, and
   name a host in `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`. It uses the rate-limited
@@ -54,7 +77,12 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   the publishers' unmodified files; only verified files are mapped into Arelle. `xbrl.sec.gov` is on the default
   allowlist because it serves the SEC taxonomies (dei and others) and their packages;
   `www.esma.europa.eu` (ESEF taxonomy), `xbrl.ifrs.org` and `www.ifrs.org` (IFRS
-  Accounting Taxonomy) are on it for the `esef` source's pinned packages.
+  Accounting Taxonomy) are on it for the `esef` source's pinned packages, and
+  `disclosure.edinet-fsa.go.jp` (EDINET taxonomy namespaces) and
+  `disclosure2dl.edinet-fsa.go.jp` (the FSA's taxonomy downloads) for the `edinet`
+  source's. DART's taxonomy host isn't on it yet: add it once the canary confirms it.
+  None of these is a source API host (`check_disjoint_hosts` keeps the source
+  policies apart; the source hosts aren't taxonomy hosts).
   The W3C `xml.xsd` schemas are shipped with the application, so `www.w3.org` is never
   contacted.
 - **The object store is trusted.** Manifest-cache and checkpoint verification detect
@@ -189,13 +217,15 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
 Run from `sec-xbrl-warehouse/` with the virtualenv active:
 
 ```bash
-pytest tests/unit/test_api.py tests/unit/test_config.py tests/unit/test_deployment.py tests/unit/test_bulk_security.py tests/unit/test_sec_client.py tests/unit/test_source_adapters.py tests/unit/test_esef_source.py tests/unit/test_object_store.py
+pytest tests/unit/test_api.py tests/unit/test_config.py tests/unit/test_deployment.py tests/unit/test_bulk_security.py tests/unit/test_sec_client.py tests/unit/test_source_adapters.py tests/unit/test_esef_source.py tests/unit/test_edinet_dart_sources.py tests/unit/test_object_store.py
 ```
 
 These cover API auth and capacity, production credential checks, API environment
 isolation, bucket setup quoting, ZIP limits and unsafe names, SEC retry behavior,
 per-source host allowlists, disjoint source hosts and redirect refusal, ESEF digest
-checks, unsafe records and report package catalogs, and bounded object restores. The full gates are listed in the root `AGENTS.md`.
+checks, unsafe records and report package catalogs, EDINET/DART key redaction
+(logs, errors, sidecars, stored objects) and missing-key refusal, and bounded object
+restores. The full gates are listed in the root `AGENTS.md`.
 
 ## Before public exposure
 

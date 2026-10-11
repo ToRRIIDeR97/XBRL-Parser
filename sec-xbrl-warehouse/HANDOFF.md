@@ -70,6 +70,17 @@ packages (`source_required_prefixes.esef` is listed but has no pinned entries, s
 adds `www.esma.europa.eu,www.ifrs.org` to `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` in
 `.env`, and runs the AC-6 canary (OPERATIONS.md, "ESEF filings").
 
+Plan 20 adds the `edinet` (Japan, FSA EDINET API v2) and `dart` (Korea, OpenDART)
+adapters, off by default, with no migration. Neither is enabled anywhere yet. Before
+enabling them the operator registers their own API keys (`XBRL_EDINET_API_KEY`,
+`XBRL_DART_API_KEY` in `.env`, never shared), pins the EDINET and DART taxonomy
+packages (`source_required_prefixes.edinet` and `.dart` are listed without pinned
+entries, so `taxonomy status` and `doctor` fail once either is enabled; the DART
+prefix is unverified), adds
+`disclosure.edinet-fsa.go.jp,disclosure2dl.edinet-fsa.go.jp` to
+`XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` in `.env`, and runs the AC-9 canary
+(OPERATIONS.md, "EDINET and DART filings").
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.

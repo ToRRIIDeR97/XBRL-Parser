@@ -692,6 +692,15 @@ source_required_prefixes:
     - xbrl.ifrs.org/taxonomy/2022-03-24/
     - xbrl.ifrs.org/taxonomy/2023-03-23/
     - xbrl.ifrs.org/taxonomy/2024-03-27/
+  # EDINET (Japan): the FSA's EDINET taxonomy (jpdei, jpcrp, jppfs, jpigp, ...), one
+  # prefix for every yearly release until the pinned packages declare their own.
+  # Keep equal to `EDINET_TAXONOMY_PREFIXES` in sources/edinet.py.
+  edinet:
+    - disclosure.edinet-fsa.go.jp/taxonomy/
+  # DART (Korea): the FSS DART taxonomy. Unverified host; confirm it with the canary's
+  # namespaces. Keep equal to `DART_TAXONOMY_PREFIXES` in sources/dart.py.
+  dart:
+    - dart.fss.or.kr/
 
 network_policy:
   # Filing documents themselves must come from the checksum-addressed filing
@@ -706,5 +715,7 @@ network_policy:
     - www.xbrl.org
     - www.esma.europa.eu
     - www.ifrs.org
+    - disclosure.edinet-fsa.go.jp
+    - disclosure2dl.edinet-fsa.go.jp
   reject_unlisted_hosts: true
   require_https: true

@@ -61,6 +61,28 @@ class SourceRetryDeferred(SourceAccessError):
         super().__init__(f"{source} retry deferred until {retry_at.isoformat()}")
 
 
+class SourceRateLimited(SourceRetryDeferred):
+    """A source refused the request for its usage limit (for example DART's daily cap).
+
+    Retryable: the job goes back to the queue no earlier than `retry_at` (default an
+    hour from now). The message names the source and the limit, never a request URL.
+    """
+
+    def __init__(
+        self,
+        message: str = "source usage limit reached",
+        *,
+        retry_at: datetime | None = None,
+        source: str = "source",
+    ) -> None:
+        from datetime import UTC, timedelta
+
+        self.retry_at = retry_at or datetime.now(UTC) + timedelta(hours=1)
+        SourceAccessError.__init__(
+            self, f"{source}: {message}; retry after {self.retry_at.isoformat()}"
+        )
+
+
 class SecRetryDeferred(SecAccessError, SourceRetryDeferred):
     """Release the worker while retaining the SEC's earliest retry time."""
 

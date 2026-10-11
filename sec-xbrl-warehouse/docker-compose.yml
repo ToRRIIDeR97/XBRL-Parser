@@ -219,6 +219,9 @@ services:
       XBRL_WORKER_CONCURRENCY: ${XBRL_PARSE_WORKER_CONCURRENCY:-2}
       XBRL_ARELLE_OFFLINE: "true"
       XBRL_WORKER_METRICS_HOST: 0.0.0.0
+      # Parse-only: it sends no regulator traffic, so it holds no regulator API keys.
+      XBRL_EDINET_API_KEY: ""
+      XBRL_DART_API_KEY: ""
     volumes:
       - app_data:/app/data
     command: ["worker", "run", "--job-type", "parse_filing"]

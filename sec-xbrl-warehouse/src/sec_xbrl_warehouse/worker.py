@@ -19,6 +19,7 @@ from sec_xbrl_warehouse.exceptions import (
     ConfigurationError,
     DiskReserveError,
     SchemaDriftError,
+    SourceRateLimited,
     SourceRetryDeferred,
     StateTransitionError,
     UnsupportedSourceError,
@@ -107,7 +108,10 @@ async def runtime_services(
     from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
     from sec_xbrl_warehouse.mapping.postgres_repository import PostgresMappingRepository
     from sec_xbrl_warehouse.sources.base import SourceAdapter
+    from sec_xbrl_warehouse.sources.dart import DART_SOURCE, DartSourceAdapter
+    from sec_xbrl_warehouse.sources.edinet import EDINET_SOURCE, EdinetSourceAdapter
     from sec_xbrl_warehouse.sources.esef import ESEF_SOURCE, EsefSourceAdapter
+    from sec_xbrl_warehouse.sources.keyed import required_key
     from sec_xbrl_warehouse.sources.registry import SourceRegistry, source_policies
     from sec_xbrl_warehouse.sources.sec import SecSourceAdapter
 
@@ -117,6 +121,15 @@ async def runtime_services(
     unimplemented = [code for code in settings.enabled_sources if code not in policies]
     if unimplemented:
         raise ConfigurationError(f"No adapter is implemented for enabled sources {unimplemented}")
+    # EDINET and DART need the operator's own API key; a worker that would send their
+    # requests refuses to start without it (parse-only workers never send any).
+    keyed: tuple[tuple[str, Any, Any, str], ...] = (
+        (EDINET_SOURCE, EdinetSourceAdapter, settings.edinet_api_key, "EDINET"),
+        (DART_SOURCE, DartSourceAdapter, settings.dart_api_key, "DART"),
+    )
+    for code, _, api_key, name in keyed:
+        if code in settings.enabled_sources and requires_network(job_types, code):
+            required_key(api_key, name, f"XBRL_{name}_API_KEY")
     settings.ensure_directories()
     sources = load_yaml(settings.config_dir / "sources.yml")["sec"]
     store = create_object_store(settings)
@@ -196,6 +209,21 @@ async def runtime_services(
                         )
                     )
                 adapters.append(EsefSourceAdapter(settings, esef_http, store, control))
+            for code, adapter_type, _, _ in keyed:
+                if code not in settings.enabled_sources:
+                    continue
+                keyed_http: SourceHttpClient | None = None
+                if requires_network(job_types, code):
+                    # The regulators get the same operator identity as the SEC.
+                    settings.assert_sec_identity()
+                    keyed_http = await stack.enter_async_context(
+                        SourceHttpClient(
+                            settings,
+                            policies[code],
+                            egress_lock=SourceEgressLock(settings, source=code),
+                        )
+                    )
+                adapters.append(adapter_type(settings, keyed_http, store, control))
             registry = SourceRegistry(adapters, packages=packages)
             services: dict[str, Any] = {
                 "control": control,
@@ -774,6 +802,7 @@ def is_retryable_exception(exc: BaseException) -> bool:
         (
             EgressBusyError,
             DiskReserveError,
+            SourceRateLimited,
             SourceRetryDeferred,
             TimeoutError,
             ConnectionError,

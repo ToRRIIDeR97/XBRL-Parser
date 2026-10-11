@@ -510,7 +510,7 @@ def test_policies_have_disjoint_hosts(tmp_path) -> None:
 
     settings = _settings(tmp_path)
     policies = source_policies(settings)
-    assert set(policies) == {"sec", "esef"}
+    assert set(policies) == {"sec", "esef", "edinet", "dart"}
     assert (
         policies["esef"].allowed_hosts
         == ESEF_POLICY.allowed_hosts

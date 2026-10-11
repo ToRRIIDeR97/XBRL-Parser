@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import random
 import re
 from collections.abc import AsyncIterator
@@ -36,7 +37,7 @@ from sec_xbrl_warehouse.infrastructure.http.egress_lock import EgressLock
 from sec_xbrl_warehouse.infrastructure.http.rate_limiter import AsyncRateLimiter
 from sec_xbrl_warehouse.logging import get_logger
 from sec_xbrl_warehouse.observability.metrics import SEC_REQUESTS, SOURCE_BYTES
-from sec_xbrl_warehouse.sources.base import SourcePolicy
+from sec_xbrl_warehouse.sources.base import SourcePolicy, redact_params
 
 logger = get_logger(__name__)
 
@@ -66,6 +67,8 @@ class SourceHttpClient:
         self._egress_held = False
         self._egress_guard = asyncio.Lock()
         self.allowed_hosts = frozenset(policy.allowed_hosts)
+        if policy.secret_params:
+            _redact_library_logs(policy.secret_params)
         self.headers = dict(policy.headers)
         self.rate_limiter = AsyncRateLimiter(policy.max_requests_per_second)
         self._semaphore = asyncio.Semaphore(policy.max_concurrency)
@@ -111,6 +114,16 @@ class SourceHttpClient:
 
     def _deferred(self, retry_at: datetime) -> SourceRetryDeferred:
         return SourceRetryDeferred(retry_at, self.label)
+
+    def _show(self, text: object) -> str:
+        """`text` with the policy's credential parameters masked (logs, errors, files)."""
+        return self.policy.redact(str(text))
+
+    def _scrub(self, exc: BaseException) -> BaseException:
+        """Mask credentials in a library exception before it is chained or logged."""
+        if self.policy.secret_params:
+            exc.args = tuple(self._show(arg) if isinstance(arg, str) else arg for arg in exc.args)
+        return exc
 
     def _validate_url(self, url: str) -> None:
         try:
@@ -177,7 +190,7 @@ class SourceHttpClient:
                         response = await self._buffered_request(method, url, **kwargs)
                     _observe_response(method, url, response, self.policy.code)
                 if response.is_redirect:
-                    raise self.error(f"Too many {self.label} redirects: {url}")
+                    raise self.error(f"Too many {self.label} redirects: {self._show(url)}")
                 self._validate_url(str(response.url))
                 if response.status_code not in _RETRYABLE_STATUSES:
                     response.raise_for_status()
@@ -187,17 +200,18 @@ class SourceHttpClient:
                 delay = self._retry_delay(response.headers.get("Retry-After"), attempt)
                 logger.warning(
                     f"{self.policy.code}_request_retry",
-                    url=url,
+                    url=self._show(url),
                     status=response.status_code,
                     attempt=attempt + 1,
                     delay_seconds=delay,
                 )
                 last_error = self.error(
-                    f"Retryable {self.label} response {response.status_code}: {url}"
+                    f"Retryable {self.label} response {response.status_code}: {self._show(url)}"
                 )
                 await response.aclose()
                 await asyncio.sleep(delay)
             except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
+                self._scrub(exc)
                 if not isinstance(exc, httpx.HTTPStatusError):
                     SEC_REQUESTS.labels(
                         host=urlparse(url).hostname or "unknown", status="error"
@@ -207,21 +221,24 @@ class SourceHttpClient:
                     status = exc.response.status_code
                     if status not in _RETRYABLE_STATUSES:
                         raise self.error(
-                            f"{self.label} request failed permanently: {url}: {exc}"
+                            f"{self.label} request failed permanently: "
+                            f"{self._show(url)}: {self._show(exc)}"
                         ) from exc
                 if attempt >= self.settings.sec_max_retries:
                     break
                 delay = min(60.0, (2**attempt) + random.random())
                 logger.warning(
                     f"{self.policy.code}_request_exception_retry",
-                    url=url,
+                    url=self._show(url),
                     attempt=attempt + 1,
                     delay_seconds=delay,
-                    error=str(exc),
+                    error=self._show(exc),
                 )
                 await asyncio.sleep(delay)
 
-        raise self.error(f"{self.label} request exhausted retries: {url}: {last_error}")
+        raise self.error(
+            f"{self.label} request exhausted retries: {self._show(url)}: {self._show(last_error)}"
+        )
 
     async def get_text(self, url: str) -> str:
         response = await self._request("GET", url)
@@ -232,9 +249,9 @@ class SourceHttpClient:
         try:
             value = response.json()
         except json.JSONDecodeError as exc:
-            raise self.error(f"{self.label} returned invalid JSON for {url}") from exc
+            raise self.error(f"{self.label} returned invalid JSON for {self._show(url)}") from exc
         if not isinstance(value, dict):
-            raise self.error(f"Expected a JSON object from {url}")
+            raise self.error(f"Expected a JSON object from {self._show(url)}")
         return value
 
     async def get_bytes(self, url: str) -> bytes:
@@ -283,9 +300,11 @@ class SourceHttpClient:
                 prior = json.loads(sidecar.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 prior = {}
+        # The sidecar records the URL with credential parameters masked.
+        shown = self._show(url)
         try:
             reusable_partial = (
-                prior.get("url") == url and int(prior.get("size", -1)) == partial.stat().st_size
+                prior.get("url") == shown and int(prior.get("size", -1)) == partial.stat().st_size
             )
         except (OSError, TypeError, ValueError):
             reusable_partial = False
@@ -329,7 +348,7 @@ class SourceHttpClient:
                     sha256 = digest.hexdigest()
                     if expected_sha256 and sha256.lower() != expected_sha256.lower():
                         raise ArtifactIntegrityError(
-                            f"SHA-256 mismatch for complete partial {url}: {sha256}"
+                            f"SHA-256 mismatch for complete partial {shown}: {sha256}"
                         )
                     partial.replace(destination)
                     sidecar.unlink(missing_ok=True)
@@ -337,7 +356,7 @@ class SourceHttpClient:
                 partial.unlink(missing_ok=True)
                 sidecar.unlink(missing_ok=True)
                 raise ArtifactIntegrityError(
-                    f"{self.label} rejected an invalid byte range for {url}"
+                    f"{self.label} rejected an invalid byte range for {shown}"
                 )
             else:
                 response.raise_for_status()
@@ -347,17 +366,17 @@ class SourceHttpClient:
                     or not content_range
                     or content_range[0] != resume_from
                 ):
-                    raise ArtifactIntegrityError(f"Malformed resume response for {url}")
+                    raise ArtifactIntegrityError(f"Malformed resume response for {shown}")
                 start, end, expected_total = content_range
                 content_length = _positive_int(response.headers.get("content-length"))
                 if content_length is not None and content_length != end - start + 1:
                     raise ArtifactIntegrityError(
-                        f"Malformed Content-Length for resumed download: {url}"
+                        f"Malformed Content-Length for resumed download: {shown}"
                     )
                 for name in ("etag", "last-modified"):
                     if prior.get(name) and response.headers.get(name) != prior[name]:
                         raise ArtifactIntegrityError(
-                            f"{name} changed during resumed download: {url}"
+                            f"{name} changed during resumed download: {shown}"
                         )
             if expected_total is not None and expected_total > byte_limit:
                 raise ArtifactIntegrityError("Download exceeds configured byte limit")
@@ -367,7 +386,7 @@ class SourceHttpClient:
                 sidecar.write_text,
                 json.dumps(
                     {
-                        "url": url,
+                        "url": shown,
                         "size": total,
                         "etag": response.headers.get("etag"),
                         "last-modified": response.headers.get("last-modified"),
@@ -391,7 +410,7 @@ class SourceHttpClient:
                         sidecar.write_text,
                         json.dumps(
                             {
-                                "url": url,
+                                "url": shown,
                                 "size": total,
                                 "etag": response.headers.get("etag"),
                                 "last-modified": response.headers.get("last-modified"),
@@ -402,12 +421,12 @@ class SourceHttpClient:
 
         if expected_total is not None and total != expected_total:
             raise ArtifactIntegrityError(
-                f"Incomplete download for {url}: received {total} of {expected_total} bytes"
+                f"Incomplete download for {shown}: received {total} of {expected_total} bytes"
             )
         sha256 = digest.hexdigest()
         if expected_sha256 and sha256.lower() != expected_sha256.lower():
             raise ArtifactIntegrityError(
-                f"SHA-256 mismatch for {url}: expected {expected_sha256}, got {sha256}"
+                f"SHA-256 mismatch for {shown}: expected {expected_sha256}, got {sha256}"
             )
         partial.replace(destination)
         sidecar.unlink(missing_ok=True)
@@ -445,15 +464,17 @@ class SourceHttpClient:
                         await response.aclose()
                         current = redirected
                     if response is None or response.is_redirect:
-                        raise self.error(f"Too many {self.label} redirects: {url}")
+                        raise self.error(f"Too many {self.label} redirects: {self._show(url)}")
                     self._validate_url(str(response.url))
                     if response.status_code not in _RETRYABLE_STATUSES:
                         if response.status_code >= 400 and response.status_code != 416:
                             try:
                                 response.raise_for_status()
                             except httpx.HTTPStatusError as exc:
+                                self._scrub(exc)
                                 raise self.error(
-                                    f"{self.label} request failed permanently: {current}: {exc}"
+                                    f"{self.label} request failed permanently: "
+                                    f"{self._show(current)}: {self._show(exc)}"
                                 ) from exc
                         try:
                             yielded = True
@@ -462,10 +483,12 @@ class SourceHttpClient:
                             await response.aclose()
                         return
                     last_error = self.error(
-                        f"Retryable {self.label} response {response.status_code}: {current}"
+                        f"Retryable {self.label} response {response.status_code}: "
+                        f"{self._show(current)}"
                     )
                     await response.aclose()
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    self._scrub(exc)
                     if yielded:
                         raise
                     SEC_REQUESTS.labels(
@@ -482,7 +505,8 @@ class SourceHttpClient:
                         )
                     )
             raise self.error(
-                f"{self.label} streaming request exhausted retries: {url}: {last_error}"
+                f"{self.label} streaming request exhausted retries: {self._show(url)}: "
+                f"{self._show(last_error)}"
             )
 
     def _retry_delay(self, header: str | None, attempt: int) -> float:
@@ -509,6 +533,33 @@ class SourceHttpClient:
         if delay > 60:
             raise self._deferred(datetime.now(UTC) + timedelta(seconds=delay))
         return float(delay)
+
+
+_LOG_SECRET_PARAMS: set[str] = set()
+
+
+class _RedactSecretParams(logging.Filter):
+    """Masks credential query parameters in httpx/httpcore log records (request URLs)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if _LOG_SECRET_PARAMS:
+            message = record.getMessage()
+            redacted = redact_params(message, _LOG_SECRET_PARAMS)
+            if redacted != message:
+                record.msg, record.args = redacted, None
+        return True
+
+
+_LOG_FILTER = _RedactSecretParams()
+
+
+def _redact_library_logs(names: frozenset[str]) -> None:
+    """Install the redaction filter on the HTTP libraries' loggers (idempotent)."""
+    _LOG_SECRET_PARAMS.update(names)
+    for name in ("httpx", "httpcore"):
+        library = logging.getLogger(name)
+        if _LOG_FILTER not in library.filters:
+            library.addFilter(_LOG_FILTER)
 
 
 def _download_headers(response: httpx.Response) -> dict[str, str]:

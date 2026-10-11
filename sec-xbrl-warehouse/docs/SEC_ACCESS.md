@@ -25,8 +25,9 @@ source's client has its own host allowlist, so it can't send requests to SEC hos
 and its own egress lock (`xbrl:<source>-egress`), so it neither takes nor waits for
 `xbrl:sec-egress`. SEC traffic still comes only from the SEC adapter (discovery and
 `fetch_filing`), bulk downloads, `catalog sync`, `taxonomy sync`, and online Arelle.
-The `esef` client (filings.xbrl.org) sends the same `XBRL_SEC_USER_AGENT` but none of
-its requests count against the SEC rate.
+The `esef` (filings.xbrl.org), `edinet` (api.edinet-fsa.go.jp) and `dart`
+(opendart.fss.or.kr) clients send the same `XBRL_SEC_USER_AGENT` but none of their
+requests count against the SEC rate.
 
 ## One SEC-active process (enforced)
 

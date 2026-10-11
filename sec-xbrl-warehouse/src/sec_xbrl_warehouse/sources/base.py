@@ -8,6 +8,7 @@ Storage, extraction, validation, and publishing stay source-neutral.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -32,12 +33,38 @@ class SourcePolicy:
     max_requests_per_second: float
     max_concurrency: int
     headers: dict[str, str] = field(default_factory=dict)
+    # Query parameters that carry a credential (EDINET `Subscription-Key`, DART
+    # `crtfc_key`): the client masks their values in every URL it logs, raises, or
+    # writes to disk.
+    secret_params: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not is_source_code(self.code):
             raise ValueError(f"Invalid source code: {self.code!r}")
         if self.max_requests_per_second <= 0 or self.max_concurrency <= 0:
             raise ValueError(f"Source {self.code} needs a positive rate and concurrency")
+
+    def redact(self, text: str) -> str:
+        """`text` with every `secret_params` value masked (see `redact_params`)."""
+        return redact_params(text, self.secret_params)
+
+
+REDACTED = "[REDACTED]"
+
+
+def redact_params(text: str, names: Iterable[str]) -> str:
+    """Mask the values of the named query parameters wherever they appear in `text`.
+
+    Matches `name=value` after `?`, `&`, `;`, whitespace, a quote, or the start of the
+    text, case-insensitively, also in percent-encoded form (`name%3Dvalue`), and
+    masks the value up to the next delimiter.
+    """
+    for name in names:
+        pattern = re.compile(
+            rf"(?i)((?:^|[?&;\s'\"(]|%26|%3F){re.escape(name)}(?:=|%3D))[^&;#\s'\"<>)]*"
+        )
+        text = pattern.sub(rf"\g<1>{REDACTED}", text)
+    return text
 
 
 def check_disjoint_hosts(policies: Iterable[SourcePolicy]) -> None:

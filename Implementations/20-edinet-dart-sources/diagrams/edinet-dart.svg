@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <title>Plan 20: EDINET and DART adapters on the plan 18 registry</title>
+  <rect width="960" height="330" fill="#ffffff"/>
+  <defs>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f5fbf"/>
+    </marker>
+  </defs>
+  <text x="20" y="28" font-size="16" font-weight="bold" fill="#222">Two API-key sources (new, blue); registry, storage and parse unchanged (grey)</text>
+
+  <rect x="20" y="50" width="210" height="110" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="72" font-weight="bold" fill="#222">EDINET API v2 (FSA)</text>
+  <text x="32" y="92" fill="#222">documents.json?date=&amp;type=2</text>
+  <text x="32" y="110" fill="#222">documents/{docID}?type=1</text>
+  <text x="32" y="128" fill="#222">Subscription-Key (secret)</text>
+  <text x="32" y="146" fill="#222">one day per list call</text>
+
+  <rect x="270" y="50" width="300" height="110" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="282" y="72" font-weight="bold" fill="#1f5fbf">EdinetSourceAdapter (AC-1, AC-2)</text>
+  <text x="282" y="92" fill="#1f5fbf">key edinet-&lt;docID&gt;, form = docTypeCode</text>
+  <text x="282" y="110" fill="#1f5fbf">xbrlFlag=1, not withdrawn, ≤ 31 days</text>
+  <text x="282" y="128" fill="#1f5fbf">entrypoint XBRL/PublicDoc/*.xbrl</text>
+  <text x="282" y="146" fill="#1f5fbf">fiscal: jpdei, else doc type (AC-6)</text>
+
+  <rect x="20" y="190" width="210" height="110" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="212" font-weight="bold" fill="#222">OpenDART (FSS)</text>
+  <text x="32" y="232" fill="#222">list.json pblntf_ty=A, paged</text>
+  <text x="32" y="250" fill="#222">fnlttXbrl.xml (original XBRL zip)</text>
+  <text x="32" y="268" fill="#222">crtfc_key (secret)</text>
+  <text x="32" y="286" fill="#222">20,000 calls/day; 020 = limit</text>
+
+  <rect x="270" y="190" width="300" height="110" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="282" y="212" font-weight="bold" fill="#1f5fbf">DartSourceAdapter (AC-4, AC-5)</text>
+  <text x="282" y="232" fill="#1f5fbf">key dart-&lt;rcept_no&gt;, form = reprt_code</text>
+  <text x="282" y="250" fill="#1f5fbf">11011 FY, 11012 H1/Q2, 11013 Q1, 11014 Q3</text>
+  <text x="282" y="268" fill="#1f5fbf">[기재정정] → amendment; 020 → retry later</text>
+  <text x="282" y="286" fill="#1f5fbf">fiscal from report code (AC-6)</text>
+
+  <rect x="620" y="50" width="320" height="110" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="632" y="72" font-weight="bold" fill="#1f5fbf">Secrets (AC-3)</text>
+  <text x="632" y="92" fill="#1f5fbf">XBRL_EDINET_API_KEY, XBRL_DART_API_KEY</text>
+  <text x="632" y="110" fill="#1f5fbf">SecretStr; never in FilingRef, manifest,</text>
+  <text x="632" y="128" fill="#1f5fbf">object keys, job payloads, logs or errors</text>
+  <text x="632" y="146" fill="#1f5fbf">missing key → ConfigurationError</text>
+
+  <rect x="620" y="190" width="320" height="110" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="632" y="212" font-weight="bold" fill="#222">Registry, worker, plan 17 storage, Arelle</text>
+  <text x="632" y="232" fill="#222">locks xbrl:edinet-egress, xbrl:dart-egress</text>
+  <text x="632" y="250" fill="#1f5fbf">EDINET taxonomies (jppfs, jpcrp, jpdei)</text>
+  <text x="632" y="268" fill="#1f5fbf">and DART/K-IFRS: pinned by operator (AC-8)</text>
+  <text x="632" y="286" fill="#1f5fbf">canary per source (AC-9, manual)</text>
+
+  <line x1="230" y1="105" x2="268" y2="105" stroke="#1f5fbf" marker-end="url(#b)"/>
+  <line x1="230" y1="245" x2="268" y2="245" stroke="#1f5fbf" marker-end="url(#b)"/>
+  <line x1="570" y1="245" x2="618" y2="245" stroke="#1f5fbf" marker-end="url(#b)"/>
+  <line x1="570" y1="105" x2="618" y2="220" stroke="#1f5fbf" marker-end="url(#b)"/>
+</svg>

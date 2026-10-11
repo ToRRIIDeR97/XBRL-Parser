@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from typing import Any
 
 from sec_xbrl_warehouse.domain.models import (
-    Company,
     FilingPackageManifest,
     FilingRef,
     ValidationIssue,
@@ -48,8 +47,9 @@ class SecSourceAdapter:
         self.downloader = downloader
         self.submissions = submissions
         self.daily_index = daily_index
-        # Daily indexes carry no company data: with `http` and a `companies` lookup
-        # (`known_company_ciks`, `stale_company_ciks`), new or stale CIKs are fetched.
+        # Daily indexes carry no company data: with `http` and a `companies` store
+        # (`known_company_ciks`, `stale_company_ciks`, `upsert_company`), new or stale
+        # CIKs are fetched and stored here, one at a time.
         self.http = http
         self.companies = companies
         self.data_api_base = data_api_base
@@ -72,19 +72,19 @@ class SecSourceAdapter:
         filings = await self._require(self.daily_index).discover_range(
             request.filed_from, request.filed_to, request.forms
         )
-        companies: tuple[Company, ...] = ()
-        if self.http is not None and self.companies is not None:
-            collected = _CollectedCompanies(self.companies)
-            await enrich_companies(
-                collected,
-                self.http,
-                ciks=[filing.cik for filing in filings],
-                as_of=request.filed_to,
-                data_api_base=self.data_api_base,
-                max_age_days=self.company_refresh_days,
-            )
-            companies = tuple(collected.stored)
-        return DiscoveryResult(filings=tuple(filings), companies=companies)
+        if self.http is None or self.companies is None:
+            return DiscoveryResult(filings=tuple(filings))
+        # Stored one by one as fetched, so a retry after a partial failure skips the
+        # CIKs already stored instead of fetching the whole batch again.
+        stored = await enrich_companies(
+            self.companies,
+            self.http,
+            ciks=[filing.cik for filing in filings],
+            as_of=request.filed_to,
+            data_api_base=self.data_api_base,
+            max_age_days=self.company_refresh_days,
+        )
+        return DiscoveryResult(filings=tuple(filings), stored_companies=stored)
 
     async def download_package(self, filing: FilingRef) -> FilingPackageManifest:
         manifest: FilingPackageManifest = await self._require(self.downloader).download_package(
@@ -107,20 +107,3 @@ class SecSourceAdapter:
                 "SEC-enabled worker"
             )
         return collaborator
-
-
-class _CollectedCompanies:
-    """Answers stored-company lookups and collects the companies to store."""
-
-    def __init__(self, lookup: Any) -> None:
-        self.lookup = lookup
-        self.stored: list[Company] = []
-
-    async def known_company_ciks(self, ciks: Any) -> Any:
-        return await self.lookup.known_company_ciks(ciks)
-
-    async def stale_company_ciks(self, ciks: Any, fetched_before: Any) -> Any:
-        return await self.lookup.stale_company_ciks(ciks, fetched_before)
-
-    async def upsert_company(self, company: Company) -> None:
-        self.stored.append(company)

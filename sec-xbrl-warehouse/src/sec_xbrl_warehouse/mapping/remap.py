@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import JobType
+from sec_xbrl_warehouse.domain.models import ValidationIssue
 from sec_xbrl_warehouse.domain.ports import ObjectStore
 from sec_xbrl_warehouse.domain.xbrl import XbrlExtractionBundle
 from sec_xbrl_warehouse.exceptions import XbrlExtractionError
@@ -58,10 +59,25 @@ async def enqueue_canonical_remap(
     return created
 
 
+FiscalFocus = Callable[
+    [XbrlExtractionBundle], tuple[XbrlExtractionBundle, Sequence[ValidationIssue]]
+]
+
+
 async def load_published_extraction(
-    control: Any, object_store: ObjectStore, settings: Settings, accession: str, revision: int
+    control: Any,
+    object_store: ObjectStore,
+    settings: Settings,
+    accession: str,
+    revision: int,
+    *,
+    fiscal_focus: FiscalFocus | None = None,
 ) -> XbrlExtractionBundle:
-    """Load the saved (silver) extraction of a completed filing ingestion, checksum-verified."""
+    """Load the saved (silver) extraction of a completed filing ingestion, checksum-verified.
+
+    Filing fiscal fields come from `fiscal_focus` (the worker passes
+    `SourceRegistry.fiscal_focus`, as parse does); without it, from SEC dei facts.
+    """
     pointer = await control.extraction_checkpoint(accession, revision)
     if pointer is None:
         raise XbrlExtractionError(
@@ -81,7 +97,10 @@ async def load_published_extraction(
         bundle = await asyncio.to_thread(read_bundle, path, settings.extraction_max_bytes)
     if bundle.filing.accession != accession or bundle.extraction_revision != revision:
         raise XbrlExtractionError("Saved extraction belongs to a different filing or revision")
-    # The saved extraction keeps discovery metadata; derive the dei fiscal fields
-    # as ingestion does, so canonical facts carry them.
+    # The saved extraction keeps discovery metadata; derive the fiscal fields as
+    # ingestion does, so canonical facts carry them. Diagnostics were recorded by parse.
+    if fiscal_focus is not None:
+        focused, _ = fiscal_focus(bundle)
+        return focused
     enriched, _ = derive_fiscal_focus(bundle)
     return bundle.model_copy(update={"filing": enriched})

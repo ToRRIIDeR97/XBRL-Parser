@@ -286,4 +286,52 @@ unimplemented enabled source, `requires_network`, prefix edges);
 - `docs/diagrams/activity-filing.svg` still describes the SEC path only; it remains
   accurate for the one implemented source.
 
+#### Corrections (round 2)
+
+Fixes for the verifier's findings, on top of a5ac1aa. `verification/` still not read.
+
+- **D1 (AC-3).** `SourceEgressLock._busy` raises `SecEgressBusyError` (same SEC
+  message) for any lock whose source is `sec`, so `SourceEgressLock(s, source="sec")`
+  and `SecEgressLock(s)` behave the same; the `SecEgressLock` override is gone. The
+  integration test `test_source_egress_locks_are_per_source_and_retakable` now also
+  checks a busy `SourceEgressLock(source="sec")` raises `SecEgressBusyError`.
+- **D2 (SEC behavior identical; round-1 deviation on company storage).** The SEC
+  adapter writes daily-index companies itself, one per submissions request, through
+  the same mirrored PostgreSQL + ClickHouse sink as before (`_MirroredCompanies`,
+  passed by `runtime_services` and by the legacy-services path), via the unchanged
+  `enrich_companies`. `_CollectedCompanies` is removed. `DiscoveryResult` gains
+  `stored_companies: int | None = None` (companies an adapter stored itself); the
+  worker reports `companies_stored` when companies were returned or
+  `stored_companies` is set, so SEC daily-index discovery again reports
+  `companies_stored: 0` when nothing new was stored. The round-1 result-shape
+  deviation is resolved. Tests: failure-then-retry with 3 new CIKs and a
+  `TimeoutError` on the third request, for both the registry and legacy-services
+  wiring (attempt 1: 3 requests, CIKs 1 and 2 stored, nothing enqueued; attempt 2:
+  1 more request, 4 in total, all 3 stored, 3 fetch jobs); plus the all-known case
+  (`companies_stored: 0`, no requests).
+- **D3 (no fallback to SEC).** `_discover` defaults to `sec` only when the `source`
+  key is missing; `""`, `None`, a malformed code or a non-string raises
+  `UnsupportedSourceError` (not retryable) before any adapter call. Test parametrised
+  over those four values.
+- **Ruling (c).** `load_published_extraction` takes `fiscal_focus=`; `map_canonical`
+  passes `SourceRegistry.fiscal_focus` when the worker has a registry, like parse.
+  Without one (CLI or legacy callers) it keeps the SEC dei path. Test: `map_canonical`
+  uses the registry's adapter, and the SEC adapter through the registry returns the
+  same bundle as the default path. The round-1 limitation about remap is resolved.
+- Docs: ARCHITECTURE "Job orchestration" paragraph updated for all three points.
+
+| Command | Result |
+| --- | --- |
+| Acceptance set (`RUN_XBRL_INTEGRATION=1`) | 9 passed |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` | pass |
+| `ruff format --check .` | pass (186 files) |
+| `mypy src` | pass (85 files) |
+| `pytest -m "not integration"` | 493 passed, 1 skipped (sec-2024.zip not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 51 passed |
+
+Pre-existing tests are still unchanged; round-2 test changes are new tests plus one
+added assertion in the round-1 integration test.
+
 ### Verifier record

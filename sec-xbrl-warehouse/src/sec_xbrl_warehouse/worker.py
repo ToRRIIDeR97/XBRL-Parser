@@ -171,7 +171,7 @@ async def runtime_services(
                             else None
                         ),
                         http=http,
-                        companies=control,
+                        companies=_MirroredCompanies(control, warehouse),
                         data_api_base=sources["data_api_base"],
                         company_refresh_days=settings.company_refresh_days,
                     )
@@ -485,8 +485,15 @@ def build_handlers(
             accession = str(job.payload["accession"])
             revision = int(job.payload["extraction_revision"])
             run_settings = settings or Settings()
+            registry = services.get("sources")
             bundle = await load_published_extraction(
-                services["control"], services["object_store"], run_settings, accession, revision
+                services["control"],
+                services["object_store"],
+                run_settings,
+                accession,
+                revision,
+                # Same per-source fiscal focus as parse (SEC: dei facts).
+                fiscal_focus=registry.fiscal_focus if registry is not None else None,
             )
             mapped = 0
             async for canonical in mapper.map_batches(
@@ -519,10 +526,13 @@ def build_handlers(
     if services.get("sources") is not None or services.get("discovery") is not None:
 
         async def _discover(job: JobRecord) -> dict[str, Any] | None:
-            from sec_xbrl_warehouse.domain.sources import filing_source
+            from sec_xbrl_warehouse.domain.sources import filing_source, is_source_code
             from sec_xbrl_warehouse.sources.base import DiscoveryRequest
 
-            source = str(job.payload.get("source") or SEC_SOURCE)
+            # Only a missing key means SEC; an empty or malformed value never falls back.
+            source = job.payload.get("source", SEC_SOURCE)
+            if not is_source_code(source):
+                raise UnsupportedSourceError(f"Invalid discovery source: {source!r}")
             # An unknown or disabled source raises `UnsupportedSourceError` (never retried).
             adapter = _discovery_adapter(services, settings, source)
             forms = job.payload.get("forms")
@@ -553,7 +563,8 @@ def build_handlers(
                 companies = _MirroredCompanies(services["control"], services.get("warehouse"))
                 for company in found.companies:
                     await companies.upsert_company(company)
-                result["companies_stored"] = len(found.companies)
+            if found.companies or found.stored_companies is not None:
+                result["companies_stored"] = len(found.companies) + (found.stored_companies or 0)
             for filing in filings:
                 await services["control"].enqueue_job(
                     job_type=JobType.FETCH_FILING.value,
@@ -587,7 +598,11 @@ def _discovery_adapter(services: dict[str, Any], settings: Settings | None, sour
         submissions=services.get("submissions"),
         daily_index=services.get("discovery"),
         http=http,
-        companies=services.get("control"),
+        companies=(
+            _MirroredCompanies(services["control"], services.get("warehouse"))
+            if services.get("control") is not None
+            else None
+        ),
         data_api_base=services.get("data_api_base", "https://data.sec.gov"),
         company_refresh_days=(
             (settings or Settings()).company_refresh_days if http is not None else None

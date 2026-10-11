@@ -945,6 +945,9 @@ async def test_source_egress_locks_are_per_source_and_retakable(
         await demo_second.acquire()  # a released lock can be retaken
         await sec_holder.release()
         await sec_second.acquire()
+        # Any lock on the sec source raises the SEC error, whichever class built it.
+        with pytest.raises(SecEgressBusyError):
+            await sec_holder.acquire()
     finally:
         for lock in (sec_holder, sec_second, demo_holder, demo_second):
             await lock.release()

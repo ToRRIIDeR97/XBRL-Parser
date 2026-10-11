@@ -56,10 +56,16 @@ class DiscoveryRequest:
 
 @dataclass(frozen=True)
 class DiscoveryResult:
-    """Filings to fetch and the companies the same requests described."""
+    """Filings to fetch and the companies the same requests described.
+
+    The worker stores `companies`. An adapter that stores companies itself while it
+    discovers (so a retry after a partial failure skips them, as SEC daily-index
+    enrichment does) reports how many in `stored_companies`.
+    """
 
     filings: tuple[FilingRef, ...]
     companies: tuple[Company, ...] = ()
+    stored_companies: int | None = None
 
 
 class SourceAdapter(Protocol):

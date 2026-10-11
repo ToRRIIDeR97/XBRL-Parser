@@ -182,9 +182,13 @@ network workers. Legacy `ingest_filing` jobs run both steps in one job.
 
 `discover_filings` reads `payload["source"]` (default `sec`) and calls that adapter
 with a `DiscoveryRequest` (a legacy `cik` payload becomes `entity`). It stores the
-companies the adapter returns, refuses filings whose key belongs to another source
-(`ValueError`, permanent), and enqueues `fetch:<filing key>:<revision>` jobs. A source
-that isn't enabled fails with `UnsupportedSourceError` and is never retried.
+companies the adapter returns (the SEC adapter stores daily-index companies itself,
+one per submissions request, so a retried run skips those already stored), refuses
+filings whose key belongs to another source (`ValueError`, permanent), and enqueues
+`fetch:<filing key>:<revision>` jobs. Only a missing `source` means `sec`; an empty,
+malformed, or disabled source fails with `UnsupportedSourceError` and is never
+retried. `map_canonical` takes filing fiscal fields from `SourceRegistry.fiscal_focus`,
+as `parse_filing` does.
 
 This keeps the local deployment small and avoids Redis/Kafka until throughput evidence supports adding them.
 

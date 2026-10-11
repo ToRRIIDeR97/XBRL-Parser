@@ -404,3 +404,160 @@ def test_source_prefixes_strip_schemes_and_tolerate_missing_entries(tmp_path) ->
     registry.write_text("packages: []\nsource_required_prefixes:\n  sec: one\n", encoding="utf-8")
     with pytest.raises(ConfigurationError):
         required_prefixes(_settings(config_dir=config))
+
+
+# Round 2 corrections
+
+
+def _sec_filing(cik: int) -> FilingRef:
+    accession = f"{cik:010d}-24-000001"
+    return _filing(accession, cik)
+
+
+class _CompanyStore(_Control):
+    """Control double whose company lookups see what was stored so far."""
+
+    async def known_company_ciks(self, ciks):
+        return {company.cik for company in self.companies} & set(ciks)
+
+    async def stale_company_ciks(self, ciks, fetched_before):
+        return set()
+
+
+def _flaky_submissions(fail_on_call: int):
+    class _Http:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        async def get_json(self, url):
+            self.urls.append(url)
+            if len(self.urls) == fail_on_call:
+                raise TimeoutError("submissions timed out")
+            cik = int(url.rsplit("CIK", 1)[1].split(".")[0])
+            return {"cik": str(cik), "name": f"Company {cik}"}
+
+    return _Http()
+
+
+class _ThreeCiks:
+    async def discover_range(self, filed_from, filed_to, forms):
+        return tuple(_sec_filing(cik) for cik in (1, 2, 3))
+
+
+def _daily_job() -> JobRecord:
+    return _job({"filed_from": "2024-04-01", "filed_to": "2024-04-01"})
+
+
+@pytest.mark.parametrize("wiring", ["registry", "legacy"])
+def test_sec_daily_discovery_stores_companies_as_it_goes_across_retries(wiring) -> None:
+    control, http = _CompanyStore(), _flaky_submissions(fail_on_call=3)
+    if wiring == "registry":
+        adapter = SecSourceAdapter(
+            daily_index=_ThreeCiks(), http=http, companies=control, company_refresh_days=30
+        )
+        services = {"control": control, "sources": SourceRegistry([adapter]), "forms": ["10-K"]}
+    else:
+        services = {"control": control, "discovery": _ThreeCiks(), "http": http, "forms": []}
+    discover = build_handlers(settings=_settings(), services=services)[JobType.DISCOVER_FILINGS]
+
+    with pytest.raises(TimeoutError) as failed:
+        asyncio.run(discover(_daily_job()))
+    assert is_retryable_exception(failed.value)
+    # Attempt 1: CIKs 1 and 2 are stored before the third request fails.
+    assert len(http.urls) == 3 and [c.cik for c in control.companies] == [1, 2]
+    assert control.jobs == []
+
+    result = asyncio.run(discover(_daily_job()))
+    # Attempt 2 fetches only the CIK that wasn't stored: 4 requests in total.
+    assert len(http.urls) == 4 and http.urls[-1].endswith("CIK0000000003.json")
+    assert [c.cik for c in control.companies] == [1, 2, 3]
+    assert result == {"filings_enqueued": 3, "companies_stored": 1}
+
+
+def test_sec_daily_discovery_reports_zero_companies_when_all_are_stored() -> None:
+    control = _CompanyStore()
+    control.companies = [Company(cik=cik, name=f"Company {cik}") for cik in (1, 2, 3)]
+    http = _flaky_submissions(fail_on_call=0)
+    adapter = SecSourceAdapter(daily_index=_ThreeCiks(), http=http, companies=control)
+    discover = build_handlers(services={"control": control, "sources": SourceRegistry([adapter])})[
+        JobType.DISCOVER_FILINGS
+    ]
+    assert asyncio.run(discover(_daily_job())) == {"filings_enqueued": 3, "companies_stored": 0}
+    assert http.urls == []
+
+
+@pytest.mark.parametrize("source", ["", None, "Not A Source", 7])
+def test_discovery_never_falls_back_to_sec_for_an_invalid_source(source) -> None:
+    sec = _Adapter("sec")
+    handlers = build_handlers(services={"control": _Control(), "sources": SourceRegistry([sec])})
+    with pytest.raises(UnsupportedSourceError) as raised:
+        asyncio.run(handlers[JobType.DISCOVER_FILINGS](_job({"source": source})))
+    assert not is_retryable_exception(raised.value)
+    assert sec.requests == []
+
+
+def test_map_canonical_takes_fiscal_focus_from_the_registry(tmp_path) -> None:
+    from hashlib import sha256
+
+    from sec_xbrl_warehouse.infrastructure.storage.object_store import LocalObjectStore
+    from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import write_json
+    from sec_xbrl_warehouse.mapping.remap import load_published_extraction
+
+    filing = _sec_filing(320193).model_copy(update={"fiscal_year": 2024})
+    bundle = _bundle(filing, _dei_year("2025"))
+    path = tmp_path / "extraction.json"
+    write_json(bundle, path, 1_000_000)
+    store = LocalObjectStore(tmp_path / "objects", "sec-xbrl")
+    store.put_file(path, "silver/extraction.json")
+    pointer = {
+        "object_key": "silver/extraction.json",
+        "sha256": sha256(path.read_bytes()).hexdigest(),
+    }
+
+    class _Checkpoints:
+        async def extraction_checkpoint(self, accession, revision):
+            return pointer
+
+    class _Mapper:
+        async def map_batches(self, facts, filing, *, extraction_revision, batch_bytes):
+            self.filing = filing
+            yield ()
+
+    class _Warehouse:
+        def insert_canonical_facts(self, facts):
+            return len(facts)
+
+    class _Focus(_Adapter):
+        def fiscal_focus(self, bundle):
+            self.focused.append(bundle.filing.accession)
+            filing = bundle.filing.model_copy(update={"fiscal_year": 2031})
+            return bundle.model_copy(update={"filing": filing}), ()
+
+    settings = _settings(data_dir=tmp_path / "data", temp_dir=tmp_path / "tmp")
+    adapter, mapper = _Focus("sec"), _Mapper()
+    handlers = build_handlers(
+        settings=settings,
+        services={
+            "control": _Checkpoints(),
+            "object_store": store,
+            "mapper": mapper,
+            "warehouse": _Warehouse(),
+            "sources": SourceRegistry([adapter]),
+        },
+    )
+    job = _job({"accession": filing.accession, "extraction_revision": 1})
+    asyncio.run(
+        handlers[JobType.MAP_CANONICAL](job.model_copy(update={"job_type": JobType.MAP_CANONICAL}))
+    )
+    assert adapter.focused == [filing.accession] and mapper.filing.fiscal_year == 2031
+
+    # SEC output is unchanged: the SEC adapter gives what the default path gave.
+    def load(**kwargs):
+        return asyncio.run(
+            load_published_extraction(
+                _Checkpoints(), store, settings, filing.accession, 1, **kwargs
+            )
+        )
+
+    via_registry = load(fiscal_focus=SourceRegistry([SecSourceAdapter()]).fiscal_focus)
+    assert via_registry == load() and via_registry.filing.fiscal_year == 2025

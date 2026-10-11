@@ -142,6 +142,12 @@ class SourceEgressLock:
                 await connection.close()
 
     def _busy(self) -> EgressBusyError:
+        # Any lock on the `sec` source raises the SEC error, whichever class built it.
+        if self.source == SEC_SOURCE:
+            return SecEgressBusyError(
+                "another process holds the SEC egress lock; only one process may "
+                "send SEC requests at a time"
+            )
         return EgressBusyError(
             f"another process holds the {self.source} egress lock; only one process may "
             f"send {self.source} requests at a time"
@@ -170,12 +176,6 @@ class SecEgressLock(SourceEgressLock):
             source=SEC_SOURCE,
             connect_timeout_seconds=connect_timeout_seconds,
             check_interval_seconds=check_interval_seconds,
-        )
-
-    def _busy(self) -> EgressBusyError:
-        return SecEgressBusyError(
-            "another process holds the SEC egress lock; only one process may "
-            "send SEC requests at a time"
         )
 
 

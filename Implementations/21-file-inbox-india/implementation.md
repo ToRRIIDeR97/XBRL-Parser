@@ -344,3 +344,92 @@ read.
 | `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 52 passed |
 
 ### Verifier record
+
+**Verdict: ACCEPT** candidate 020ca85 (13 October 2026), after rejecting 7e4ea4e in
+round 1.
+
+Setup: branch `verify/21-file-inbox-india` at 020ca85. `verification/` was copied
+from the main checkout and matches it (`diff -r`), as do `acceptance/`, `diagrams/`,
+and everything above "Completion evidence" in this file (`cmp`). The main checkout's
+`.env` and `.venv` are symlinked and not committed. No container was touched, alembic
+wasn't run, and nothing was sent to NSE, BSE, MCA, the SEC or a taxonomy host.
+
+**Round 1 (7e4ea4e): REJECT.** Verification 10 passed, 1 failed. The gates matched
+the implementer's table. Three defects:
+
+1. AC-1: `read_index` named only the first missing required column, so
+   `test_ac1_missing_column` failed (header `native_id,company_name,file` gave
+   "missing required column entity_id" and never named `filed_date`).
+2. AC-3: `_bounded_copy` opened the file without `O_NONBLOCK` and checked
+   `S_ISREG` after the open, so a FIFO named `p.xml` in the inbox blocked
+   `download_package` indefinitely (a stuck fetch job). A directory named `d.xml`
+   raised a raw `IsADirectoryError`.
+3. AC-5: `file_problems` called `Path.is_file()`, which raises `OSError` (Errno 63)
+   for a component over 255 bytes, so `inbox check` crashed with a traceback instead
+   of a problem line and summary.
+
+**Round 2 (020ca85).**
+
+| Command (from `sec-xbrl-warehouse/`) | Result |
+| --- | --- |
+| verification set | 11 passed (includes `test_ac1_missing_column`) |
+| acceptance set, 3 runs | 8 passed every run |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` / `ruff format --check .` | pass / 194 files formatted |
+| `mypy src` | pass (90 files) |
+| `pytest -m "not integration"` with the live `.env` | 585 passed, 1 failed (`test_repository_registry_entries_are_on_allowed_hosts`), 1 skipped |
+| same with `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` set to the repository default | 586 passed, 1 skipped (sec-2024.zip not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 52 passed |
+
+The single live-`.env` failure comes from the `.env`'s pre-plan-19 host list, as in
+plans 19 and 20. `git diff 0cebc06..020ca85 -- sec-xbrl-warehouse/tests` removes no
+line; the round-2 diff touches only `sources/inbox.py`, `cli.py`, SECURITY.md,
+OPERATIONS.md, the unit test file and this record.
+
+Throwaway probes (not committed), each with an open-descriptor count before and
+after; no case leaked a descriptor and no refused case stored an object:
+
+- Round-1 cases: a FIFO and a directory named `d.xml` are refused at once as "not a
+  regular file" by both fetch and `inbox check`; a Unix socket is refused ("can't be
+  opened safely"); a 300-character name is an `ArtifactIntegrityError` at fetch and a
+  problem line in `inbox check`; absolute paths, `..`, escaping file and folder
+  symlinks, links to `/dev/zero` and `/dev/tty`, and an `index.csv` symlink leaving
+  the inbox are refused; missing files and folders raise `InboxFileMissing`.
+- Symlinks that stay inside the inbox still work: a file link, a folder link, and an
+  `index.csv` link to another file in the folder all fetch.
+- Races, simulated by swapping after `contained_path` resolved the target and before
+  `open_contained` opened it: a folder swapped for a symlink to an outside folder
+  ("Not a directory"), the file swapped for an outside symlink ("Too many levels of
+  symbolic links"), and `index.csv` swapped for an outside index are all refused.
+- `inbox check` printed escape sequences in `native_id`, `file` and a column name as
+  `\x1b`, `\x07` and `‮` text; the output held no raw ESC byte. A header missing
+  four columns gives four problem lines and `0 valid, 4 problems`, exit 1. It ran
+  with an unreachable PostgreSQL DSN and ClickHouse host without error, so it touches
+  neither.
+
+**Rulings.**
+
+- Deviation 1 (live `.env` host list): accepted, as in plans 19 and 20.
+- Deviation 2 (additions beyond the contract): accepted. Quarantine of packages that
+  fail the archive or instance checks writes only to `quarantine/<code>/` in the
+  object store, never to the inbox; it follows the plan 19/20 convention and the
+  "quarantine drift" rule in `sec-xbrl-warehouse/AGENTS.md`. A one-file package's
+  member is byte-identical to the inbox file and a zip is stored byte-identical
+  (probed), and the inbox's bytes and mtimes don't change.
+- Deviation 3 (`source_url` as `primary_document_url`): accepted. It is only stored;
+  no code path fetches it.
+- Deviation 4 (malformed `sha256` reported by `inbox check` and refused at fetch, not
+  skipped at discovery): accepted.
+- Limitations (`.htm` not an instance suffix, permanent fetch failures, index re-read
+  per fetch): accepted.
+- Round-2 additions: `MissingColumnsError` (a `ValueError`) and `InboxFileMissing`
+  (an `ArtifactIntegrityError`) keep the contract's exception types; accepted. The
+  Windows fallback in `open_contained` (no `dir_fd`, opens the resolved path) keeps a
+  check-then-open window on that platform only; accepted, the platform has no FIFOs
+  and the inbox is operator-written.
+
+Non-blocking notes: row validation doesn't reject control characters in `file` or
+`company_name` (the file is refused at open and the name is stored as data);
+`source_url` can carry a query-string token into `filings.primary_document_url`;
+AC-6 (taxonomy pins) and AC-7 (canary) remain operator steps.

@@ -701,6 +701,16 @@ source_required_prefixes:
   # namespaces. Keep equal to `DART_TAXONOMY_PREFIXES` in sources/dart.py.
   dart:
     - dart.fss.or.kr/
+  # NSE (India, operator inbox): the NSE/BSE financial results taxonomies. Unverified
+  # hosts; confirm them with the canary's schema references. Keep equal to
+  # `NSE_PROFILE.taxonomy_prefixes` in sources/inbox.py.
+  nse:
+    - www.bseindia.com/xbrl/
+    - www.nseindia.com/xbrl/
+  # MCA (India, operator inbox): the MCA Ind AS taxonomy for AOC-4 XBRL. Unverified
+  # host. Keep equal to `MCA_PROFILE.taxonomy_prefixes` in sources/inbox.py.
+  mca:
+    - www.mca.gov.in/XBRL/
 
 network_policy:
   # Filing documents themselves must come from the checksum-addressed filing

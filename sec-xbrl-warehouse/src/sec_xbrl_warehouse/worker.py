@@ -82,6 +82,8 @@ async def runtime_services(
     serves the SEC-only bulk download. A worker without the SEC client that may run
     Arelle in online mode (`XBRL_ARELLE_OFFLINE=false`) still takes the SEC egress
     lock lazily, before its first extraction; with offline Arelle it never touches it.
+    Inbox sources (`nse`, `mca`) read operator files from `XBRL_INBOX_DIR` and get no
+    client or lock.
     """
     from sec_xbrl_warehouse.config_files import load_yaml
     from sec_xbrl_warehouse.infrastructure.http.egress_lock import (
@@ -111,14 +113,20 @@ async def runtime_services(
     from sec_xbrl_warehouse.sources.dart import DART_SOURCE, DartSourceAdapter
     from sec_xbrl_warehouse.sources.edinet import EDINET_SOURCE, EdinetSourceAdapter
     from sec_xbrl_warehouse.sources.esef import ESEF_SOURCE, EsefSourceAdapter
+    from sec_xbrl_warehouse.sources.inbox import INBOX_PROFILES, InboxSourceAdapter
     from sec_xbrl_warehouse.sources.keyed import required_key
     from sec_xbrl_warehouse.sources.registry import SourceRegistry, source_policies
     from sec_xbrl_warehouse.sources.sec import SecSourceAdapter
 
     # Each source plan adds its adapter (with a `SourceHttpClient` and
-    # `SourceEgressLock` when `requires_network`) here.
+    # `SourceEgressLock` when `requires_network`) here. Inbox sources (operator files
+    # on local disk) have no policy, client, or lock.
     policies = source_policies(settings)
-    unimplemented = [code for code in settings.enabled_sources if code not in policies]
+    unimplemented = [
+        code
+        for code in settings.enabled_sources
+        if code not in policies and code not in INBOX_PROFILES
+    ]
     if unimplemented:
         raise ConfigurationError(f"No adapter is implemented for enabled sources {unimplemented}")
     # EDINET and DART need the operator's own API key; a worker that would send their
@@ -224,6 +232,9 @@ async def runtime_services(
                         )
                     )
                 adapters.append(adapter_type(settings, keyed_http, store, control))
+            for code, profile in INBOX_PROFILES.items():
+                if code in settings.enabled_sources:
+                    adapters.append(InboxSourceAdapter(settings, store, control, profile))
             registry = SourceRegistry(adapters, packages=packages)
             services: dict[str, Any] = {
                 "control": control,

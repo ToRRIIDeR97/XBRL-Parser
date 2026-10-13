@@ -148,8 +148,8 @@ them, so discovery usually leaves them NULL.
   so PostgreSQL and the fact rows agree. A period that differs from discovery only in
   case isn't a mismatch.
 - These rules are the SEC adapter's. Each source adapter derives the fields
-  (`SourceRegistry.fiscal_focus`); ESEF's, EDINET's and DART's rules are under their
-  sections below.
+  (`SourceRegistry.fiscal_focus`); ESEF's, EDINET's, DART's and the inbox sources'
+  rules are under their sections below.
 
 ### `xbrl_contexts`
 
@@ -347,6 +347,48 @@ quarter can't be told apart without the year end), are skipped. A leading tag wi
 Both sources store one `companies` row per entity key (`cik`, `name`) from
 discovery. API keys are never part of a filing reference, manifest, object key or
 metadata, job payload, or log record (SECURITY.md).
+
+## Inbox filings (NSE, MCA)
+
+India's XBRL has no API the warehouse may call, so the operator places files in an
+inbox (`sources/inbox.py`, OPERATIONS.md "Operator file inbox"). Each profile is a
+source code: `nse` (NSE/BSE financial results, entity scheme `urn:isin`, ISIN
+`^[A-Z]{2}[A-Z0-9]{9}[0-9]$`) and `mca` (MCA21 AOC-4 XBRL, entity scheme
+`https://www.mca.gov.in/cin`, CIN `^[LU][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6}$`).
+Each valid row of `<XBRL_INBOX_DIR>/<code>/index.csv` becomes:
+
+| Field | Value |
+|---|---|
+| `accession` (filing key) | `<code>-<native_id>`, e.g. `nse-RELIANCE-2024-Q4` |
+| `cik` (entity key) | `resolve_entity_key(<entity_scheme or the profile's>, <entity_id>)` |
+| `company_name` | `company_name` (the entity id if empty) |
+| `form` | `form`, as written |
+| `filed_date` | `filed_date` (the discovery window filters on it) |
+| `report_date` | `period_end` |
+| `fiscal_period` | `fiscal_period`, else the profile default `FY`; kept at parse |
+| `fiscal_year` | `period_end`'s year; kept at parse |
+| `archive_directory_url` | `inbox://<code>/<native_id>` (provenance; never fetched) |
+| `primary_document_url` | the optional `source_url` (provenance only; never fetched) |
+
+A row with an invalid filing key, date, entity id, fiscal period, scheme, or
+`source_url` is skipped and logged (`inbox_row_skipped`). A missing required column
+or a repeated `native_id` stops discovery with `ValueError`. One `companies` row is
+stored per entity key.
+
+- **Package.** Fetch reads the row again and copies `file`, which must resolve
+  (after symlinks) inside `<XBRL_INBOX_DIR>/<code>/`, exist, fit
+  `XBRL_FILING_MAX_BYTES`, and match `sha256` when given; a failure stores nothing.
+  A `.zip` is stored byte-identical; a single `.xbrl`, `.xml`, `.xhtml` or `.html`
+  file is stored as a one-member zip (fixed timestamps, so the same bytes give the
+  same package). Either is stored at
+  `bronze/<code>/filings/<entity key>/<filing key>/packages/sha256=<sha256>/package.zip`;
+  changed bytes give a new package and the earlier one stays. The inbox file is
+  never modified.
+- **Manifest.** Exactly one member is the instance: a `.xbrl`, an `.xml` whose root
+  is `xbrli:xbrl`, or an `.xhtml`/`.html` that declares the inline XBRL namespace.
+  None or several, or a zip that fails the archive checks, quarantines the package
+  under `quarantine/<code>/filings/<filing key>/sha256=<sha256>/package.zip`. Member
+  `source_url` is the `inbox://` URL.
 
 ## Companies
 

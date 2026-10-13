@@ -101,7 +101,9 @@ SEC) and defers the job exactly as described above.
 - **Taxonomy coverage.** `config/taxonomy_packages.yml` may list
   `source_required_prefixes: {<code>: [prefixes]}`. `doctor` and offline extraction
   require the US `required_prefixes` plus those of each enabled source.
-- Adapters exist for `sec`, `esef`, `edinet` and `dart`; enabling any other code makes `worker run` stop
+- Inbox sources (`nse`, `mca`) read operator files from local disk: no client, no
+  lock, no host (see "Operator file inbox").
+- Adapters exist for `sec`, `esef`, `edinet`, `dart`, `nse` and `mca`; enabling any other code makes `worker run` stop
   at startup with `ConfigurationError` until that source's adapter is added. The
   sources' host allowlists may not overlap (checked at startup).
 
@@ -233,6 +235,104 @@ Enable them (each step that sends traffic needs the operator's approval):
 A JSON or XML error body instead of a zip stores nothing; a zip that fails the
 archive checks or has no single instance is kept under `quarantine/edinet/` or
 `quarantine/dart/`.
+
+## Operator file inbox (NSE, MCA)
+
+India's listed-company results (NSE/BSE) and MCA21 company filings (AOC-4 XBRL) are
+published as XBRL, but without an API the warehouse may call: the exchange sites use
+bot protection and state no data licence, and MCA sells public copies per document.
+**The warehouse never crawls NSE, BSE, or MCA.** The operator obtains each file under
+the source's terms (a manual download the terms allow, a purchase, a licensed
+vendor), records where it came from, and places it in the inbox. Keys and fields are
+in DATA_MODEL.md, "Inbox filings (NSE, MCA)".
+
+**Layout.** `XBRL_INBOX_DIR` (default `data/inbox`; `/app/data/inbox` in the Compose
+`app_data` volume) holds one folder per source code:
+
+```text
+data/inbox/
+  nse/
+    index.csv
+    reliance-2024-q4.xml
+    2024/tcs-q4.zip
+  mca/
+    index.csv
+    aoc4-L17110MH1973PLC019786-2024.zip
+```
+
+`index.csv` is UTF-8 with a header row (a BOM is fine). Columns:
+
+| Column | Required | Meaning |
+|---|---|---|
+| `native_id` | yes | Your unique id for the filing; the filing key is `<code>-<native_id>`. ASCII letters, digits, `.`, `_`, `-`, starting with a letter or digit. |
+| `entity_id` | yes | `nse`: the ISIN (`INE002A01018`); `mca`: the CIN (`L17110MH1973PLC019786`). Upper case. |
+| `company_name` | yes | Issuer name (may be empty; the id is used then). |
+| `form` | yes | Your form label, e.g. `results`, `AOC-4`; `forms` in a discovery job filters on it. |
+| `filed_date` | yes | `YYYY-MM-DD`; the discovery window filters on it. |
+| `period_end` | yes | `YYYY-MM-DD`; the report date and fiscal year. |
+| `file` | yes | Path relative to the source folder: a `.zip`, `.xbrl`, `.xml`, `.xhtml` or `.html`. |
+| `entity_scheme` | no | Overrides the profile's scheme (`urn:isin`, `https://www.mca.gov.in/cin`). |
+| `fiscal_period` | no | `FY` (default), `Q1`-`Q4`, `H1`, `H2`, ... |
+| `sha256` | no | SHA-256 of `file`; when given, fetch refuses other bytes. |
+| `source_url` | no | Where you obtained it (`http(s)`); stored as provenance, never fetched. |
+
+A `.zip` needs exactly one instance (a `.xbrl`, an `.xml` whose root is
+`xbrli:xbrl`, or an inline `.xhtml`/`.html`) and passes the usual archive limits; a
+single file is wrapped as a one-member package. `file` must stay inside the source
+folder after symlinks are followed (no `..`, absolute paths, or links that leave it)
+and fit `XBRL_FILING_MAX_BYTES`. The warehouse only reads the inbox; keep the files
+after loading (they are your copy of the source).
+
+**Check before queueing.** `inbox check` validates every row and file and queues
+nothing:
+
+```bash
+xbrl-warehouse inbox check --source nse
+# BAD 2 (file good.xml): native_id 'BAD 2' does not make a valid filing key
+# MISSING-3 (file absent.xml): file absent.xml does not exist
+# 1 valid, 2 problems
+```
+
+It prints one line per problem (the row's `native_id`, or its line number, and its
+`file`), then `<n> valid, <m> problems`, and exits 1 when there are problems. It
+checks the fields, the filing key, the ISIN/CIN pattern, path containment,
+existence, size, and the digest when given; a missing column or a repeated
+`native_id` is reported too (discovery refuses both). Unknown columns are listed as
+warnings: a misspelt `sha256` would otherwise skip the digest check. Instance
+contents are checked at fetch.
+
+Load files (each step that starts a worker needs the operator's approval):
+
+1. **Pin the taxonomies.** `source_required_prefixes` lists `www.bseindia.com/xbrl/`
+   and `www.nseindia.com/xbrl/` for `nse` and `www.mca.gov.in/XBRL/` for `mca`
+   (unverified: confirm them from the schema references of your first files) with no
+   pinned entries, so with either source enabled `taxonomy status` shows them
+   `uncovered`, `doctor` fails, and offline extraction refuses to start. Obtain the
+   NSE/BSE results taxonomy and the MCA Ind AS taxonomy packages from their
+   publishers (with approval, under their terms), record each SHA-256 and size, add
+   pinned entries as in "Adding a taxonomy year", narrow the prefixes to what your
+   files reference, add the confirmed hosts to `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`
+   (and `network_policy`), then run `taxonomy sync` and `taxonomy status` until
+   nothing is `uncovered`.
+2. **Place the files** and `index.csv` in `<XBRL_INBOX_DIR>/<code>/` where the fetch
+   worker can read them. Under Compose that is the `app_data` volume, e.g.
+   `docker compose cp ./inbox/nse/. worker:/app/data/inbox/nse/` (files must be
+   readable by UID 10001). Run `inbox check --source <code>` (in the same container)
+   until it reports no problems.
+3. **Enable the source** in every process, e.g. `XBRL_ENABLED_SOURCES=sec,nse,mca`.
+   No key, client or lock is needed; any fetch worker claims inbox jobs.
+4. **Discover** with a `discover_filings` job:
+   `{"source": "nse", "filed_from": "2024-04-01", "filed_to": "2024-06-30"}` (`filed_date`
+   window; both bounds optional; `"entity": "INE002A01018"` for one issuer, `"forms":
+   ["results"]`). Bad rows are skipped and logged (`inbox_row_skipped`).
+5. **Canary (AC-7).** Load three NSE results files you obtained, parse them with
+   `XBRL_ARELLE_OFFLINE=true`, and confirm their facts in `v_xbrl_facts_latest`.
+
+A fetch reads the index row again, so a corrected `file` or `sha256` applies on the
+next attempt; containment, digest, size, missing-file, and type failures store
+nothing and fail the job permanently (fix the row, then `jobs retry`). Changed bytes
+make a new content-addressed package; the earlier one stays. A package with no single
+instance, or a zip that fails the archive checks, is kept under `quarantine/<code>/`.
 
 ## Fetch and parse workers
 

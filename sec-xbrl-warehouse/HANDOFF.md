@@ -81,6 +81,16 @@ prefix is unverified), adds
 `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` in `.env`, and runs the AC-9 canary
 (OPERATIONS.md, "EDINET and DART filings").
 
+Plan 21 adds an operator file inbox with the `nse` (NSE/BSE results, ISIN) and `mca`
+(MCA21 AOC-4 XBRL, CIN) profiles, off by default, with no migration and no network
+access: the operator obtains files under each source's terms and places them with an
+`index.csv` in `XBRL_INBOX_DIR/<code>/` (default `data/inbox`). Neither is enabled
+anywhere yet. Before enabling them the operator pins the NSE/BSE and MCA taxonomy
+packages (`source_required_prefixes.nse` and `.mca` are listed, unverified, without
+pinned entries, so `taxonomy status` and `doctor` fail once either is enabled),
+runs `inbox check --source <code>`, and runs the AC-7 canary (OPERATIONS.md,
+"Operator file inbox").
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.

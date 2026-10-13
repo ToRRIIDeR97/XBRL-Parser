@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from sec_xbrl_warehouse.domain.sources import is_source_code
 from sec_xbrl_warehouse.exceptions import ConfigurationError
 
 
@@ -32,6 +33,37 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     temp_dir: Path = Path("data/tmp")
     config_dir: Path = Path("config")
+
+    # Regulators this deployment fetches from (`XBRL_ENABLED_SOURCES=sec,esef`). Every
+    # process sharing a control database should use the same list: a job for a source
+    # that isn't enabled fails permanently.
+    enabled_sources: Annotated[tuple[str, ...], NoDecode] = ("sec",)
+    # filings.xbrl.org (ESEF) discovery: records per page, pages per discovery run (per
+    # country when `esef_countries` is set), and ISO country codes (empty: all).
+    esef_page_size: int = Field(default=100, ge=1, le=500)
+    esef_max_pages: int = Field(default=50, ge=1, le=10_000)
+    esef_countries: Annotated[tuple[str, ...], NoDecode] = ()
+    # EDINET (Japan, FSA) and OpenDART (Korea, FSS) API keys. Each key is the
+    # operator's own and goes only into that regulator's requests: never into filing
+    # references, manifests, object keys, job payloads, or logs.
+    edinet_api_key: SecretStr | None = None
+    dart_api_key: SecretStr | None = None
+    # EDINET discovery reads one document list per day: at most this many days per
+    # run, keeping these document type codes when a run names no forms.
+    edinet_max_days: int = Field(default=31, ge=1, le=366)
+    edinet_doc_types: Annotated[tuple[str, ...], NoDecode] = (
+        "120",
+        "130",
+        "140",
+        "150",
+        "160",
+        "170",
+    )
+    # OpenDART disclosure-search page size (the API allows 1 to 100).
+    dart_page_count: int = Field(default=100, ge=1, le=100)
+    # Operator file inbox: `<inbox_dir>/<code>/index.csv` plus the files it lists, for
+    # sources without a usable API (`nse`, `mca`, `acra`). Read only; nothing is fetched.
+    inbox_dir: Path = Path("data/inbox")
 
     sec_user_agent: str = "Your Name or Organization monitored-email@example.com"
     sec_max_requests_per_second: float = Field(default=8.0, gt=0, le=10)
@@ -84,7 +116,9 @@ class Settings(BaseSettings):
     arelle_taxonomy_packages_dir: Path = Path("data/taxonomy-packages")
     arelle_offline: bool = False
     arelle_allowed_taxonomy_hosts: str = (
-        "www.sec.gov,xbrl.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org"
+        "www.sec.gov,xbrl.sec.gov,xbrl.fasb.org,xbrl.ifrs.org,www.xbrl.org,"
+        "www.esma.europa.eu,www.ifrs.org,disclosure.edinet-fsa.go.jp,"
+        "disclosure2dl.edinet-fsa.go.jp"
     )
     arelle_timeout_seconds: float = Field(default=600, gt=0)
     arelle_memory_limit_bytes: int = Field(default=2 * 1024**3, gt=0)
@@ -133,6 +167,64 @@ class Settings(BaseSettings):
     @classmethod
     def empty_api_key(cls, value: object) -> object:
         return None if value == "" else value
+
+    @field_validator("enabled_sources", mode="before")
+    @classmethod
+    def split_enabled_sources(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("enabled_sources")
+    @classmethod
+    def validate_enabled_sources(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("enabled_sources needs at least one source")
+        invalid = [code for code in value if not is_source_code(code)]
+        if invalid:
+            raise ValueError(f"enabled_sources has invalid source codes: {invalid}")
+        if len(set(value)) != len(value):
+            raise ValueError("enabled_sources lists a source more than once")
+        return value
+
+    @field_validator("esef_countries", mode="before")
+    @classmethod
+    def split_esef_countries(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(part for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("esef_countries")
+    @classmethod
+    def validate_esef_countries(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        codes = tuple(dict.fromkeys(code.strip().upper() for code in value))
+        invalid = [code for code in codes if re.fullmatch(r"[A-Z]{2}", code) is None]
+        if invalid:
+            raise ValueError(f"esef_countries must be two-letter country codes: {invalid}")
+        return codes
+
+    @field_validator("edinet_api_key", "dart_api_key", mode="before")
+    @classmethod
+    def empty_source_key(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("edinet_doc_types", mode="before")
+    @classmethod
+    def split_edinet_doc_types(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(part.strip() for part in value.split(",") if part.strip())
+        return value
+
+    @field_validator("edinet_doc_types")
+    @classmethod
+    def validate_edinet_doc_types(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        codes = tuple(dict.fromkeys(value))
+        invalid = [code for code in codes if re.fullmatch(r"[0-9]{3}", code) is None]
+        if invalid or not codes:
+            raise ValueError(f"edinet_doc_types must be three-digit codes: {invalid}")
+        return codes
 
     @field_validator("log_level")
     @classmethod
@@ -240,6 +332,7 @@ class Settings(BaseSettings):
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.arelle_cache_dir.mkdir(parents=True, exist_ok=True)
         self.arelle_taxonomy_packages_dir.mkdir(parents=True, exist_ok=True)
+        self.inbox_dir.mkdir(parents=True, exist_ok=True)
 
 
 # Every development default and `.env.example` credential contains this marker.

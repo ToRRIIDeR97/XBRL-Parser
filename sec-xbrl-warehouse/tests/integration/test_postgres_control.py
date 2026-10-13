@@ -916,3 +916,121 @@ async def test_upsert_filing_stores_non_sec_filing_keys(postgres_settings: Setti
         assert [tuple(row) for row in rows] == [(key, 10_000_000_007)]
     finally:
         await repo.close()
+
+
+async def test_source_egress_locks_are_per_source_and_retakable(
+    postgres_settings: Settings,
+) -> None:
+    from sec_xbrl_warehouse.infrastructure.http.egress_lock import (
+        EgressBusyError,
+        SecEgressBusyError,
+        SecEgressLock,
+        SourceEgressLock,
+    )
+
+    sec_holder = SourceEgressLock(postgres_settings, source="sec")
+    sec_second = SecEgressLock(postgres_settings)
+    demo_holder = SourceEgressLock(postgres_settings, source="demo")
+    demo_second = SourceEgressLock(postgres_settings, source="demo")
+    try:
+        await sec_holder.acquire()
+        await demo_holder.acquire()
+        # `SourceEgressLock(source="sec")` and `SecEgressLock` share xbrl:sec-egress.
+        with pytest.raises(SecEgressBusyError):
+            await sec_second.acquire()
+        with pytest.raises(EgressBusyError) as busy:
+            await demo_second.acquire()
+        assert not isinstance(busy.value, SecEgressBusyError)
+        await demo_holder.release()
+        await demo_second.acquire()  # a released lock can be retaken
+        await sec_holder.release()
+        await sec_second.acquire()
+        # Any lock on the sec source raises the SEC error, whichever class built it.
+        with pytest.raises(SecEgressBusyError):
+            await sec_holder.acquire()
+    finally:
+        for lock in (sec_holder, sec_second, demo_holder, demo_second):
+            await lock.release()
+
+
+async def test_esef_discovery_gives_one_entity_key_per_lei(
+    postgres_settings: Settings, tmp_path
+) -> None:
+    import httpx
+
+    from sec_xbrl_warehouse.infrastructure.http.source_client import SourceHttpClient
+    from sec_xbrl_warehouse.infrastructure.storage.object_store import LocalObjectStore
+    from sec_xbrl_warehouse.sources.base import DiscoveryRequest
+    from sec_xbrl_warehouse.sources.esef import ESEF_POLICY, LEI_SCHEME, EsefSourceAdapter
+
+    lei = uuid4().hex[:18].upper() + "00"
+
+    def record(fxo_id: str, entity_id: str) -> dict:
+        base = f"/{lei}/2023-12-31/ESEF/GB/0"
+        return {
+            "type": "filing",
+            "id": fxo_id,
+            "attributes": {
+                "fxo_id": fxo_id,
+                "date_added": "2024-04-10 00:00:00",
+                "period_end": "2023-12-31",
+                "sha256": "0" * 64,
+                "package_url": f"{base}/{fxo_id}.zip",
+                "report_url": f"{base}/reports/r.xhtml",
+            },
+            "relationships": {"entity": {"data": {"type": "entity", "id": entity_id}}},
+        }
+
+    # The same issuer twice, once with its LEI lower-cased and padded.
+    page = {
+        "data": [
+            record(f"{lei}-2023-12-31-ESEF-GB-0", "a"),
+            record(f"{lei}-2022-12-31-ESEF-GB-0", "b"),
+        ],
+        "included": [
+            {"type": "entity", "id": "a", "attributes": {"identifier": lei, "name": "Ex plc"}},
+            {
+                "type": "entity",
+                "id": "b",
+                "attributes": {"identifier": f" {lei.lower()} ", "name": "Ex plc"},
+            },
+        ],
+        "links": {},
+    }
+    settings = postgres_settings.model_copy(update={"temp_dir": tmp_path / "tmp"})
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=page))
+    http = SourceHttpClient(settings, ESEF_POLICY, client=httpx.AsyncClient(transport=transport))
+    repo = PostgresControlRepository(postgres_settings)
+    try:
+        adapter = EsefSourceAdapter(settings, http, LocalObjectStore(tmp_path / "objects"), repo)
+        found = await adapter.discover(DiscoveryRequest())
+        again = await adapter.discover(DiscoveryRequest(entity=lei.lower()))
+        keys = {filing.cik for filing in (*found.filings, *again.filings)}
+        assert len(found.filings) == 2 and len(again.filings) == 2
+        assert keys == {await repo.resolve_entity_key(LEI_SCHEME, lei)}
+        assert min(keys) >= 10_000_000_000
+        (company,) = found.companies
+        await repo.upsert_company(company)
+        for filing in found.filings:
+            await repo.upsert_filing(filing)
+        async with repo.engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text("SELECT count(*) FROM entity_keys WHERE upper(identifier) = :i"),
+                    {"i": lei},
+                )
+            ).scalar_one()
+            stored = (
+                (
+                    await connection.execute(
+                        text("SELECT DISTINCT cik FROM filings WHERE accession LIKE :k"),
+                        {"k": f"esef-{lei}-%"},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert rows == 1
+        assert list(stored) == [company.cik]
+    finally:
+        await repo.close()

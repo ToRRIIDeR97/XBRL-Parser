@@ -58,6 +58,7 @@ company_app = typer.Typer(help="Companies from SEC submissions data.")
 jobs_app = typer.Typer(help="Inspect and recover PostgreSQL queue jobs.")
 series_app = typer.Typer(help="Standardized metric series.")
 storage_app = typer.Typer(help="Object-store inventory (read-only).")
+inbox_app = typer.Typer(help="Operator file inbox (local files, no network).")
 app.add_typer(db_app, name="db")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(backfill_app, name="backfill")
@@ -70,6 +71,7 @@ app.add_typer(company_app, name="company")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(series_app, name="series")
 app.add_typer(storage_app, name="storage")
+app.add_typer(inbox_app, name="inbox")
 console = Console()
 
 
@@ -791,6 +793,74 @@ def _print_taxonomy_statuses(statuses: list[TaxonomyPackageStatus]) -> None:
     for item in statuses:
         table.add_row(item.package_id, item.filename, item.state, item.detail)
     console.print(table)
+
+
+@inbox_app.command("check")
+def inbox_check(
+    source: str = typer.Option(..., help="Inbox source code (nse, mca or acra)."),
+) -> None:
+    """Validate <inbox_dir>/<source>/index.csv and its files; queues nothing."""
+    from sec_xbrl_warehouse.sources.inbox import (
+        INBOX_PROFILES,
+        INDEX_FILE,
+        MissingColumnsError,
+        file_problems,
+        inbox_root,
+        read_index,
+    )
+
+    profile = INBOX_PROFILES.get(source)
+    if profile is None:
+        raise typer.BadParameter(
+            f"{source!r} is not an inbox source ({', '.join(sorted(INBOX_PROFILES))})",
+            param_hint="--source",
+        )
+    settings = get_settings()
+    out = Console(highlight=False, soft_wrap=True)
+
+    def say(line: str) -> None:
+        # Index values are untrusted: never pass control characters to the terminal.
+        out.print(_printable(line), markup=False)
+
+    root = inbox_root(settings, profile.code)
+    problems: list[str] = []
+    valid = 0
+    try:
+        index = read_index(settings, profile, allow_duplicates=True)
+    except MissingColumnsError as exc:
+        problems += [f"{INDEX_FILE}: missing required column {column}" for column in exc.columns]
+    except ValueError as exc:
+        problems.append(f"{INDEX_FILE}: {exc}")
+    else:
+        if not index.rows:
+            say(f"No index rows in {root / INDEX_FILE}")
+        for column in index.unknown_columns:
+            say(f"warning: {INDEX_FILE} column {column!r} is not used")
+        seen: set[str] = set()
+        for row in index.rows:
+            found = list(row.problems)
+            if row.native_id and row.native_id in seen:
+                found.append(f"native_id {row.native_id} is repeated")
+            seen.add(row.native_id)
+            try:
+                found += file_problems(settings, profile, row)
+            except OSError as exc:
+                found.append(f"file can't be checked: {exc.strerror or exc}")
+            problems += [f"{row.label} (file {row.file or '-'}): {item}" for item in found]
+            valid += not found
+    for line in problems:
+        say(line)
+    say(f"{valid} valid, {len(problems)} problems")
+    if problems:
+        raise typer.Exit(code=1)
+
+
+def _printable(text: str) -> str:
+    """`text` with every non-printable character escaped (`\\x1b`, `\\u202e`, ...)."""
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        for char in text
+    )
 
 
 @company_app.command("show")

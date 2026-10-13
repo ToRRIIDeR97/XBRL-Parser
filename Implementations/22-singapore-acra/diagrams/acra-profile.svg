@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 250" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <title>Plan 22: Singapore ACRA as an inbox profile</title>
+  <rect width="960" height="250" fill="#ffffff"/>
+  <defs>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f5fbf"/>
+    </marker>
+  </defs>
+  <text x="20" y="28" font-size="16" font-weight="bold" fill="#222">ACRA profile (new, blue) on the plan 21 inbox adapter (grey)</text>
+
+  <rect x="20" y="50" width="270" height="130" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="72" font-weight="bold" fill="#222">How files are obtained</text>
+  <text x="32" y="92" fill="#222">company officers: BizFile+ retrieval</text>
+  <text x="32" y="110" fill="#222">licensed vendor exports</text>
+  <text x="32" y="128" fill="#222">(no public ACRA retrieval API)</text>
+  <text x="32" y="150" fill="#222">→ data/inbox/acra/index.csv</text>
+
+  <rect x="330" y="50" width="290" height="130" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="342" y="72" font-weight="bold" fill="#1f5fbf">ACRA_PROFILE (AC-1, AC-2)</text>
+  <text x="342" y="92" fill="#1f5fbf">code acra, scheme …/uen</text>
+  <text x="342" y="112" fill="#1f5fbf">UEN: 8 or 9 digits + letter,</text>
+  <text x="342" y="130" fill="#1f5fbf">or T/S/R + yy + type + 4 digits + letter</text>
+  <text x="342" y="150" fill="#1f5fbf">default fiscal period FY</text>
+  <text x="342" y="170" fill="#1f5fbf">inbox check --source acra (AC-4)</text>
+
+  <rect x="660" y="50" width="280" height="130" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="672" y="72" font-weight="bold" fill="#222">InboxSourceAdapter (plan 21)</text>
+  <text x="672" y="92" fill="#222">containment, digest, one instance</text>
+  <text x="672" y="112" fill="#222">bronze/acra/filings/… (AC-3)</text>
+  <text x="672" y="132" fill="#222">registry, worker, Arelle</text>
+  <text x="672" y="152" fill="#1f5fbf">ACRA taxonomy pins (AC-5)</text>
+
+  <rect x="20" y="200" width="920" height="36" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="32" y="223" fill="#1f5fbf">Gate (AC-6): enable acra only after the operator has a lawful supply of files and has confirmed redistribution terms.</text>
+
+  <line x1="290" y1="115" x2="328" y2="115" stroke="#1f5fbf" marker-end="url(#b)"/>
+  <line x1="620" y1="115" x2="658" y2="115" stroke="#1f5fbf" marker-end="url(#b)"/>
+</svg>

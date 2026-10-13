@@ -1,6 +1,10 @@
 # SEC XBRL Warehouse
 
-The application lives in `sec-xbrl-warehouse/`. It downloads SEC filings, extracts
+The application lives in `sec-xbrl-warehouse/`. It downloads SEC filings (and, with
+the `esef` source enabled, EU/UK ESEF reports from filings.xbrl.org; with `edinet`
+and `dart`, Japanese and Korean periodic reports from EDINET and OpenDART; with `nse`
+and `mca`, Indian filings, and with `acra`, Singapore ACRA financial statements, that
+the operator places in a local file inbox), extracts
 XBRL and inline XBRL facts with Arelle, stores them in PostgreSQL, ClickHouse, and
 MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 
@@ -20,7 +24,20 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 - Check `HANDOFF.md` for live ingestion state before starting a worker, enqueueing
   jobs, or running discovery. Only one process can send SEC traffic at a time: the
   SEC rate limiter is process-local, so a PostgreSQL advisory lock (`SecEgressLock`)
-  makes a second SEC-active process fail fast with `SecEgressBusyError`.
+  makes a second SEC-active process fail fast with `SecEgressBusyError`. Every other
+  source in `XBRL_ENABLED_SOURCES` has its own lock (`xbrl:<source>-egress`), so run
+  one fetch worker per source (OPERATIONS.md, "Sources and per-source egress").
+  Don't enable `esef` until filings.xbrl.org's reuse terms are confirmed and the
+  ESEF/IFRS taxonomies are pinned (OPERATIONS.md, "ESEF filings"). `edinet` and
+  `dart` need the operator's own API keys in `.env` (never in code, tests, logs, or
+  stored URLs) and pinned taxonomies (OPERATIONS.md, "EDINET and DART filings").
+  `nse`, `mca` and `acra` never fetch: the operator obtains files under the source's
+  terms and places them with an `index.csv` in `XBRL_INBOX_DIR/<code>/`; run
+  `xbrl-warehouse inbox check --source <code>` before discovery (OPERATIONS.md,
+  "Operator file inbox"). Never crawl NSE, BSE, or MCA. Never automate BizFile+ or
+  any ACRA/SGX site or handle Singpass credentials; enable `acra` outside local
+  testing only after the operator records how files are obtained and confirms
+  redistribution terms (OPERATIONS.md, "ACRA financial statements (Singapore)").
 - `worker run --job-type <type>` (repeatable) claims only those job types and leaves
   other queued jobs untouched. Filings are two jobs: `fetch_filing` (SEC download,
   then it queues the parse) and `parse_filing` (no SEC client), e.g.

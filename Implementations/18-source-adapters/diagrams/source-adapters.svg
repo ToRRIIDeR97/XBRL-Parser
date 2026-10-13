@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 500" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <title>Plan 18: source adapters, current and proposed fetch and discovery paths</title>
+  <rect width="960" height="500" fill="#ffffff"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f5fbf"/>
+    </marker>
+  </defs>
+  <text x="20" y="28" font-size="16" font-weight="bold" fill="#222">Current: one hard-wired SEC path</text>
+  <text x="500" y="28" font-size="16" font-weight="bold" fill="#222">Proposed (changes in blue)</text>
+
+  <rect x="20" y="45" width="440" height="60" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="68" fill="#222">worker.runtime_services: requires_sec(job types)</text>
+  <text x="32" y="88" fill="#222">builds SecHttpClient + SecEgressLock("xbrl:sec-egress")</text>
+  <rect x="20" y="130" width="210" height="80" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="152" font-weight="bold" fill="#222">discover_filings</text>
+  <text x="32" y="172" fill="#222">SecSubmissionsDiscovery</text>
+  <text x="32" y="190" fill="#222">SecDailyIndexDiscovery</text>
+  <rect x="250" y="130" width="210" height="80" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="262" y="152" font-weight="bold" fill="#222">fetch_filing</text>
+  <text x="262" y="172" fill="#222">FilingPackageDownloader</text>
+  <text x="262" y="190" fill="#888">refuses non-SEC (plan 17)</text>
+  <rect x="20" y="235" width="440" height="60" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="32" y="258" fill="#222">parse_filing: derive_fiscal_focus (dei only)</text>
+  <text x="32" y="278" fill="#222">taxonomy required_prefixes: one US list</text>
+  <line x1="125" y1="105" x2="125" y2="128" stroke="#444" marker-end="url(#a)"/>
+  <line x1="355" y1="105" x2="355" y2="128" stroke="#444" marker-end="url(#a)"/>
+
+  <rect x="500" y="45" width="440" height="80" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="512" y="68" font-weight="bold" fill="#1f5fbf">SourceRegistry (AC-1)  XBRL_ENABLED_SOURCES=sec,…</text>
+  <text x="512" y="88" fill="#1f5fbf">adapter(code), adapter_for(filing key),</text>
+  <text x="512" y="108" fill="#1f5fbf">download_package(filing), fiscal_focus(bundle)</text>
+  <rect x="500" y="145" width="210" height="110" rx="6" fill="#f3f3f3" stroke="#888"/>
+  <text x="512" y="167" font-weight="bold" fill="#222">SecSourceAdapter (AC-5)</text>
+  <text x="512" y="187" fill="#222">wraps today's discovery,</text>
+  <text x="512" y="205" fill="#222">downloader, dei fiscal focus</text>
+  <text x="512" y="223" fill="#222">SecHttpClient = SEC policy</text>
+  <text x="512" y="243" fill="#222">lock "xbrl:sec-egress"</text>
+  <rect x="730" y="145" width="210" height="110" rx="6" fill="#e8f0fc" stroke="#1f5fbf" stroke-dasharray="5,3"/>
+  <text x="742" y="167" font-weight="bold" fill="#1f5fbf">later adapters</text>
+  <text x="742" y="187" fill="#1f5fbf">esef (19), edinet/dart (20),</text>
+  <text x="742" y="205" fill="#1f5fbf">india (21), singapore (22)</text>
+  <text x="742" y="223" fill="#1f5fbf">own SourcePolicy and</text>
+  <text x="742" y="243" fill="#1f5fbf">lock "xbrl:&lt;code&gt;-egress"</text>
+  <rect x="500" y="275" width="440" height="80" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="512" y="298" font-weight="bold" fill="#1f5fbf">SourceHttpClient (AC-2) + SourceEgressLock (AC-3)</text>
+  <text x="512" y="318" fill="#1f5fbf">host allowlist, rate, concurrency, headers per policy;</text>
+  <text x="512" y="338" fill="#1f5fbf">lock taken on first allowed request; per-source lock name</text>
+  <rect x="500" y="375" width="440" height="100" rx="6" fill="#e8f0fc" stroke="#1f5fbf"/>
+  <text x="512" y="398" font-weight="bold" fill="#1f5fbf">Worker (AC-4, AC-5)</text>
+  <text x="512" y="418" fill="#1f5fbf">discover_filings payload.source (default sec) → adapter</text>
+  <text x="512" y="438" fill="#1f5fbf">fetch_filing → registry.download_package(filing)</text>
+  <text x="512" y="458" fill="#1f5fbf">parse_filing → registry.fiscal_focus; prefixes per source (AC-6)</text>
+  <line x1="605" y1="125" x2="605" y2="143" stroke="#1f5fbf" marker-end="url(#b)"/>
+  <line x1="835" y1="125" x2="835" y2="143" stroke="#1f5fbf" marker-end="url(#b)"/>
+</svg>

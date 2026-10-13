@@ -184,9 +184,22 @@ def registered_packages(settings: Settings) -> list[TaxonomyPackage]:
 
 
 def required_prefixes(settings: Settings) -> tuple[str, ...]:
-    """Scheme-less taxonomy URI prefixes the corpus needs a pinned source for."""
+    """Scheme-less taxonomy URI prefixes the corpus needs a pinned source for.
+
+    The US list (`required_prefixes`) plus `source_required_prefixes[<code>]` for
+    each source in `XBRL_ENABLED_SOURCES`; disabled sources add nothing.
+    """
     registry = _load_registry(settings)
-    return tuple(_schemeless(str(item)) for item in registry.get("required_prefixes") or ())
+    items = [str(item) for item in registry.get("required_prefixes") or ()]
+    per_source = registry.get("source_required_prefixes") or {}
+    if not isinstance(per_source, dict):
+        raise ConfigurationError("source_required_prefixes must map source codes to lists")
+    for code in settings.enabled_sources:
+        listed = per_source.get(code) or ()
+        if not isinstance(listed, list | tuple):
+            raise ConfigurationError(f"source_required_prefixes.{code} must be a list")
+        items.extend(str(item) for item in listed)
+    return tuple(_schemeless(item) for item in items)
 
 
 def coverage_gaps(settings: Settings, packages: list[TaxonomyPackage]) -> list[str]:

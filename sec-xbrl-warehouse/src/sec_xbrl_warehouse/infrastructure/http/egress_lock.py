@@ -1,10 +1,14 @@
-"""One SEC-active process at a time, enforced with a PostgreSQL advisory lock.
+"""One egress process per source, enforced with PostgreSQL advisory locks.
 
-The SEC rate limiter is per process. `SecEgressLock` makes sure only one process
-sends SEC traffic: it takes a session-level `pg_try_advisory_lock` on a dedicated
-connection and keeps that connection open while it holds the lock. PostgreSQL
-releases the lock when the connection ends, so a crashed holder never blocks
-the next process. No table is involved.
+Rate limiters are per process. `SourceEgressLock` makes sure only one process
+sends a given source's traffic: it takes a session-level `pg_try_advisory_lock`
+on `xbrl:<source>-egress` over a dedicated connection and keeps that connection
+open while it holds the lock. PostgreSQL releases the lock when the connection
+ends, so a crashed holder never blocks the next process. Different sources use
+different lock names and never block each other. No table is involved.
+
+`SecEgressLock` is the `sec` lock (`xbrl:sec-egress`, unchanged) and raises
+`SecEgressBusyError`.
 """
 
 from __future__ import annotations
@@ -17,12 +21,24 @@ import asyncpg
 from sqlalchemy.engine import make_url
 
 from sec_xbrl_warehouse.config import Settings
-from sec_xbrl_warehouse.exceptions import SecAccessError
+from sec_xbrl_warehouse.domain.sources import SEC_SOURCE, is_source_code
+from sec_xbrl_warehouse.exceptions import SecAccessError, SourceAccessError
 
 LOCK_NAME = "xbrl:sec-egress"
 
 
-class SecEgressBusyError(SecAccessError):
+def lock_name(source: str) -> str:
+    """The advisory lock name for one source's egress (`xbrl:<source>-egress`)."""
+    if not is_source_code(source):
+        raise ValueError(f"Invalid source code: {source!r}")
+    return f"xbrl:{source}-egress"
+
+
+class EgressBusyError(SourceAccessError):
+    """Another process holds this source's egress lock."""
+
+
+class SecEgressBusyError(EgressBusyError, SecAccessError):
     """Another process holds the SEC egress lock."""
 
 
@@ -32,16 +48,19 @@ class EgressLock(Protocol):
     async def release(self) -> None: ...
 
 
-class SecEgressLock:
-    """Session-level PostgreSQL advisory lock guarding SEC egress for one process."""
+class SourceEgressLock:
+    """Session-level PostgreSQL advisory lock guarding one source's egress."""
 
     def __init__(
         self,
         settings: Settings,
         *,
+        source: str,
         connect_timeout_seconds: float = 10.0,
         check_interval_seconds: float | None = None,
     ) -> None:
+        self.source = source
+        self.name = lock_name(source)
         url = make_url(settings.postgres_dsn.get_secret_value()).set(drivername="postgresql")
         self._dsn = url.render_as_string(hide_password=False)
         self._timeout = connect_timeout_seconds
@@ -59,7 +78,7 @@ class SecEgressLock:
         return self._connection is not None
 
     async def acquire(self) -> None:
-        """Take the lock without waiting; raise `SecEgressBusyError` if another holds it.
+        """Take the lock without waiting; raise `EgressBusyError` if another holds it.
 
         Acquiring again while held is a no-op.
         """
@@ -69,17 +88,14 @@ class SecEgressLock:
             connection = await asyncpg.connect(self._dsn, timeout=self._timeout)
             try:
                 locked = await connection.fetchval(
-                    "SELECT pg_try_advisory_lock(hashtextextended($1, 0))", LOCK_NAME
+                    "SELECT pg_try_advisory_lock(hashtextextended($1, 0))", self.name
                 )
             except BaseException:
                 await connection.close()
                 raise
             if not locked:
                 await connection.close()
-                raise SecEgressBusyError(
-                    "another process holds the SEC egress lock; only one process may "
-                    "send SEC requests at a time"
-                )
+                raise self._busy()
             self._connection = connection
             self._checked_at = time.monotonic()
 
@@ -89,7 +105,7 @@ class SecEgressLock:
         A session lock lives exactly as long as its connection. If the connection
         dropped silently, PostgreSQL has released the lock and another process may
         hold it now, so the lock is re-acquired (raising `SecEgressBusyError` if
-        that fails) before more SEC requests are sent.
+        that fails) before more requests are sent.
         """
         if self._connection is None or time.monotonic() - self._checked_at < self._check_interval:
             return
@@ -120,10 +136,22 @@ class SecEgressLock:
                 return
             try:
                 await connection.execute(
-                    "SELECT pg_advisory_unlock(hashtextextended($1, 0))", LOCK_NAME
+                    "SELECT pg_advisory_unlock(hashtextextended($1, 0))", self.name
                 )
             finally:
                 await connection.close()
+
+    def _busy(self) -> EgressBusyError:
+        # Any lock on the `sec` source raises the SEC error, whichever class built it.
+        if self.source == SEC_SOURCE:
+            return SecEgressBusyError(
+                "another process holds the SEC egress lock; only one process may "
+                "send SEC requests at a time"
+            )
+        return EgressBusyError(
+            f"another process holds the {self.source} egress lock; only one process may "
+            f"send {self.source} requests at a time"
+        )
 
     async def abandon(self) -> None:
         """Drop the session without unlocking, as a crashed holder would (tests)."""
@@ -133,8 +161,26 @@ class SecEgressLock:
                 connection.terminate()
 
 
+class SecEgressLock(SourceEgressLock):
+    """The SEC egress lock (`xbrl:sec-egress`); a busy lock raises `SecEgressBusyError`."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        connect_timeout_seconds: float = 10.0,
+        check_interval_seconds: float | None = None,
+    ) -> None:
+        super().__init__(
+            settings,
+            source=SEC_SOURCE,
+            connect_timeout_seconds=connect_timeout_seconds,
+            check_interval_seconds=check_interval_seconds,
+        )
+
+
 class LazyEgress:
-    """Holds the SEC egress lock from first use until `close` (no SEC client needed).
+    """Holds an egress lock from first use until `close` (no HTTP client needed).
 
     Parse-only workers in online Arelle mode use it: Arelle may resolve taxonomies
     from SEC hosts, and that traffic must count as this process's SEC egress.

@@ -13,21 +13,110 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 | Warehouse facts | ClickHouse | Raw and canonical facts served by the API. |
 | Credentials | `.env` (local), secret manager (production) | Owner/admin/root credentials (admin service), the worker, writer, and reader identities, `XBRL_API_KEY`. Settings hold them as `SecretStr`, so reprs, dumps, and tracebacks don't print them. |
 | SEC identity | `XBRL_SEC_USER_AGENT` | The SEC identifies and throttles traffic by this identity. |
+| Operator inbox files | `XBRL_INBOX_DIR/<code>/` (`/app/data/inbox` in the `app_data` volume under Compose) | Filings the operator obtained under a source's terms (`nse`, `mca`, `acra`) and their `index.csv`. Untrusted input; the warehouse only reads them. |
+| Regulator API keys | `XBRL_EDINET_API_KEY`, `XBRL_DART_API_KEY` in `.env` (local), secret manager (production) | Per-user keys for EDINET and OpenDART. The regulators' terms forbid sharing them; a leaked key can be used up (DART's daily cap) or revoked. |
 
 ## Trust boundaries
 
-![Trust boundaries: untrusted SEC, taxonomy, and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
+![Trust boundaries: untrusted SEC, filings.xbrl.org (ESEF), EDINET, OpenDART, taxonomy, operator inbox (nse, mca, acra), and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
 
 - **SEC and taxonomy content is untrusted.** ZIP members, filing packages, TSV
   rows, and taxonomy responses are bounded before allocation. Unsafe names,
   traversal paths, and symlinks are rejected, and checksums are verified before parsing.
+- **Each source (regulator) is its own outbound path.** A source's adapter reaches the
+  network only through its `SourceHttpClient`, whose `SourcePolicy` lists the hosts
+  it may contact (HTTPS on port 443, no credentials). Every redirect hop is checked
+  against the same allowlist before it is requested, so one source's client can't
+  reach another source's hosts; byte limits, retries, and `Retry-After` handling are
+  the same for every source. The SEC policy is unchanged: `www.sec.gov`, `sec.gov`,
+  `data.sec.gov` and `XBRL_SEC_USER_AGENT`. Only sources in `XBRL_ENABLED_SOURCES`
+  get an adapter; a job for any other source fails permanently and never falls back
+  to the SEC. Bytes from every source get the same bounds and checksums as SEC bytes.
+  `source_policies` refuses two policies that share a host, and `worker run` checks
+  it at startup.
+- **filings.xbrl.org (ESEF) is a third-party aggregator.** XBRL International
+  collects ESEF reports from national registries; it isn't the regulator, so a report
+  can be missing, late, or (in principle) altered upstream of the site. The `esef`
+  client may reach only `filings.xbrl.org` (HTTPS, at most 2 requests/s, sending
+  `XBRL_SEC_USER_AGENT`, the operator's contact identity, as the SEC client does) under its own `xbrl:esef-egress` lock, and never the SEC hosts.
+  Its JSON is untrusted input: records with an invalid filing key, LEI, date, or a
+  package URL that isn't a plain path on that host are skipped. A package must match
+  the SHA-256 the site publishes for it (nothing is stored on a mismatch or without a
+  digest), which proves the bytes are the ones the site published, not that the issuer
+  filed them. It then gets the same ZIP checks as SEC archives and is stored
+  byte-identical. A report package's own `META-INF/catalog.xml` may remap only its
+  extension taxonomy to files inside the package: a target outside the package, or a
+  prefix that overlaps a pinned taxonomy, fails the extraction. Reuse terms are
+  unconfirmed (OPERATIONS.md, "ESEF filings").
+- **EDINET and OpenDART are regulators behind a per-user key.** The `edinet` client
+  may reach only `api.edinet-fsa.go.jp` and the `dart` client only
+  `opendart.fss.or.kr` (HTTPS, at most 1 request/s, one at a time, sending
+  `XBRL_SEC_USER_AGENT`), each under its own `xbrl:<source>-egress` lock. Their JSON
+  lists and zips are untrusted input: records with a malformed document or receipt
+  number, entity code, or date are skipped and logged; a JSON or XML error body
+  instead of a zip stores nothing; zips get the same checks as SEC archives, need
+  exactly one instance, and are quarantined otherwise. Neither API publishes a
+  digest, so the stored SHA-256 proves only what was received over TLS.
+- **API keys stay in the request.** `XBRL_EDINET_API_KEY` and `XBRL_DART_API_KEY` are
+  `SecretStr` settings, sent only as the `Subscription-Key` / `crtfc_key` query
+  parameter of that regulator's requests. The policy names those parameters
+  (`SourcePolicy.secret_params`), and `SourceHttpClient` masks their values
+  (`[REDACTED]`) in every URL it logs, raises, or writes to a download sidecar; a
+  logging filter does the same for the `httpx`/`httpcore` request logs, and library
+  exceptions are masked before they are chained. The adapters build every stored URL
+  (filing references, manifest members, object metadata, job payloads) without the
+  key and re-raise any failure that still mentions it masked and unchained. A missing
+  key raises `ConfigurationError` before any request, and a fetch-capable worker
+  refuses to start without it. The Arelle child gets settings with both keys blanked,
+  and the `worker-parse` container blanks them in its environment; the `api` service
+  never receives them. Rotate a key on the regulator's site if it leaks.
+- **Operator inbox files are untrusted input** (`nse`, `mca`, `acra`). The operator obtains
+  them outside the warehouse and copies them, with `index.csv`, into
+  `<XBRL_INBOX_DIR>/<code>/`; nothing is fetched, so inbox sources have no HTTP
+  client, host policy, or egress lock, and the optional `source_url` column is stored
+  as provenance and never requested. Every index field is validated (filing key,
+  ISO dates, the profile's ISIN, CIN or UEN pattern, fiscal period, entity scheme other
+  than the SEC CIK scheme, an `http(s)` `source_url` without credentials); a bad row is
+  skipped. A row's `file` must be relative, without `..`, backslashes or a drive, and
+  must resolve after every symlink to a path inside the resolved
+  `<XBRL_INBOX_DIR>/<code>/` (the index itself too). The resolved path is then
+  opened one component at a time from the inbox folder's descriptor with
+  `O_NOFOLLOW` (`O_DIRECTORY` for folders), so a folder or file swapped for a symlink
+  after the check is refused (Windows, without `dir_fd`, opens the resolved path).
+  The file is opened with `O_NONBLOCK` and `fstat`ed at once: FIFOs, sockets,
+  devices and directories are refused without a read, so a planted FIFO can't hang a
+  worker. The index is read from the same kind of descriptor, its size taken from
+  `fstat`. Any filesystem error (a name too long, a permission) becomes a refusal or
+  an `inbox check` problem, not a crash, and `inbox check` escapes control
+  characters in index values before printing them. The bytes are copied with the filing byte limit before the optional SHA-256 check, so a file
+  that changes during the fetch can't slip past it. Zips get the same checks as SEC
+  archives, the instance sniffing parses XML without DTDs, entities or network, and
+  a package with no single instance is quarantined. The warehouse never writes to or
+  deletes from the inbox. Whether a file may be loaded at all is the operator's call
+  under the source's terms (OPERATIONS.md, "Operator file inbox").
+- **No ACRA credentials.** ACRA's BizFile+ retrieval needs a company officer's
+  Singpass login. The warehouse never automates BizFile+ or any ACRA or SGX site and
+  never stores or uses Singpass or other ACRA credentials; `acra` files arrive only
+  through the inbox, and `acra` stays off outside local testing until the operator
+  has recorded how files are obtained and confirmed the redistribution terms
+  (OPERATIONS.md, "ACRA financial statements (Singapore)").
 - **Taxonomy packages are pinned.** `taxonomy sync` is a separate outbound path: it
   downloads only registry URLs that use HTTPS on port 443, carry no credentials, and
   name a host in `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`. It uses the rate-limited
   client and byte limits, and installs a file only after its SHA-256 matches the
   registry. Extraction re-verifies every package. `archive` and `file` entries are
   the publishers' unmodified files; only verified files are mapped into Arelle. `xbrl.sec.gov` is on the default
-  allowlist because it serves the SEC taxonomies (dei and others) and their packages.
+  allowlist because it serves the SEC taxonomies (dei and others) and their packages;
+  `www.esma.europa.eu` (ESEF taxonomy), `xbrl.ifrs.org` and `www.ifrs.org` (IFRS
+  Accounting Taxonomy) are on it for the `esef` source's pinned packages, and
+  `disclosure.edinet-fsa.go.jp` (EDINET taxonomy namespaces) and
+  `disclosure2dl.edinet-fsa.go.jp` (the FSA's taxonomy downloads) for the `edinet`
+  source's. DART's taxonomy host isn't on it yet, nor are the NSE/BSE, MCA and ACRA
+  taxonomy hosts: add each once a canary confirms it (for `acra`, the host of
+  `source_required_prefixes.acra`, unverified `www.acra.gov.sg`, and the host ACRA
+  serves its taxonomy packages from).
+  None of these is a source API host (`check_disjoint_hosts` keeps the source
+  policies apart; the source hosts aren't taxonomy hosts).
   The W3C `xml.xsd` schemas are shipped with the application, so `www.w3.org` is never
   contacted.
 - **The object store is trusted.** Manifest-cache and checkpoint verification detect
@@ -135,7 +224,10 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
 - SEC requests use the configured user agent. They default to 8 req/s with jitter and
   honor `Retry-After`. **The limiter is process-local**, so a PostgreSQL advisory lock
   (`SecEgressLock`, see SEC_ACCESS.md) lets only one process send SEC traffic at a
-  time. A second SEC-active process fails fast instead of doubling the rate.
+  time. A second SEC-active process fails fast instead of doubling the rate. Other
+  sources follow the same rule with their own policy rate and their own lock
+  (`SourceEgressLock`, `xbrl:<source>-egress`), so the SEC sender and, say, an ESEF
+  sender run side by side without sharing a limit.
 - The `api`, `worker`, and `worker-parse` containers run the application image as
   UID/GID `10001:10001` with all capabilities dropped and `no-new-privileges`. The
   third-party storage and monitoring images keep their own defaults. Host ports bind
@@ -159,11 +251,15 @@ SEC contact identity, and the integrity of stored artifacts and lineage.
 Run from `sec-xbrl-warehouse/` with the virtualenv active:
 
 ```bash
-pytest tests/unit/test_api.py tests/unit/test_config.py tests/unit/test_deployment.py tests/unit/test_bulk_security.py tests/unit/test_sec_client.py tests/unit/test_object_store.py
+pytest tests/unit/test_api.py tests/unit/test_config.py tests/unit/test_deployment.py tests/unit/test_bulk_security.py tests/unit/test_sec_client.py tests/unit/test_source_adapters.py tests/unit/test_esef_source.py tests/unit/test_edinet_dart_sources.py tests/unit/test_inbox_source.py tests/unit/test_object_store.py
 ```
 
 These cover API auth and capacity, production credential checks, API environment
-isolation, bucket setup quoting, ZIP limits and unsafe names, SEC retry behavior, and
+isolation, bucket setup quoting, ZIP limits and unsafe names, SEC retry behavior,
+per-source host allowlists, disjoint source hosts and redirect refusal, ESEF digest
+checks, unsafe records and report package catalogs, EDINET/DART key redaction
+(logs, errors, sidecars, stored objects) and missing-key refusal, inbox path
+containment (`..`, absolute paths, escaping symlinks), digest and size checks, and
 bounded object restores. The full gates are listed in the root `AGENTS.md`.
 
 ## Before public exposure

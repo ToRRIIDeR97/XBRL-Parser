@@ -56,6 +56,52 @@ Plan 17 (source-neutral filing and entity keys) adds Alembic
 PostgreSQL (BACKUP_RESTORE.md), run `alembic upgrade head` through the `admin`
 service, then `doctor`. ClickHouse and existing SEC rows and object keys are unchanged.
 
+Plan 18 (source adapters) routes discovery, fetch, and parse fiscal fields through a
+`SourceRegistry` built from `XBRL_ENABLED_SOURCES` (default `sec`). SEC requests, user
+agent, rate, lock name, object keys, and job keys are unchanged, and there's no
+migration. Only the `sec` adapter exists; enabling another code stops `worker run` at
+startup until its plan lands (OPERATIONS.md, "Sources and per-source egress").
+
+Plan 19 adds the `esef` adapter (EU/UK ESEF reports from filings.xbrl.org), off by
+default, with no migration. It isn't enabled anywhere yet. Before enabling it the
+operator confirms filings.xbrl.org's reuse terms, pins the ESEF and IFRS taxonomy
+packages (`source_required_prefixes.esef` is listed but has no pinned entries, so
+`taxonomy status` shows `uncovered` rows and `doctor` fails once `esef` is enabled),
+adds `www.esma.europa.eu,www.ifrs.org` to `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` in
+`.env`, and runs the AC-6 canary (OPERATIONS.md, "ESEF filings").
+
+Plan 20 adds the `edinet` (Japan, FSA EDINET API v2) and `dart` (Korea, OpenDART)
+adapters, off by default, with no migration. Neither is enabled anywhere yet. Before
+enabling them the operator registers their own API keys (`XBRL_EDINET_API_KEY`,
+`XBRL_DART_API_KEY` in `.env`, never shared), pins the EDINET and DART taxonomy
+packages (`source_required_prefixes.edinet` and `.dart` are listed without pinned
+entries, so `taxonomy status` and `doctor` fail once either is enabled; the DART
+prefix is unverified), adds
+`disclosure.edinet-fsa.go.jp,disclosure2dl.edinet-fsa.go.jp` to
+`XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` in `.env`, and runs the AC-9 canary
+(OPERATIONS.md, "EDINET and DART filings").
+
+Plan 21 adds an operator file inbox with the `nse` (NSE/BSE results, ISIN) and `mca`
+(MCA21 AOC-4 XBRL, CIN) profiles, off by default, with no migration and no network
+access: the operator obtains files under each source's terms and places them with an
+`index.csv` in `XBRL_INBOX_DIR/<code>/` (default `data/inbox`). Neither is enabled
+anywhere yet. Before enabling them the operator pins the NSE/BSE and MCA taxonomy
+packages (`source_required_prefixes.nse` and `.mca` are listed, unverified, without
+pinned entries, so `taxonomy status` and `doctor` fail once either is enabled),
+runs `inbox check --source <code>`, and runs the AC-7 canary (OPERATIONS.md,
+"Operator file inbox").
+
+Plan 22 adds the `acra` inbox profile for Singapore ACRA XBRL financial statements
+(entity key from the UEN, scheme `https://www.acra.gov.sg/uen`), off by default, with
+no migration and no network access. ACRA has no public retrieval API; the warehouse
+never automates BizFile+ and holds no Singpass or ACRA credentials. Before enabling
+`acra` outside local testing the operator records how files are obtained (company
+officers, a licensed vendor) and confirms redistribution terms, pins the ACRA
+taxonomy (`source_required_prefixes.acra` lists the unverified
+`www.acra.gov.sg/taxonomy/` without a pinned entry, so `taxonomy status` and `doctor`
+fail once `acra` is enabled), runs `inbox check --source acra`, and runs a three-file
+canary (OPERATIONS.md, "ACRA financial statements (Singapore)").
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.

@@ -147,6 +147,9 @@ them, so discovery usually leaves them NULL.
   derived values as they are, including NULL for conflicting or invalid dei values,
   so PostgreSQL and the fact rows agree. A period that differs from discovery only in
   case isn't a mismatch.
+- These rules are the SEC adapter's. Each source adapter derives the fields
+  (`SourceRegistry.fiscal_focus`); ESEF's, EDINET's, DART's and the inbox sources'
+  rules are under their sections below.
 
 ### `xbrl_contexts`
 
@@ -220,6 +223,179 @@ keep their names, but hold source-neutral keys (`domain/sources.py`, migration
 - **Object keys** carry the source: `bronze/<source>/filings/<entity key>/<filing
   key>/...` and `manifests/<source>/filings/<filing key>/...`, so SEC keys stay
   `bronze/sec/...` and `manifests/sec/...`.
+
+## ESEF filings
+
+ESEF annual reports come from XBRL International's filings.xbrl.org
+(`sources/esef.py`, source code `esef`). Each filings.xbrl.org record becomes:
+
+| Field | Value |
+|---|---|
+| `accession` (filing key) | `esef-<fxo_id>`, e.g. `esef-213800H2PQMIF3OVZY47-2023-12-31-ESEF-GB-0`; a record whose key isn't valid is skipped and logged |
+| `cik` (entity key) | `resolve_entity_key("http://standards.iso.org/iso/17442", <LEI>)`; the LEI is trimmed and upper-cased first, so one issuer has one key |
+| `company_name` | the included entity's `name` (the LEI if it has none) |
+| `form` | `ESEF` |
+| `filed_date` | the date of `date_added` (when filings.xbrl.org added the report) |
+| `report_date` | `period_end` |
+| `archive_directory_url` | `https://filings.xbrl.org` + the directory of `package_url` |
+| `primary_document_url` | `https://filings.xbrl.org` + `report_url` |
+| `is_inline_xbrl` | true |
+| `fiscal_period`, `fiscal_year` | `FY` and `report_date`'s year; without a report date, the end year of the latest non-nil, non-dimensional duration fact (else NULL with a `warehouse:fiscalYearUnknown` warning) |
+
+Discovery stores one `companies` row per LEI (`cik` = entity key, `name`; the other
+columns stay NULL). Its facts carry the report's own entity scheme and identifier
+(the LEI scheme and LEI).
+
+- **Package.** The bronze package archive is the report package zip as published,
+  byte-identical, at `bronze/esef/filings/<entity key>/<filing key>/packages/sha256=<published
+  sha256>/package.zip`. Its bytes must match filings.xbrl.org's `sha256`; a mismatch
+  stores nothing. A package that matches but fails the ZIP checks (traversal,
+  member count, sizes, ratio) or has no single inline report under `reports/` is kept
+  at `quarantine/esef/filings/<filing key>/sha256=<sha256>/package.zip` and the fetch
+  fails permanently.
+- **Manifest.** Members are the zip entries (path inside the zip, size, SHA-256);
+  exactly one, the inline XBRL report under `<top>/reports/`, is the entrypoint
+  (`report_url` decides between several). It is stored at
+  `manifests/esef/filings/<filing key>/package-sha256=<sha256>/filing-sha256=<hash of
+  the FilingRef>.json`; a second fetch of the same bytes reuses it without
+  downloading the package again.
+- **Parse.** Arelle reads the report from the extracted package; references may reach
+  anything under the package's top directory, and the package's
+  `META-INF/catalog.xml` remaps its own extension taxonomy URLs to package files.
+  A catalog entry that leaves the package or overlaps a pinned taxonomy prefix fails
+  the extraction.
+
+## EDINET filings
+
+Japanese securities reports come from the FSA's EDINET API v2 (`sources/edinet.py`,
+source code `edinet`). Discovery reads the document list
+(`/api/v2/documents.json?date=<day>&type=2`) for each day of the window and keeps
+records with `xbrlFlag` `1`, `withdrawalStatus` `0`, `disclosureStatus` not `1`/`2`
+(hidden by the FSA), not a metadata-correction notice (`docInfoEditStatus` `1`), a
+`docTypeCode` in the run's forms (default `XBRL_EDINET_DOC_TYPES`), and the requested
+EDINET code when one is given. Each kept record becomes:
+
+| Field | Value |
+|---|---|
+| `accession` (filing key) | `edinet-<docID>`, e.g. `edinet-S100TR7I`; a record with a malformed `docID` or `edinetCode` is skipped and logged |
+| `cik` (entity key) | `resolve_entity_key("http://disclosure.edinet-fsa.go.jp", <edinetCode>)` (upper-cased) |
+| `company_name` | `filerName` (the EDINET code if empty) |
+| `form` | `docTypeCode`: 120 annual securities report, 130 its amendment, 140/150 quarterly, 160/170 semi-annual |
+| `filed_date` | the date of `submitDateTime` (Japan time) |
+| `report_date` | `periodEnd` |
+| `is_amendment` | true for 130, 150, 170 |
+| `archive_directory_url` | `https://api.edinet-fsa.go.jp/api/v2/documents/<docID>` (no key) |
+| `is_inline_xbrl` | false (the entrypoint is the `.xbrl` instance) |
+| `fiscal_year` | the year of `jpdei_cor:CurrentFiscalYearEndDateDEI`; without it, `report_date`'s year for 120/130, else unchanged |
+| `fiscal_period` | `jpdei_cor:TypeOfCurrentPeriodDEI` (`FY`, `Q1`, `Q2`, `Q3`, `HY` as `H1`); without it, `FY` for 120/130, else unchanged |
+
+Only non-nil, non-dimensional jpdei facts count; conflicting or invalid values leave
+the field to the fallback with a `warehouse:fiscalFocusInvalid` warning.
+
+- **Package.** The `type=1` zip ("submitted document and audit report") stored
+  byte-identical at `bronze/edinet/filings/<entity key>/<filing key>/packages/sha256=<sha256>/package.zip`.
+  EDINET answers errors with HTTP 200 and a JSON body; a non-zip body is a
+  `SourceAccessError` (`SourceRateLimited` for status 429) and stores nothing.
+- **Manifest.** Members are the zip entries; exactly one, the instance directly under
+  `XBRL/PublicDoc/` (`*.xbrl`), is the entrypoint. The audit report's instance under
+  `XBRL/AuditDoc/` is a plain member. No instance or several, or a zip that fails the
+  archive checks, quarantines the zip at
+  `quarantine/edinet/filings/<filing key>/sha256=<sha256>/package.zip`. Member
+  `source_url` is the keyless download URL (`...?type=1`).
+
+## DART filings
+
+Korean periodic reports come from the FSS's OpenDART API (`sources/dart.py`, source
+code `dart`). Discovery pages `/api/list.json` (`bgn_de`/`end_de` from the window,
+`pblntf_ty=A`, `page_count` = `XBRL_DART_PAGE_COUNT`, `corp_code` for one company)
+through `total_page`. Without `corp_code` OpenDART searches at most three months, so
+a longer window becomes consecutive searches, each from its start date to the day
+before the same day three calendar months later (a day the month lacks becomes its
+last day) or `filed_to`, in order (`search_windows`); with `corp_code` the window is
+one search. Status `013` (no data) is an empty search. Report names map to
+report codes:
+
+| `report_nm` | `form` (reprt_code) | `fiscal_period` |
+|---|---|---|
+| `사업보고서 (YYYY.MM)` (business report) | `11011` | `FY` |
+| `반기보고서 (YYYY.MM)` (half-year report) | `11012` | `H1` |
+| `분기보고서 (YYYY.03)` (quarterly report) | `11013` | `Q1` |
+| `분기보고서 (YYYY.09)` | `11014` | `Q3` |
+
+Other reports, and quarterly reports for other months (a non-December year end's
+quarter can't be told apart without the year end), are skipped. A leading tag with
+`정정` (`[기재정정]`, `[첨부정정]`) sets `is_amendment`; a remark (`rm`) containing `철`
+(withdrawn) skips the report.
+
+| Field | Value |
+|---|---|
+| `accession` (filing key) | `dart-<rcept_no>`, e.g. `dart-20240312000736` |
+| `cik` (entity key) | `resolve_entity_key("https://opendart.fss.or.kr/corp_code", <corp_code>)` |
+| `company_name` | `corp_name` |
+| `filed_date` | `rcept_dt` |
+| `report_date` | the last day of the `(YYYY.MM)` month |
+| `archive_directory_url` | `https://opendart.fss.or.kr/api/fnlttXbrl.xml?rcept_no=<rcept_no>&reprt_code=<code>` (no key) |
+| `fiscal_year` | `report_date`'s year |
+
+- **Package.** The original XBRL zip from `/api/fnlttXbrl.xml` (`rcept_no`,
+  `reprt_code`), stored byte-identical under `bronze/dart/...`. A non-zip body is
+  OpenDART's status message: `020` (daily limit) raises `SourceRateLimited`, anything
+  else (`013`, `014`, key errors) `SourceAccessError`; nothing is stored.
+- **Manifest.** Exactly one `.xbrl` member is the entrypoint; none or several, or a
+  zip that fails the archive checks, quarantines the zip under `quarantine/dart/`.
+
+Both sources store one `companies` row per entity key (`cik`, `name`) from
+discovery. API keys are never part of a filing reference, manifest, object key or
+metadata, job payload, or log record (SECURITY.md).
+
+## Inbox filings (NSE, MCA, ACRA)
+
+India's and Singapore's XBRL have no API the warehouse may call, so the operator
+places files in an inbox (`sources/inbox.py`, OPERATIONS.md "Operator file inbox"). Each profile is a
+source code: `nse` (NSE/BSE financial results, entity scheme `urn:isin`, ISIN
+`^[A-Z]{2}[A-Z0-9]{9}[0-9]$`) and `mca` (MCA21 AOC-4 XBRL, entity scheme
+`https://www.mca.gov.in/cin`, CIN `^[LU][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6}$`),
+and `acra` (ACRA XBRL financial statements, entity scheme
+`https://www.acra.gov.sg/uen`, UEN
+`^([0-9]{8}[A-Z]|[0-9]{9}[A-Z]|[TSR][0-9]{2}[A-Z]{2}[0-9]{4}[A-Z])$`: business,
+local company, and other entities, upper case; the check letter isn't verified).
+A UEN becomes the entity key `resolve_entity_key("https://www.acra.gov.sg/uen",
+"201912345K")`; `fiscal_period` defaults to `FY` and `fiscal_year` is the
+`period_end` year, so a June 2024 year-end is FY 2024.
+Each valid row of `<XBRL_INBOX_DIR>/<code>/index.csv` becomes:
+
+| Field | Value |
+|---|---|
+| `accession` (filing key) | `<code>-<native_id>`, e.g. `nse-RELIANCE-2024-Q4` |
+| `cik` (entity key) | `resolve_entity_key(<entity_scheme or the profile's>, <entity_id>)` |
+| `company_name` | `company_name` (the entity id if empty) |
+| `form` | `form`, as written |
+| `filed_date` | `filed_date` (the discovery window filters on it) |
+| `report_date` | `period_end` |
+| `fiscal_period` | `fiscal_period`, else the profile default `FY`; kept at parse |
+| `fiscal_year` | `period_end`'s year; kept at parse |
+| `archive_directory_url` | `inbox://<code>/<native_id>` (provenance; never fetched) |
+| `primary_document_url` | the optional `source_url` (provenance only; never fetched) |
+
+A row with an invalid filing key, date, entity id, fiscal period, scheme, or
+`source_url` is skipped and logged (`inbox_row_skipped`). A missing required column
+or a repeated `native_id` stops discovery with `ValueError`. One `companies` row is
+stored per entity key.
+
+- **Package.** Fetch reads the row again and copies `file`, which must resolve
+  (after symlinks) inside `<XBRL_INBOX_DIR>/<code>/`, exist, fit
+  `XBRL_FILING_MAX_BYTES`, and match `sha256` when given; a failure stores nothing.
+  A `.zip` is stored byte-identical; a single `.xbrl`, `.xml`, `.xhtml` or `.html`
+  file is stored as a one-member zip (fixed timestamps, so the same bytes give the
+  same package). Either is stored at
+  `bronze/<code>/filings/<entity key>/<filing key>/packages/sha256=<sha256>/package.zip`;
+  changed bytes give a new package and the earlier one stays. The inbox file is
+  never modified.
+- **Manifest.** Exactly one member is the instance: a `.xbrl`, an `.xml` whose root
+  is `xbrli:xbrl`, or an `.xhtml`/`.html` that declares the inline XBRL namespace.
+  None or several, or a zip that fails the archive checks, quarantines the package
+  under `quarantine/<code>/filings/<filing key>/sha256=<sha256>/package.zip`. Member
+  `source_url` is the `inbox://` URL.
 
 ## Companies
 

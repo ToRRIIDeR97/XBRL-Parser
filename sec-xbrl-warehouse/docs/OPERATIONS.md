@@ -11,7 +11,7 @@
 7. worker
 8. API
 
-![UML deployment view of the Compose services: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker-parse has no other network; prometheus and grafana in the monitoring profile](diagrams/deployment-compose.svg)
+![UML deployment view of the Compose services: worker, worker-parse, admin, and api containers reach postgres, minio, and clickhouse over the internal backend network; worker-parse has no other network; prometheus and grafana in the monitoring profile; the worker reaches SEC EDGAR, filings.xbrl.org (with esef enabled), EDINET and OpenDART (with edinet or dart enabled), and taxonomy hosts](diagrams/deployment-compose.svg)
 
 ## Identities and the admin service
 
@@ -75,6 +75,329 @@ A worker keeps the lock for its whole lifetime once it has sent an SEC request, 
 checks its lock connection at most every `XBRL_SEC_EGRESS_CHECK_SECONDS` (default 30)
 before SEC requests; if the connection dropped (which releases the lock), it
 re-acquires the lock or stops with `SecEgressBusyError` instead of sending.
+
+## Sources and per-source egress
+
+`XBRL_ENABLED_SOURCES` (default `sec`, comma-separated source codes such as
+`sec,esef`) lists the regulators this deployment fetches from. Each enabled source gets
+an adapter in the worker's `SourceRegistry`, its own HTTP client (host allowlist, rate,
+headers), and its own egress lock, `xbrl:<source>-egress` (`xbrl:sec-egress` for the
+SEC, unchanged). Locks of different sources don't block each other; a second process
+sending the same source's traffic gets `EgressBusyError` (`SecEgressBusyError` for the
+SEC) and defers the job exactly as described above.
+
+- **Use the same `XBRL_ENABLED_SOURCES` in every worker and CLI process** that shares
+  the control database. A `discover_filings`, `fetch_filing`, or `parse_filing` job for
+  a source that isn't enabled fails permanently (`UnsupportedSourceError`) and is never
+  sent to the SEC instead.
+- **One fetch worker per source.** `--job-type` can't filter by source, so a fetch
+  worker claims fetch and discovery jobs for every enabled source and takes a source's
+  lock on its first request for it, holding it until it stops. Run one fetch worker
+  per enabled source; each source's jobs settle on the worker that first holds its
+  lock, and the others defer those jobs as busy without spending attempts.
+- **Discovery for a source:** enqueue `discover_filings` with `{"source": "<code>", ...}`.
+  Without `source` the job is SEC discovery as before (`filing discover`,
+  `filing discover-latest`); a legacy `cik` payload is the SEC entity.
+- **Taxonomy coverage.** `config/taxonomy_packages.yml` may list
+  `source_required_prefixes: {<code>: [prefixes]}`. `doctor` and offline extraction
+  require the US `required_prefixes` plus those of each enabled source.
+- Inbox sources (`nse`, `mca`, `acra`) read operator files from local disk: no
+  client, no lock, no host (see "Operator file inbox").
+- Adapters exist for `sec`, `esef`, `edinet`, `dart`, `nse`, `mca` and `acra`; enabling any other code makes `worker run` stop
+  at startup with `ConfigurationError` until that source's adapter is added. The
+  sources' host allowlists may not overlap (checked at startup).
+
+## ESEF filings
+
+`esef` fetches EU and UK annual reports in ESEF (inline XBRL, IFRS) from XBRL
+International's free JSON:API at `https://filings.xbrl.org/api`. Keys and fields are
+in DATA_MODEL.md, "ESEF filings".
+
+**Reuse terms.** The API is free, "may be changed at any time", may be rate limited
+or withdrawn, and the site states no data licence. Before enabling `esef` in
+production, confirm reuse terms with XBRL International and record the answer.
+filings.xbrl.org is a third-party aggregator, not a regulator: it can be
+incomplete or late, and its digests prove only that the bytes are the ones it
+published (SECURITY.md).
+
+Enable it (each step that sends traffic needs the operator's approval):
+
+1. **Pin the taxonomies.** `config/taxonomy_packages.yml` lists
+   `source_required_prefixes.esef` (the ESMA ESEF taxonomy and IFRS Accounting
+   Taxonomy years) but no pinned entries, so with `esef` enabled `taxonomy status`
+   shows those prefixes `uncovered`, `doctor` fails, and offline extraction refuses to
+   start. For each ESEF taxonomy (`www.esma.europa.eu`) and IFRS Accounting Taxonomy
+   (`www.ifrs.org` or `xbrl.ifrs.org`) package: download it once from the publisher,
+   record its SHA-256 and size, and add an entry as in "Adding a taxonomy year"
+   (`package` when it carries `META-INF/taxonomyPackage.xml`). Then run
+   `taxonomy sync` and `taxonomy status` until no row is `uncovered`. Check the
+   listed years against the canary's filings and add newer ESMA years they import.
+2. **Allow the taxonomy hosts.** The default `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` now
+   includes `www.esma.europa.eu` and `www.ifrs.org`. An existing `.env` that sets the
+   variable keeps its old list: add both hosts there (the unit test
+   `test_repository_registry_entries_are_on_allowed_hosts` compares the effective list
+   with `network_policy.allowed_taxonomy_hosts` and fails until they match).
+3. **Enable the source** in every process: `XBRL_ENABLED_SOURCES=sec,esef`.
+   `XBRL_ESEF_PAGE_SIZE` (default 100), `XBRL_ESEF_MAX_PAGES` (default 50 per run, per
+   country) and `XBRL_ESEF_COUNTRIES` (comma-separated ISO codes; empty = one feed for
+   all countries) bound discovery.
+4. **Run one ESEF fetch worker.** Its traffic goes only to `filings.xbrl.org` at no
+   more than 2 requests/s with `XBRL_SEC_USER_AGENT`, under the `xbrl:esef-egress`
+   lock, so it can run beside the SEC worker. As with every source, a fetch worker
+   claims both sources' jobs (see "Sources and per-source egress"):
+
+   ```bash
+   XBRL_ENABLED_SOURCES=sec,esef xbrl-warehouse worker run --job-type fetch_filing --job-type discover_filings
+   XBRL_ENABLED_SOURCES=sec,esef XBRL_ARELLE_OFFLINE=true xbrl-warehouse worker run --job-type parse_filing
+   ```
+
+5. **Discover** by enqueueing a `discover_filings` job with
+   `{"source": "esef", "filed_from": "2024-04-01", "filed_to": "2024-04-30"}`
+   (dates are when filings.xbrl.org added the report; add `"entity": "<LEI>"` for one
+   issuer). It pages newest first and stops once past `filed_from`.
+6. **Canary (AC-6).** Discover one week, ingest three filings with offline parsing,
+   and confirm `ifrs-full` facts in `v_xbrl_facts_latest` and canonical revenue.
+
+Fetch re-reads the filing's record, downloads the package, and checks it against the
+published SHA-256 before storing it. A digest mismatch stores nothing and fails
+permanently; rediscover after filings.xbrl.org corrects the record. A package that
+fails the archive checks is kept under `quarantine/esef/` for diagnosis.
+
+## EDINET and DART filings
+
+`edinet` fetches Japanese securities reports from the FSA's EDINET API v2
+(`api.edinet-fsa.go.jp`); `dart` fetches Korean periodic reports from the FSS's
+OpenDART API (`opendart.fss.or.kr`). Keys, forms and fiscal rules are in
+DATA_MODEL.md, "EDINET filings" and "DART filings".
+
+**API keys.** Both APIs are free but need a per-user key: register on the EDINET
+site (EDINET API specification v2, 2-3) and on opendart.fss.or.kr. Use your own keys
+and don't share them (OpenDART's terms forbid it). Put them only in `.env` (or the
+deployment's secret store):
+
+```bash
+XBRL_EDINET_API_KEY=<your EDINET key>
+XBRL_DART_API_KEY=<your 40-character OpenDART key>
+```
+
+A worker whose job types send that source's traffic (`fetch_filing`,
+`discover_filings`, `ingest_filing`, or no `--job-type` filter) refuses to start
+with `ConfigurationError` when the key is missing; parse-only workers don't need it.
+The key goes only into the outgoing request (`Subscription-Key` / `crtfc_key`); it is
+masked in every log line, error and download sidecar, and is never part of a filing
+reference, manifest, object key, job payload or metric label (SECURITY.md). To rotate
+a key, reissue it on the regulator's site, update `.env`, and restart the workers.
+
+**Limits.** Each client sends at most 1 request/s, one at a time, under its own
+`xbrl:edinet-egress` / `xbrl:dart-egress` lock.
+
+- *OpenDART* allows about 20,000 calls per key per day (status `020`). A `020`
+  answer raises `SourceRateLimited`: the job goes back to the queue no earlier than
+  00:05 Korea time (the next day) and spends an attempt, so a long backfill should
+  stay under the daily budget (one call per result page of 100 reports, plus one per
+  package). Without a company (`entity`), OpenDART searches at most three months,
+  so discovery splits a longer window into consecutive searches of up to three
+  calendar months each (more calls: plan the budget per search, not per job).
+- *EDINET* publishes no daily quota but answers bursts with status 429
+  (`SourceRateLimited`, retried after 15 minutes). One discovery run reads one
+  document list per day, at most `XBRL_EDINET_MAX_DAYS` (default 31) days.
+
+Enable them (each step that sends traffic needs the operator's approval):
+
+1. **Pin the taxonomies.** `source_required_prefixes` lists
+   `disclosure.edinet-fsa.go.jp/taxonomy/` for `edinet` and `dart.fss.or.kr/` for
+   `dart` (unverified: confirm DART's taxonomy namespaces with the canary) but no
+   pinned entries, so with either source enabled `taxonomy status` shows the prefix
+   `uncovered`, `doctor` fails, and offline extraction refuses to start. Download the
+   FSA's yearly EDINET taxonomy packages (from `disclosure2dl.edinet-fsa.go.jp`) and
+   the taxonomy DART filings import, record each SHA-256 and size, add pinned entries
+   as in "Adding a taxonomy year", then narrow the required prefixes to the releases
+   in use. Run `taxonomy sync` and `taxonomy status` until nothing is `uncovered`.
+2. **Allow the taxonomy hosts.** The default `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` now
+   includes `disclosure.edinet-fsa.go.jp` and `disclosure2dl.edinet-fsa.go.jp`. An
+   existing `.env` that sets the variable keeps its old list: add both hosts there.
+   Add DART's taxonomy host only after confirming it.
+3. **Set the keys** (above) and **enable the sources** in every process, e.g.
+   `XBRL_ENABLED_SOURCES=sec,edinet,dart`. `XBRL_EDINET_DOC_TYPES` (default
+   `120,130,140,150,160,170`) and `XBRL_DART_PAGE_COUNT` (default 100) bound discovery.
+4. **Run one fetch worker per source**, as for every source (see "Sources and
+   per-source egress"). Each fetch worker needs both keys when both sources are
+   enabled, because it claims both sources' jobs.
+5. **Discover** with `discover_filings` jobs:
+   `{"source": "edinet", "filed_from": "2024-06-24", "filed_to": "2024-06-28"}`
+   (EDINET file dates; `"entity": "E02144"` for one filer, `"forms": ["120"]` for one
+   document type) or
+   `{"source": "dart", "filed_from": "2024-03-01", "filed_to": "2024-03-31"}`
+   (receipt dates; `"entity": "00126380"` for one corp_code, `"forms": ["11011"]`).
+6. **Canary (AC-9).** With approval and your own keys, discover one week of each
+   source, ingest three filings each with offline parsing, and confirm their facts.
+
+A JSON or XML error body instead of a zip stores nothing; a zip that fails the
+archive checks or has no single instance is kept under `quarantine/edinet/` or
+`quarantine/dart/`.
+
+## Operator file inbox (NSE, MCA, ACRA)
+
+India's listed-company results (NSE/BSE) and MCA21 company filings (AOC-4 XBRL) are
+published as XBRL, but without an API the warehouse may call: the exchange sites use
+bot protection and state no data licence, and MCA sells public copies per document.
+**The warehouse never crawls NSE, BSE, or MCA.** The operator obtains each file under
+the source's terms (a manual download the terms allow, a purchase, a licensed
+vendor), records where it came from, and places it in the inbox. Keys and fields are
+in DATA_MODEL.md, "Inbox filings (NSE, MCA, ACRA)". Singapore's ACRA financial
+statements use the same inbox (`acra`); see "ACRA financial statements (Singapore)"
+below for how they may be obtained and the extra enablement gate.
+
+**Layout.** `XBRL_INBOX_DIR` (default `data/inbox`; `/app/data/inbox` in the Compose
+`app_data` volume) holds one folder per source code:
+
+```text
+data/inbox/
+  nse/
+    index.csv
+    reliance-2024-q4.xml
+    2024/tcs-q4.zip
+  mca/
+    index.csv
+    aoc4-L17110MH1973PLC019786-2024.zip
+  acra/
+    index.csv
+    201912345K-fs-2024.xml
+```
+
+`index.csv` is UTF-8 with a header row (a BOM is fine). Columns:
+
+| Column | Required | Meaning |
+|---|---|---|
+| `native_id` | yes | Your unique id for the filing; the filing key is `<code>-<native_id>`. ASCII letters, digits, `.`, `_`, `-`, starting with a letter or digit. |
+| `entity_id` | yes | `nse`: the ISIN (`INE002A01018`); `mca`: the CIN (`L17110MH1973PLC019786`); `acra`: the UEN (`201912345K`, `53312345A`, `T08LL0001A`). Upper case. |
+| `company_name` | yes | Issuer name (may be empty; the id is used then). |
+| `form` | yes | Your form label, e.g. `results`, `AOC-4`; `forms` in a discovery job filters on it. |
+| `filed_date` | yes | `YYYY-MM-DD`; the discovery window filters on it. |
+| `period_end` | yes | `YYYY-MM-DD`; the report date and fiscal year. |
+| `file` | yes | Path relative to the source folder: a `.zip`, `.xbrl`, `.xml`, `.xhtml` or `.html`. |
+| `entity_scheme` | no | Overrides the profile's scheme (`urn:isin`, `https://www.mca.gov.in/cin`, `https://www.acra.gov.sg/uen`). |
+| `fiscal_period` | no | `FY` (default), `Q1`-`Q4`, `H1`, `H2`, ... |
+| `sha256` | no | SHA-256 of `file`; when given, fetch refuses other bytes. |
+| `source_url` | no | Where you obtained it (`http(s)`); stored as provenance, never fetched. |
+
+A `.zip` needs exactly one instance (a `.xbrl`, an `.xml` whose root is
+`xbrli:xbrl`, or an inline `.xhtml`/`.html`) and passes the usual archive limits; a
+single file is wrapped as a one-member package. `file` must stay inside the source
+folder after symlinks are followed (no `..`, absolute paths, or links that leave it)
+and fit `XBRL_FILING_MAX_BYTES`. The warehouse only reads the inbox; keep the files
+after loading (they are your copy of the source).
+
+**Check before queueing.** `inbox check` validates every row and file and queues
+nothing:
+
+```bash
+xbrl-warehouse inbox check --source nse
+# BAD 2 (file good.xml): native_id 'BAD 2' does not make a valid filing key
+# MISSING-3 (file absent.xml): file absent.xml does not exist
+# 1 valid, 2 problems
+```
+
+It prints one line per problem (the row's `native_id`, or its line number, and its
+`file`), then `<n> valid, <m> problems`, and exits 1 when there are problems. It
+checks the fields, the filing key, the ISIN/CIN/UEN pattern, path containment,
+existence, that the file is a regular file (not a folder, FIFO, socket or device),
+size, and the digest when given; every missing column (one line each) and every
+repeated `native_id` is reported too (discovery refuses both, naming every missing
+column). A filesystem error such as a name too long is a problem line, and control
+characters in index values are printed escaped. Unknown columns are listed as
+warnings: a misspelt `sha256` would otherwise skip the digest check. Instance
+contents are checked at fetch.
+
+Load files (each step that starts a worker needs the operator's approval):
+
+1. **Pin the taxonomies.** `source_required_prefixes` lists `www.bseindia.com/xbrl/`
+   and `www.nseindia.com/xbrl/` for `nse` and `www.mca.gov.in/XBRL/` for `mca`
+   (unverified: confirm them from the schema references of your first files) with no
+   pinned entries, so with either source enabled `taxonomy status` shows them
+   `uncovered`, `doctor` fails, and offline extraction refuses to start. Obtain the
+   NSE/BSE results taxonomy and the MCA Ind AS taxonomy packages from their
+   publishers (with approval, under their terms), record each SHA-256 and size, add
+   pinned entries as in "Adding a taxonomy year", narrow the prefixes to what your
+   files reference, add the confirmed hosts to `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`
+   (and `network_policy`), then run `taxonomy sync` and `taxonomy status` until
+   nothing is `uncovered`.
+2. **Place the files** and `index.csv` in `<XBRL_INBOX_DIR>/<code>/` where the fetch
+   worker can read them. Under Compose that is the `app_data` volume, e.g.
+   `docker compose cp ./inbox/nse/. worker:/app/data/inbox/nse/` (files must be
+   readable by UID 10001). Run `inbox check --source <code>` (in the same container)
+   until it reports no problems.
+3. **Enable the source** in every process, e.g. `XBRL_ENABLED_SOURCES=sec,nse,mca`.
+   No key, client or lock is needed; any fetch worker claims inbox jobs.
+4. **Discover** with a `discover_filings` job:
+   `{"source": "nse", "filed_from": "2024-04-01", "filed_to": "2024-06-30"}` (`filed_date`
+   window; both bounds optional; `"entity": "INE002A01018"` for one issuer, `"forms":
+   ["results"]`). Bad rows are skipped and logged (`inbox_row_skipped`).
+5. **Canary (AC-7).** Load three NSE results files you obtained, parse them with
+   `XBRL_ARELLE_OFFLINE=true`, and confirm their facts in `v_xbrl_facts_latest`.
+
+A fetch reads the index row again, so a corrected `file` or `sha256` applies on the
+next attempt; containment, digest, size, missing-file, and type failures store
+nothing and fail the job permanently (fix the row, then `jobs retry`). Changed bytes
+make a new content-addressed package; the earlier one stays. A package with no single
+instance, or a zip that fails the archive checks, is kept under `quarantine/<code>/`.
+
+## ACRA financial statements (Singapore)
+
+Singapore companies file XBRL financial statements with ACRA (BizFinx). As of
+October 2026 ACRA has no public retrieval API: a company's authorised officers
+(directors, company secretary, registered filing agent) can retrieve that company's
+own XBRL through BizFile+, ACRA's API is for submission only, and some vendors resell
+ACRA XBRL financials under licence. SGX announcements are mostly PDF and are out of
+scope. **The warehouse never automates BizFile+ or any ACRA or SGX site, and never
+holds Singpass or other ACRA credentials.** Files come in only through the `acra`
+inbox profile (entity scheme `https://www.acra.gov.sg/uen`, keys in DATA_MODEL.md).
+
+Ways files may lawfully reach the inbox, each the operator's call under its terms:
+the company's own officers or filing agent hand over the XBRL they retrieved or
+filed; a vendor licence that allows loading and the intended reuse; files a company
+publishes itself. Record the route for every file (for example in `source_url` or
+your own register).
+
+`index.csv` example (a June year-end company; `fiscal_period` defaults to `FY` and
+`fiscal_year` is the `period_end` year):
+
+```csv
+native_id,entity_id,company_name,form,filed_date,period_end,file
+201912345K-FS-2024,201912345K,Example Pte. Ltd.,FS,2024-07-30,2024-06-30,201912345K-fs-2024.xml
+```
+
+The UEN must be one of the three upper-case shapes: business `nnnnnnnnX`, local
+company `yyyynnnnnX`, other entities `TyyPQnnnnX` (`T`, `S` or `R`, two digits, a
+two-letter entity type, four digits, a check letter). Anything else (lower case, a
+hyphen, a wrong prefix, an empty cell) is skipped at discovery and reported by
+`inbox check --source acra`. The check letter isn't verified.
+
+**Enablement gate (AC-6).** `acra` is off by default. Before enabling it anywhere
+except local testing, the operator records how the files are obtained (which route
+above, for which companies) and confirms in writing that the terms allow storing
+the files and redistributing derived facts through the query API. Without that,
+load ACRA files only on a local test install.
+
+Then, with approval for each download or worker start:
+
+1. **Pin the ACRA taxonomy (AC-5).** `source_required_prefixes.acra` lists
+   `www.acra.gov.sg/taxonomy/` (unverified: confirm it from the `schemaRef` of your
+   first files) with no pinned entry, so with `acra` enabled `taxonomy status` shows
+   it `uncovered`, `doctor` fails, and offline extraction refuses to start. Obtain
+   the ACRA taxonomy package(s) for the versions your files reference from ACRA,
+   record each SHA-256 and size, add pinned entries as in "Adding a taxonomy year",
+   narrow the prefix to the confirmed schema locations (keep it equal to
+   `ACRA_PROFILE.taxonomy_prefixes`), add the confirmed host to
+   `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` and `network_policy` (SECURITY.md), then run
+   `taxonomy sync` and `taxonomy status` until nothing is `uncovered`.
+2. **Place the files** in `<XBRL_INBOX_DIR>/acra/` and run
+   `inbox check --source acra` until it reports no problems.
+3. **Enable** `acra` in every process (`XBRL_ENABLED_SOURCES=sec,acra`) and discover
+   with `{"source": "acra", "filed_from": "2024-01-01"}` (`"entity": "201912345K"` for
+   one company).
+4. **Canary.** Parse three ACRA files with `XBRL_ARELLE_OFFLINE=true` and confirm
+   their facts in `v_xbrl_facts_latest`.
 
 ## Fetch and parse workers
 
@@ -204,14 +527,16 @@ xbrl-warehouse taxonomy sync     # download missing or corrupt enabled packages
 ### Adding a taxonomy year
 
 1. Find the official package URL on the publisher's site (FASB `xbrl.fasb.org`, SEC
-   `xbrl.sec.gov`). The host must be on the allowlist.
+   `xbrl.sec.gov`, ESMA `www.esma.europa.eu`, IFRS Foundation `www.ifrs.org` or
+   `xbrl.ifrs.org`). The host must be on the allowlist.
 2. Download it once and record its SHA-256 and size.
 3. If it contains `META-INF/taxonomyPackage.xml` and a catalog limited to that
    family/year, add a `package` entry with its `prefixes`. Otherwise add an `archive`
    entry whose `mappings` point each `https://<host>/<family>/<year>/` prefix at the
    matching directory in the zip (`""` for the zip root). Don't repackage the file.
    Two enabled entries may not claim the same prefix.
-4. Add the family/year to `required_prefixes`.
+4. Add the family/year to `required_prefixes` (or, for one source's taxonomies, to
+   `source_required_prefixes.<code>`).
 5. Run `taxonomy sync` and `taxonomy status`, then re-extract a filing that uses the
    year offline. Package changes alter extraction input, so they ship with an
    extraction revision bump.

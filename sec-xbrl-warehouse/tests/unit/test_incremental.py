@@ -443,3 +443,49 @@ def test_shared_standard_concepts_are_stored_once_across_filings(tmp_path):
             ]
         )
     assert keys[0] == keys[1]  # one stored object for both filings
+
+
+def test_ingestor_routes_packages_and_fiscal_focus_through_the_source_registry() -> None:
+    from sec_xbrl_warehouse.domain.enums import Severity
+    from sec_xbrl_warehouse.domain.models import ValidationIssue
+    from sec_xbrl_warehouse.sources.registry import SourceRegistry
+
+    issue = ValidationIssue(
+        source="fiscal", code="test:focus", severity=Severity.WARNING, message="m"
+    )
+
+    class _Sec:
+        code = "sec"
+        taxonomy_prefixes = ()
+
+        def __init__(self) -> None:
+            self.packages = _FakePackageStore()
+
+        async def discover(self, request):
+            raise AssertionError("not used")
+
+        async def download_package(self, filing):
+            return await self.packages.download_package(filing)
+
+        def fiscal_focus(self, bundle):
+            filing = bundle.filing.model_copy(update={"fiscal_year": 2031})
+            return bundle.model_copy(update={"filing": filing}), (issue,)
+
+    sec, packages = _Sec(), _FakePackageStore()
+    registry = SourceRegistry([sec], packages=packages)
+    control, warehouse = _FakeControl(), _FakeWarehouse()
+    ingestor = IncrementalFilingIngestor(
+        control,
+        registry,
+        _FakeExtractor(),
+        _FakeWriter(),
+        warehouse,
+        settings=Settings(env="test"),
+        fiscal_focus=registry.fiscal_focus,
+    )
+    result = asyncio.run(ingestor.ingest(_filing(), extraction_revision=2))
+    assert result["status"] == "complete"
+    assert sec.packages.downloads == 1 and packages.archives == 1
+    assert control.upserts[-1].fiscal_year == 2031
+    assert warehouse.bundles[0].filing.fiscal_year == 2031
+    assert issue in warehouse.bundles[0].validation_issues

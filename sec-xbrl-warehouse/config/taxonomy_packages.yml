@@ -674,6 +674,49 @@ required_prefixes:
   - xbrl.sec.gov/cyd/2026/
   - xbrl.sec.gov/invest/2013/
 
+# Extra prefixes per source, required only while that source is in
+# XBRL_ENABLED_SOURCES. ESEF (filings.xbrl.org): the ESMA ESEF taxonomy and the IFRS
+# Accounting Taxonomy years the ESEF RTS name. They have no pinned entry yet, so with
+# `esef` enabled `taxonomy status` and `doctor` report them `uncovered` and offline
+# extraction refuses to start until the operator pins the packages (OPERATIONS.md,
+# "ESEF filings"). Keep this list equal to `ESEF_TAXONOMY_PREFIXES` in sources/esef.py.
+source_required_prefixes:
+  esef:
+    - www.esma.europa.eu/taxonomy/2019-03-27/
+    - www.esma.europa.eu/taxonomy/2020-03-16/
+    - www.esma.europa.eu/taxonomy/2021-03-24/
+    - www.esma.europa.eu/taxonomy/2022-03-24/
+    - xbrl.ifrs.org/taxonomy/2019-03-27/
+    - xbrl.ifrs.org/taxonomy/2020-03-16/
+    - xbrl.ifrs.org/taxonomy/2021-03-24/
+    - xbrl.ifrs.org/taxonomy/2022-03-24/
+    - xbrl.ifrs.org/taxonomy/2023-03-23/
+    - xbrl.ifrs.org/taxonomy/2024-03-27/
+  # EDINET (Japan): the FSA's EDINET taxonomy (jpdei, jpcrp, jppfs, jpigp, ...), one
+  # prefix for every yearly release until the pinned packages declare their own.
+  # Keep equal to `EDINET_TAXONOMY_PREFIXES` in sources/edinet.py.
+  edinet:
+    - disclosure.edinet-fsa.go.jp/taxonomy/
+  # DART (Korea): the FSS DART taxonomy. Unverified host; confirm it with the canary's
+  # namespaces. Keep equal to `DART_TAXONOMY_PREFIXES` in sources/dart.py.
+  dart:
+    - dart.fss.or.kr/
+  # NSE (India, operator inbox): the NSE/BSE financial results taxonomies. Unverified
+  # hosts; confirm them with the canary's schema references. Keep equal to
+  # `NSE_PROFILE.taxonomy_prefixes` in sources/inbox.py.
+  nse:
+    - www.bseindia.com/xbrl/
+    - www.nseindia.com/xbrl/
+  # MCA (India, operator inbox): the MCA Ind AS taxonomy for AOC-4 XBRL. Unverified
+  # host. Keep equal to `MCA_PROFILE.taxonomy_prefixes` in sources/inbox.py.
+  mca:
+    - www.mca.gov.in/XBRL/
+  # ACRA (Singapore, operator inbox): the ACRA (BizFinx) taxonomy for XBRL financial
+  # statements. Unverified host; confirm it with the canary's schema references. Keep
+  # equal to `ACRA_PROFILE.taxonomy_prefixes` in sources/inbox.py.
+  acra:
+    - www.acra.gov.sg/taxonomy/
+
 network_policy:
   # Filing documents themselves must come from the checksum-addressed filing
   # package. These hosts are the candidates for taxonomy downloads and for
@@ -685,5 +728,9 @@ network_policy:
     - xbrl.fasb.org
     - xbrl.ifrs.org
     - www.xbrl.org
+    - www.esma.europa.eu
+    - www.ifrs.org
+    - disclosure.edinet-fsa.go.jp
+    - disclosure2dl.edinet-fsa.go.jp
   reject_unlisted_hosts: true
   require_https: true

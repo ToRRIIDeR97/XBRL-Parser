@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import os
 import re
 import stat
@@ -48,6 +49,22 @@ from sec_xbrl_warehouse.sources.base import DiscoveryRequest, DiscoveryResult
 from sec_xbrl_warehouse.sources.keyed import EntityKeys, single_entrypoint, store_zip_package
 
 logger = get_logger(__name__)
+
+
+class MissingColumnsError(ValueError):
+    """`index.csv` lacks required columns; `columns` names every one."""
+
+    def __init__(self, code: str, columns: Sequence[str]) -> None:
+        self.columns = tuple(columns)
+        noun = "column" if len(self.columns) == 1 else "columns"
+        super().__init__(
+            f"{code}/{INDEX_FILE} is missing required {noun} {', '.join(self.columns)}"
+        )
+
+
+class InboxFileMissing(ArtifactIntegrityError):
+    """The inbox file (or a folder on its path) does not exist."""
+
 
 INDEX_FILE = "index.csv"
 REQUIRED_COLUMNS = (
@@ -160,25 +177,25 @@ def read_index(
     inside the folder.
     """
     root = inbox_root(settings, profile.code)
-    if not root.is_dir():
-        return InboxIndex(rows=())
     try:
-        path = contained_path(root, INDEX_FILE)
-    except ArtifactIntegrityError as exc:
-        raise ValueError(str(exc)) from None
-    if not path.is_file():
+        if not root.is_dir():
+            return InboxIndex(rows=())
+        descriptor = open_contained(root, INDEX_FILE)
+    except InboxFileMissing:
         return InboxIndex(rows=())
-    if path.stat().st_size > settings.response_max_bytes:
-        raise ValueError(f"{profile.code}/{INDEX_FILE} exceeds {settings.response_max_bytes} bytes")
+    except (ArtifactIntegrityError, OSError) as exc:
+        raise ValueError(f"{profile.code}/{INDEX_FILE} can't be read: {exc}") from None
     try:
-        with path.open(encoding="utf-8-sig", newline="") as handle:
+        with os.fdopen(descriptor, encoding="utf-8-sig", newline="") as handle:
+            if os.fstat(handle.fileno()).st_size > settings.response_max_bytes:
+                raise ValueError(
+                    f"{profile.code}/{INDEX_FILE} exceeds {settings.response_max_bytes} bytes"
+                )
             reader = csv.DictReader(handle)
             header = [(name or "").strip() for name in reader.fieldnames or ()]
             missing = [column for column in REQUIRED_COLUMNS if column not in header]
             if missing:
-                raise ValueError(
-                    f"{profile.code}/{INDEX_FILE} is missing required column {missing[0]}"
-                )
+                raise MissingColumnsError(profile.code, missing)
             known = set(REQUIRED_COLUMNS) | set(OPTIONAL_COLUMNS)
             unknown = tuple(name for name in header if name not in known)
             reader.fieldnames = header
@@ -302,30 +319,88 @@ def contained_path(root: Path, file: str) -> Path:
         or ".." in posix.parts
     ):
         raise ArtifactIntegrityError(f"Inbox file {file!r} is not a relative path inside the inbox")
-    base = root.resolve()
-    target = (base / posix).resolve()
+    try:
+        base = root.resolve()
+        target = (base / posix).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ArtifactIntegrityError(f"Inbox file {file!r} can't be resolved: {exc}") from None
     if target == base or not target.is_relative_to(base):
         raise ArtifactIntegrityError(f"Inbox file {file!r} resolves outside the inbox")
     return target
 
 
+def open_contained(root: Path, file: str) -> int:
+    """A read-only descriptor for the regular file `file` inside `root`; never blocks.
+
+    `contained_path` resolves the path first (symlinks that stay inside are allowed).
+    The resolved path is then opened one component at a time from the resolved root's
+    descriptor with `O_NOFOLLOW` (`O_DIRECTORY` for folders), so a component swapped
+    for a symlink after the check is refused. The file is opened with `O_NONBLOCK`
+    and `fstat`ed at once: FIFOs, sockets, devices and directories raise
+    `ArtifactIntegrityError` without being read. A missing path raises
+    `InboxFileMissing`. Without `dir_fd` support (Windows) the resolved path is
+    opened directly.
+    """
+    target = contained_path(root, file)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    folder = getattr(os, "O_DIRECTORY", 0)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | nofollow | nonblock
+    try:
+        if os.open in os.supports_dir_fd and nofollow and folder:
+            base = root.resolve()
+            parts = target.relative_to(base).parts
+            directory = os.open(base, os.O_RDONLY | folder)
+            try:
+                for part in parts[:-1]:
+                    inner = os.open(part, os.O_RDONLY | folder | nofollow, dir_fd=directory)
+                    os.close(directory)
+                    directory = inner
+                descriptor = os.open(parts[-1], flags, dir_fd=directory)
+            finally:
+                os.close(directory)
+        else:
+            descriptor = os.open(target, flags)
+    except FileNotFoundError:
+        raise InboxFileMissing(f"Inbox file {file} does not exist") from None
+    except OSError as exc:
+        raise ArtifactIntegrityError(
+            f"Inbox file {file} can't be opened safely: {exc.strerror or exc}"
+        ) from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ArtifactIntegrityError(f"Inbox file {file} is not a regular file")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def file_problems(settings: Settings, profile: InboxProfile, row: InboxRow) -> list[str]:
-    """What stops `row`'s file from being fetched: containment, existence, size, digest."""
+    """What stops `row`'s file from being fetched: containment, type, size, digest.
+
+    Never raises for a filesystem error: each becomes a problem.
+    """
     if not row.file:
         return []
     try:
-        path = contained_path(inbox_root(settings, profile.code), row.file)
+        descriptor = open_contained(inbox_root(settings, profile.code), row.file)
+        with os.fdopen(descriptor, "rb") as handle:
+            if os.fstat(handle.fileno()).st_size > settings.filing_max_bytes:
+                return [f"file {row.file} exceeds filing_max_bytes ({settings.filing_max_bytes})"]
+            if not row.sha256:
+                return []
+            if _SHA256.fullmatch(row.sha256) is None:
+                return ["sha256 is not 64 hexadecimal characters"]
+            digest = hashlib.sha256()
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+            if digest.hexdigest() != row.sha256:
+                return [f"file {row.file} does not match its sha256"]
     except ArtifactIntegrityError as exc:
         return [str(exc)]
-    if not path.is_file():
-        return [f"file {row.file} does not exist"]
-    if path.stat().st_size > settings.filing_max_bytes:
-        return [f"file {row.file} exceeds filing_max_bytes ({settings.filing_max_bytes})"]
-    if row.sha256:
-        if _SHA256.fullmatch(row.sha256) is None:
-            return ["sha256 is not 64 hexadecimal characters"]
-        if sha256_file(path) != row.sha256:
-            return [f"file {row.file} does not match its sha256"]
+    except OSError as exc:
+        return [f"file {row.file} can't be checked: {exc.strerror or exc}"]
     return []
 
 
@@ -441,7 +516,7 @@ class InboxSourceAdapter:
             raise ArtifactIntegrityError(f"{native_id} is not in {self.code}/{INDEX_FILE}")
         if row.sha256 and _SHA256.fullmatch(row.sha256) is None:
             raise ArtifactIntegrityError(f"{native_id}: sha256 is not 64 hexadecimal characters")
-        path = contained_path(self.root, row.file)
+        contained_path(self.root, row.file)  # refuse escapes before anything else
         name = _safe_package_name(PurePosixPath(row.file).name)
         suffix = PurePosixPath(name).suffix.lower()
         if suffix != ".zip" and suffix not in INSTANCE_SUFFIXES:
@@ -454,7 +529,9 @@ class InboxSourceAdapter:
             prefix=f"{self.code}-inbox-", dir=self.settings.temp_dir
         ) as directory:
             copy = Path(directory) / "source"
-            _bounded_copy(path, copy, self.settings.filing_max_bytes, row.file)
+            _bounded_copy(
+                open_contained(self.root, row.file), copy, self.settings.filing_max_bytes, row.file
+            )
             if row.sha256 and sha256_file(copy) != row.sha256:
                 raise ArtifactIntegrityError(f"Inbox file {row.file} does not match its sha256")
             if suffix == ".zip":
@@ -491,29 +568,24 @@ class InboxSourceAdapter:
         return bundle.model_copy(update={"filing": filing.model_copy(update=update)}), ()
 
 
-def _bounded_copy(source: Path, target: Path, limit: int, label: str) -> None:
-    """Copy a regular file of at most `limit` bytes (no symlink at the last step)."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+def _bounded_copy(descriptor: int, target: Path, limit: int, label: str) -> None:
+    """Copy an opened regular file (see `open_contained`) of at most `limit` bytes."""
     try:
-        descriptor = os.open(source, flags)
-    except FileNotFoundError:
-        raise ArtifactIntegrityError(f"Inbox file {label} does not exist") from None
-    except OSError as exc:
-        raise ArtifactIntegrityError(f"Inbox file {label} can't be read: {exc.strerror}") from None
-    with os.fdopen(descriptor, "rb") as handle, target.open("wb") as sink:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            raise ArtifactIntegrityError(f"Inbox file {label} is not a regular file")
-        if info.st_size > limit:
-            raise ArtifactIntegrityError(f"Inbox file {label} exceeds filing_max_bytes ({limit})")
-        copied = 0
-        while chunk := handle.read(1024 * 1024):
-            copied += len(chunk)
-            if copied > limit:
+        with os.fdopen(descriptor, "rb") as handle, target.open("wb") as sink:
+            if os.fstat(handle.fileno()).st_size > limit:
                 raise ArtifactIntegrityError(
                     f"Inbox file {label} exceeds filing_max_bytes ({limit})"
                 )
-            sink.write(chunk)
+            copied = 0
+            while chunk := handle.read(1024 * 1024):
+                copied += len(chunk)
+                if copied > limit:
+                    raise ArtifactIntegrityError(
+                        f"Inbox file {label} exceeds filing_max_bytes ({limit})"
+                    )
+                sink.write(chunk)
+    except OSError as exc:
+        raise ArtifactIntegrityError(f"Inbox file {label} can't be read: {exc.strerror}") from None
 
 
 def _instance_picker(archive: Path) -> Callable[[Sequence[str]], str]:

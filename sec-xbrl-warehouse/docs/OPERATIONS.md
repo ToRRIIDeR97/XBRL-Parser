@@ -296,8 +296,11 @@ xbrl-warehouse inbox check --source nse
 It prints one line per problem (the row's `native_id`, or its line number, and its
 `file`), then `<n> valid, <m> problems`, and exits 1 when there are problems. It
 checks the fields, the filing key, the ISIN/CIN pattern, path containment,
-existence, size, and the digest when given; a missing column or a repeated
-`native_id` is reported too (discovery refuses both). Unknown columns are listed as
+existence, that the file is a regular file (not a folder, FIFO, socket or device),
+size, and the digest when given; every missing column (one line each) and every
+repeated `native_id` is reported too (discovery refuses both, naming every missing
+column). A filesystem error such as a name too long is a problem line, and control
+characters in index values are printed escaped. Unknown columns are listed as
 warnings: a misspelt `sha256` would otherwise skip the digest check. Instance
 contents are checked at fetch.
 

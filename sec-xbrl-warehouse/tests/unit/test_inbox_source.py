@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import os
 import zipfile
 from datetime import date
 from hashlib import sha256
@@ -564,3 +565,101 @@ def test_runtime_services_build_inbox_adapters_without_clients(monkeypatch, tmp_
 
     assert _run(inbox_services()).codes == ("nse",)
     assert built == []
+
+
+# Round 2: every missing column, special files, long names, races, terminal safety ----
+
+
+def test_every_missing_column_is_named(monkeypatch, tmp_path) -> None:
+    adapter, _ = _adapter(tmp_path)
+    _write(
+        tmp_path / "inbox",
+        "nse",
+        [_row("A-1", "a.xml")],
+        columns=("native_id", "company_name", "file"),
+    )
+    with pytest.raises(ValueError) as caught:
+        _discover(adapter)
+    for column in ("entity_id", "form", "filed_date", "period_end"):
+        assert column in str(caught.value)
+    result = _check(monkeypatch, tmp_path)
+    assert result.exit_code == 1, result.output
+    for column in ("entity_id", "form", "filed_date", "period_end"):
+        assert f"missing required column {column}" in result.output
+    assert "0 valid, 4 problems" in result.output
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_fifo_and_directory_are_refused_without_blocking(monkeypatch, tmp_path) -> None:
+    adapter, store = _adapter(tmp_path)
+    inbox = _write(tmp_path / "inbox", "nse", [_row("PIPE", "p.xml"), _row("DIR", "d.xml")])
+    os.mkfifo(inbox / "p.xml")
+    (inbox / "d.xml").mkdir()
+    filings = {f.accession: f for f in _discover(adapter)}
+    for key in ("nse-PIPE", "nse-DIR"):
+        with pytest.raises(ArtifactIntegrityError, match="not a regular file"):
+            _run(asyncio.wait_for(adapter.download_package(filings[key]), timeout=10))
+    assert _objects(store) == []
+    result = _check(monkeypatch, tmp_path)
+    assert result.exit_code == 1, result.output
+    assert "PIPE (file p.xml): Inbox file p.xml is not a regular file" in result.output
+    assert "DIR (file d.xml): Inbox file d.xml is not a regular file" in result.output
+    assert "0 valid, 2 problems" in result.output
+
+
+def test_overlong_file_name_is_a_problem_not_a_crash(monkeypatch, tmp_path) -> None:
+    long_name = "x" * 300 + ".xml"
+    adapter, _ = _adapter(tmp_path)
+    _write(
+        tmp_path / "inbox",
+        "nse",
+        [_row("LONG", long_name), _row("OK", "ok.xml")],
+        {"ok.xml": _instance()},
+    )
+    with pytest.raises(ArtifactIntegrityError):
+        _run(adapter.download_package(_discover(adapter)[0]))
+    result = _check(monkeypatch, tmp_path)
+    assert result.exit_code == 1, result.output
+    assert any(line.startswith("LONG (file x") for line in result.output.splitlines())
+    assert "1 valid, 1 problems" in result.output
+
+
+def test_component_swapped_for_a_symlink_is_refused(monkeypatch, tmp_path) -> None:
+    import sec_xbrl_warehouse.sources.inbox as inbox_module
+
+    if os.open not in os.supports_dir_fd:
+        pytest.skip("needs dir_fd")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "o.xml").write_bytes(_instance())
+    root = tmp_path / "inbox" / "nse"
+    root.mkdir(parents=True)
+    (root / "sub").symlink_to(outside, target_is_directory=True)
+    (root / "last.xml").symlink_to(outside / "o.xml")
+    # As if each path was checked before the folder or file became a link.
+    monkeypatch.setattr(inbox_module, "contained_path", lambda base, file: base.resolve() / file)
+    for file in ("sub/o.xml", "last.xml"):
+        with pytest.raises(ArtifactIntegrityError, match="can't be opened safely"):
+            inbox_module.open_contained(root, file)
+
+
+def test_index_symlink_outside_is_refused(tmp_path) -> None:
+    adapter, _ = _adapter(tmp_path)
+    outside = _write(tmp_path / "elsewhere", "nse", [_row("A-1", "a.xml")])
+    root = tmp_path / "inbox" / "nse"
+    root.mkdir(parents=True)
+    (root / "index.csv").symlink_to(outside / "index.csv")
+    with pytest.raises(ValueError, match=r"index\.csv"):
+        _discover(adapter)
+
+
+def test_check_escapes_control_characters(monkeypatch, tmp_path) -> None:
+    _write(
+        tmp_path / "inbox",
+        "nse",
+        [_row("A-1", "evil\x1b[31m.xml"), _row("B\x1b]0;x\x07", "b.xml")],
+    )
+    result = _check(monkeypatch, tmp_path)
+    assert result.exit_code == 1
+    assert "\x1b" not in result.output and "\x07" not in result.output
+    assert "evil\\x1b[31m.xml" in result.output

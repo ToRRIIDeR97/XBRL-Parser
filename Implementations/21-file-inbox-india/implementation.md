@@ -282,4 +282,65 @@ approval):
    `XBRL_ARELLE_OFFLINE=true`, and confirm their facts (OPERATIONS.md, "Operator file
    inbox").
 
+#### Corrections (round 2)
+
+The verifier rejected 7e4ea4e with three defects and two hardening requests. All are
+fixed on top of it; the acceptance assertions and `verification/` weren't touched or
+read.
+
+- **D1 (AC-1), every missing column named.** `read_index` raises
+  `MissingColumnsError` (a `ValueError` with `.columns`) naming every missing required
+  column: `index.csv is missing required columns entity_id, form, filed_date,
+  period_end` (singular `column` when only one is missing). `inbox check` prints one
+  problem line per missing column (`index.csv: missing required column <name>`), so
+  that header gives `0 valid, 4 problems`.
+- **D2 (AC-3), special files never block.** The new `open_contained` opens the file
+  with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and `fstat`s the descriptor at once;
+  anything but a regular file (FIFO, socket, device, directory) raises
+  `ArtifactIntegrityError("Inbox file <file> is not a regular file")` without a read.
+  Opening a socket fails in the kernel and is refused as "can't be opened safely". Every
+  `OSError` while opening or copying becomes an `ArtifactIntegrityError`, so a
+  directory named `d.xml` no longer raises a raw `IsADirectoryError`. `inbox check`
+  reports these as problems.
+- **D3 (AC-5), filesystem errors are problems.** `file_problems` catches every
+  `OSError` (and `contained_path` turns a failing `resolve()` into an
+  `ArtifactIntegrityError`); the CLI also wraps each row's check, so a 300-character
+  name gives a problem line for that row, the summary, and exit 1.
+- **H1, component-wise open.** `open_contained` resolves the path with
+  `contained_path` (symlinks that stay inside the inbox are still allowed), then opens
+  the resolved path one component at a time from the resolved inbox folder's
+  descriptor (`dir_fd`, `O_NOFOLLOW | O_DIRECTORY` for folders, `O_NOFOLLOW |
+  O_NONBLOCK` for the file), so a folder or file swapped for a symlink after the check
+  is refused. Without `dir_fd` support (Windows) it opens the resolved path directly.
+  `index.csv` goes through the same function; its size comes from `fstat` on that
+  descriptor and the CSV is read from it. Fetch copies from the descriptor, and
+  `inbox check` hashes from it. This supersedes the AC-3 bullet's "the copy opens the
+  resolved path with `O_NOFOLLOW`".
+- **H2, terminal safety.** `inbox check` passes every printed line through
+  `_printable`, which escapes non-printable characters (`\x1b`, `\x07`, `‮`, ...),
+  so escape sequences in `native_id`, `file` or column names can't reach the terminal.
+- **Numbering note.** The round 1 report to the coordinator listed seven numbered
+  deviations; this record's "Deviations" list (four items, with quarantine under item
+  2 and `.htm` under "Limitations") is the authoritative one. The commands table's
+  "deviation 1" is the `.env` taxonomy host list.
+- Regression tests (`tests/unit/test_inbox_source.py`, now 32): every missing column
+  named in discovery and in `inbox check`; a FIFO and a directory refused by fetch
+  (under a 10-second timeout) and reported by `inbox check`; a 300-character file name
+  as a problem, not a crash; a folder and a file swapped for symlinks after the check
+  refused by `open_contained`; an `index.csv` symlink leaving the inbox refused;
+  control characters escaped in `inbox check` output. No existing test changed.
+- Docs: SECURITY.md (component-wise open, special files, filesystem errors, escaped
+  output) and OPERATIONS.md (`inbox check` coverage).
+
+| Command (round 2) | Result |
+| --- | --- |
+| acceptance, 3 runs | 8 passed every run |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` / `ruff format --check .` | pass / 194 files formatted |
+| `mypy src` | pass (90 files) |
+| `pytest -m "not integration"` with the live `.env` | 585 passed, 1 failed (`test_repository_registry_entries_are_on_allowed_hosts`, deviation 1), 1 skipped |
+| same with `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` set to the repository default | 586 passed, 1 skipped (sec-2024.zip not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 52 passed |
+
 ### Verifier record

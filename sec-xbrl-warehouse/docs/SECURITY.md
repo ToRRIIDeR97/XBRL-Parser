@@ -79,9 +79,16 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   than the SEC CIK scheme, an `http(s)` `source_url` without credentials); a bad row is
   skipped. A row's `file` must be relative, without `..`, backslashes or a drive, and
   must resolve after every symlink to a path inside the resolved
-  `<XBRL_INBOX_DIR>/<code>/` (the index itself too); the final open refuses a symlink
-  (`O_NOFOLLOW` where the platform has it) and anything but a regular file. The bytes
-  are copied with the filing byte limit before the optional SHA-256 check, so a file
+  `<XBRL_INBOX_DIR>/<code>/` (the index itself too). The resolved path is then
+  opened one component at a time from the inbox folder's descriptor with
+  `O_NOFOLLOW` (`O_DIRECTORY` for folders), so a folder or file swapped for a symlink
+  after the check is refused (Windows, without `dir_fd`, opens the resolved path).
+  The file is opened with `O_NONBLOCK` and `fstat`ed at once: FIFOs, sockets,
+  devices and directories are refused without a read, so a planted FIFO can't hang a
+  worker. The index is read from the same kind of descriptor, its size taken from
+  `fstat`. Any filesystem error (a name too long, a permission) becomes a refusal or
+  an `inbox check` problem, not a crash, and `inbox check` escapes control
+  characters in index values before printing them. The bytes are copied with the filing byte limit before the optional SHA-256 check, so a file
   that changes during the fetch can't slip past it. Zips get the same checks as SEC
   archives, the instance sniffing parses XML without DTDs, entities or network, and
   a package with no single instance is quarantined. The warehouse never writes to or

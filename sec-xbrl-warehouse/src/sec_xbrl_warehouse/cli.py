@@ -803,6 +803,7 @@ def inbox_check(
     from sec_xbrl_warehouse.sources.inbox import (
         INBOX_PROFILES,
         INDEX_FILE,
+        MissingColumnsError,
         file_problems,
         inbox_root,
         read_index,
@@ -816,32 +817,50 @@ def inbox_check(
         )
     settings = get_settings()
     out = Console(highlight=False, soft_wrap=True)
+
+    def say(line: str) -> None:
+        # Index values are untrusted: never pass control characters to the terminal.
+        out.print(_printable(line), markup=False)
+
     root = inbox_root(settings, profile.code)
     problems: list[str] = []
     valid = 0
     try:
         index = read_index(settings, profile, allow_duplicates=True)
+    except MissingColumnsError as exc:
+        problems += [f"{INDEX_FILE}: missing required column {column}" for column in exc.columns]
     except ValueError as exc:
         problems.append(f"{INDEX_FILE}: {exc}")
     else:
         if not index.rows:
-            out.print(f"No index rows in {root / INDEX_FILE}", markup=False)
+            say(f"No index rows in {root / INDEX_FILE}")
         for column in index.unknown_columns:
-            out.print(f"warning: {INDEX_FILE} column {column!r} is not used", markup=False)
+            say(f"warning: {INDEX_FILE} column {column!r} is not used")
         seen: set[str] = set()
         for row in index.rows:
             found = list(row.problems)
             if row.native_id and row.native_id in seen:
                 found.append(f"native_id {row.native_id} is repeated")
             seen.add(row.native_id)
-            found += file_problems(settings, profile, row)
+            try:
+                found += file_problems(settings, profile, row)
+            except OSError as exc:
+                found.append(f"file can't be checked: {exc.strerror or exc}")
             problems += [f"{row.label} (file {row.file or '-'}): {item}" for item in found]
             valid += not found
     for line in problems:
-        out.print(line, markup=False)
-    out.print(f"{valid} valid, {len(problems)} problems", markup=False)
+        say(line)
+    say(f"{valid} valid, {len(problems)} problems")
     if problems:
         raise typer.Exit(code=1)
+
+
+def _printable(text: str) -> str:
+    """`text` with every non-printable character escaped (`\\x1b`, `\\u202e`, ...)."""
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        for char in text
+    )
 
 
 @company_app.command("show")

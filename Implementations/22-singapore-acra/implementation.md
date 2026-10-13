@@ -197,3 +197,68 @@ approval):
    statements (Singapore)").
 
 ### Verifier record
+
+**Verdict: ACCEPT** candidate 674cd0a (13 October 2026).
+
+Setup: branch `verify/22-singapore-acra` at 674cd0a (parent de96833). `verification/`
+was copied from the main checkout; `acceptance/` matches the main checkout's
+(`diff -r`), and so does everything above "Completion evidence" in this file. The
+main checkout's `.env` and `.venv` are symlinked and not committed. No container was
+touched, alembic wasn't run, and nothing was sent to ACRA, BizFile+, SGX, the SEC or
+a taxonomy host. Tests import the worktree's `src` (checked).
+
+**Commands** (from `sec-xbrl-warehouse/`):
+
+| Command | Result |
+| --- | --- |
+| verification set | 10 passed |
+| acceptance set (3 runs) | 3 passed every run |
+| `python -m compileall -q src tests scripts` | pass |
+| `ruff check .` / `ruff format --check .` | pass / 195 files formatted |
+| `mypy src` | pass (90 files) |
+| `pytest -m "not integration"`, live `.env` | 618 passed, 1 failed (`test_repository_registry_entries_are_on_allowed_hosts`), 1 skipped |
+| same, `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS` = repository default | 619 passed, 1 skipped (sec-2024.zip not installed) |
+| `python scripts/scan_stubs.py` | 0 markers |
+| `RUN_XBRL_INTEGRATION=1 pytest -m integration` | 52 passed |
+
+**Diff review (de96833..674cd0a).**
+
+- AC-1: `ACRA_PROFILE` has code `acra`, scheme `https://www.acra.gov.sg/uen`, default
+  `FY`, and is in `INBOX_PROFILES`. `enabled_sources=("sec", "acra")` is accepted;
+  `ACRA` (upper case) is still rejected.
+- AC-2: the pattern string is identical to the contract's (checked by equality). It
+  is applied with `re.fullmatch` to the trimmed cell, with no `IGNORECASE`. Probes:
+  all three shapes and `T`/`S`/`R` accepted; lower case in any position, a trailing
+  newline, a prefix or suffix character, Arabic-Indic digits, a non-ASCII check
+  letter, and wrong lengths rejected.
+- AC-3/AC-4: no change to the plan 21 adapter; `inbox check` and `runtime_services`
+  pick up `acra` through `INBOX_PROFILES` (worker builds an `InboxSourceAdapter` with
+  no client or lock).
+- AC-5: `source_required_prefixes.acra` equals `ACRA_PROFILE.taxonomy_prefixes` and
+  has no pinned entry. Probe: with `sec,acra` enabled, `coverage_gaps` reports
+  `www.acra.gov.sg/taxonomy/`; with `sec` alone there are no gaps. No host was added
+  to the allowlist or `network_policy`.
+- AC-6: the gate is in OPERATIONS.md, SECURITY.md, `.env.example`, AGENTS.md and
+  HANDOFF.md. No BizFile+/Singpass automation, setting or credential exists; the only
+  code mention is a comment saying the warehouse never automates BizFile+.
+- Docs: ARCHITECTURE, DATA_MODEL, OPERATIONS, SECURITY and both updated SVGs (they
+  parse as XML) are consistent with the code.
+- No change to NSE, MCA, SEC, ESEF, EDINET or DART code paths; their tests pass
+  unchanged.
+
+**Rulings.**
+
+- Edited test line (`set(INBOX_PROFILES) == {"nse", "mca", "acra"}`): accepted. It is
+  the direct consequence of registering the profile, and the test still checks that
+  no inbox profile has a network policy.
+- Deviation 1 (live `.env` allowlist): accepted, environmental and the same as plans
+  19 to 21; the run with the default host list passes.
+- Deviation 2 (no pinned ACRA packages, host not added): accepted. No download was
+  approved, and the fail-closed prefix keeps `doctor` and offline extraction from
+  running `acra` without pins. AC-5 stays an open operator step.
+- Deviation 3 (unverified prefix): accepted. It is marked unverified in code, config
+  and docs; a wrong guess fails closed, and the operator narrows it after the canary.
+- Limitation (no UEN check-letter validation, rare `R` UENs accepted): accepted. The
+  contract specifies a shape pattern only, and the docs state the limitation.
+
+AC-5 and AC-6 remain manual operator steps (listed above).

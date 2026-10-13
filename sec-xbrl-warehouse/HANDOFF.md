@@ -91,6 +91,17 @@ pinned entries, so `taxonomy status` and `doctor` fail once either is enabled),
 runs `inbox check --source <code>`, and runs the AC-7 canary (OPERATIONS.md,
 "Operator file inbox").
 
+Plan 22 adds the `acra` inbox profile for Singapore ACRA XBRL financial statements
+(entity key from the UEN, scheme `https://www.acra.gov.sg/uen`), off by default, with
+no migration and no network access. ACRA has no public retrieval API; the warehouse
+never automates BizFile+ and holds no Singpass or ACRA credentials. Before enabling
+`acra` outside local testing the operator records how files are obtained (company
+officers, a licensed vendor) and confirms redistribution terms, pins the ACRA
+taxonomy (`source_required_prefixes.acra` lists the unverified
+`www.acra.gov.sg/taxonomy/` without a pinned entry, so `taxonomy status` and `doctor`
+fail once `acra` is enabled), runs `inbox check --source acra`, and runs a three-file
+canary (OPERATIONS.md, "ACRA financial statements (Singapore)").
+
 ## Current state
 
 Implementation phases A–F are complete. The repository contains working historical and incremental ingestion, Arelle extraction, canonical mapping, replay-safe storage, bounded query APIs, worker recovery, metrics, and operational procedures. `FUNCTION_STUBS.md` reports zero implementation markers.

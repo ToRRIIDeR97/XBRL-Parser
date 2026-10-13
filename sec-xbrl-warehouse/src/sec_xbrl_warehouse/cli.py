@@ -797,7 +797,7 @@ def _print_taxonomy_statuses(statuses: list[TaxonomyPackageStatus]) -> None:
 
 @inbox_app.command("check")
 def inbox_check(
-    source: str = typer.Option(..., help="Inbox source code (nse or mca)."),
+    source: str = typer.Option(..., help="Inbox source code (nse, mca or acra)."),
 ) -> None:
     """Validate <inbox_dir>/<source>/index.csv and its files; queues nothing."""
     from sec_xbrl_warehouse.sources.inbox import (

@@ -711,6 +711,11 @@ source_required_prefixes:
   # host. Keep equal to `MCA_PROFILE.taxonomy_prefixes` in sources/inbox.py.
   mca:
     - www.mca.gov.in/XBRL/
+  # ACRA (Singapore, operator inbox): the ACRA (BizFinx) taxonomy for XBRL financial
+  # statements. Unverified host; confirm it with the canary's schema references. Keep
+  # equal to `ACRA_PROFILE.taxonomy_prefixes` in sources/inbox.py.
+  acra:
+    - www.acra.gov.sg/taxonomy/
 
 network_policy:
   # Filing documents themselves must come from the checksum-addressed filing

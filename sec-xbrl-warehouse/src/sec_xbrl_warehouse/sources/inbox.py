@@ -1,7 +1,8 @@
 """The operator file inbox: filings the operator obtained and placed on local disk.
 
 Some regulators publish XBRL without an API whose terms allow automated access
-(India's NSE/BSE results and MCA21 company filings). The operator obtains those files
+(India's NSE/BSE results and MCA21 company filings, Singapore's ACRA financial
+statements). The operator obtains those files
 under the source's terms and puts them in `<inbox_dir>/<code>/` with an `index.csv`;
 an inbox adapter turns each index row into a `FilingRef` keyed `<code>-<native_id>`
 and stores the file as the filing's package. Inbox sources send no network request:
@@ -125,8 +126,21 @@ MCA_PROFILE = InboxProfile(
     default_fiscal_period="FY",
     taxonomy_prefixes=("www.mca.gov.in/XBRL/",),
 )
+# ACRA (Singapore) XBRL financial statements, keyed by the Unique Entity Number:
+# `nnnnnnnnX` (business), `yyyynnnnnX` (local company), or `TyyPQnnnnX` (other
+# entities: `T`/`S`/`R` year prefix, two-letter entity type). Upper case only. There
+# is no public ACRA retrieval API: files come from the company's officers (BizFile+,
+# which the warehouse never automates) or a licensed vendor. The taxonomy prefix is
+# unverified, as for NSE.
+ACRA_PROFILE = InboxProfile(
+    code="acra",
+    entity_scheme="https://www.acra.gov.sg/uen",
+    entity_pattern=r"^([0-9]{8}[A-Z]|[0-9]{9}[A-Z]|[TSR][0-9]{2}[A-Z]{2}[0-9]{4}[A-Z])$",
+    default_fiscal_period="FY",
+    taxonomy_prefixes=("www.acra.gov.sg/taxonomy/",),
+)
 INBOX_PROFILES: dict[str, InboxProfile] = {
-    profile.code: profile for profile in (NSE_PROFILE, MCA_PROFILE)
+    profile.code: profile for profile in (NSE_PROFILE, MCA_PROFILE, ACRA_PROFILE)
 }
 
 

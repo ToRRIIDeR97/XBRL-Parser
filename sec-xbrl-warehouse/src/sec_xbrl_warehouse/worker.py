@@ -82,8 +82,8 @@ async def runtime_services(
     serves the SEC-only bulk download. A worker without the SEC client that may run
     Arelle in online mode (`XBRL_ARELLE_OFFLINE=false`) still takes the SEC egress
     lock lazily, before its first extraction; with offline Arelle it never touches it.
-    Inbox sources (`nse`, `mca`) read operator files from `XBRL_INBOX_DIR` and get no
-    client or lock.
+    Inbox sources (`nse`, `mca`, `acra`) read operator files from `XBRL_INBOX_DIR` and
+    get no client or lock.
     """
     from sec_xbrl_warehouse.config_files import load_yaml
     from sec_xbrl_warehouse.infrastructure.http.egress_lock import (

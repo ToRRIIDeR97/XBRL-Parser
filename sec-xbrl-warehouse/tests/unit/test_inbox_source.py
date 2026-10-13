@@ -489,7 +489,7 @@ def test_inbox_check_passes_and_reports_bad_headers(monkeypatch, tmp_path) -> No
 def test_profiles_have_no_network_policy(tmp_path) -> None:
     from sec_xbrl_warehouse.sources.registry import source_policies
 
-    assert set(INBOX_PROFILES) == {"nse", "mca"}
+    assert set(INBOX_PROFILES) == {"nse", "mca", "acra"}
     assert not set(INBOX_PROFILES) & set(source_policies(_settings(tmp_path)))
     adapter, _ = _adapter(tmp_path)
     assert not hasattr(adapter, "http")

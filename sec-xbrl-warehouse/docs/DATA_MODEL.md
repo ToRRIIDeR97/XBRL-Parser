@@ -348,13 +348,20 @@ Both sources store one `companies` row per entity key (`cik`, `name`) from
 discovery. API keys are never part of a filing reference, manifest, object key or
 metadata, job payload, or log record (SECURITY.md).
 
-## Inbox filings (NSE, MCA)
+## Inbox filings (NSE, MCA, ACRA)
 
-India's XBRL has no API the warehouse may call, so the operator places files in an
-inbox (`sources/inbox.py`, OPERATIONS.md "Operator file inbox"). Each profile is a
+India's and Singapore's XBRL have no API the warehouse may call, so the operator
+places files in an inbox (`sources/inbox.py`, OPERATIONS.md "Operator file inbox"). Each profile is a
 source code: `nse` (NSE/BSE financial results, entity scheme `urn:isin`, ISIN
 `^[A-Z]{2}[A-Z0-9]{9}[0-9]$`) and `mca` (MCA21 AOC-4 XBRL, entity scheme
-`https://www.mca.gov.in/cin`, CIN `^[LU][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6}$`).
+`https://www.mca.gov.in/cin`, CIN `^[LU][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6}$`),
+and `acra` (ACRA XBRL financial statements, entity scheme
+`https://www.acra.gov.sg/uen`, UEN
+`^([0-9]{8}[A-Z]|[0-9]{9}[A-Z]|[TSR][0-9]{2}[A-Z]{2}[0-9]{4}[A-Z])$`: business,
+local company, and other entities, upper case; the check letter isn't verified).
+A UEN becomes the entity key `resolve_entity_key("https://www.acra.gov.sg/uen",
+"201912345K")`; `fiscal_period` defaults to `FY` and `fiscal_year` is the
+`period_end` year, so a June 2024 year-end is FY 2024.
 Each valid row of `<XBRL_INBOX_DIR>/<code>/index.csv` becomes:
 
 | Field | Value |

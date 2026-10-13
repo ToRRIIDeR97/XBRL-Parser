@@ -13,12 +13,12 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 | Warehouse facts | ClickHouse | Raw and canonical facts served by the API. |
 | Credentials | `.env` (local), secret manager (production) | Owner/admin/root credentials (admin service), the worker, writer, and reader identities, `XBRL_API_KEY`. Settings hold them as `SecretStr`, so reprs, dumps, and tracebacks don't print them. |
 | SEC identity | `XBRL_SEC_USER_AGENT` | The SEC identifies and throttles traffic by this identity. |
-| Operator inbox files | `XBRL_INBOX_DIR/<code>/` (`/app/data/inbox` in the `app_data` volume under Compose) | Filings the operator obtained under a source's terms (`nse`, `mca`) and their `index.csv`. Untrusted input; the warehouse only reads them. |
+| Operator inbox files | `XBRL_INBOX_DIR/<code>/` (`/app/data/inbox` in the `app_data` volume under Compose) | Filings the operator obtained under a source's terms (`nse`, `mca`, `acra`) and their `index.csv`. Untrusted input; the warehouse only reads them. |
 | Regulator API keys | `XBRL_EDINET_API_KEY`, `XBRL_DART_API_KEY` in `.env` (local), secret manager (production) | Per-user keys for EDINET and OpenDART. The regulators' terms forbid sharing them; a leaked key can be used up (DART's daily cap) or revoked. |
 
 ## Trust boundaries
 
-![Trust boundaries: untrusted SEC, filings.xbrl.org (ESEF), EDINET, OpenDART, taxonomy, operator inbox (nse, mca), and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
+![Trust boundaries: untrusted SEC, filings.xbrl.org (ESEF), EDINET, OpenDART, taxonomy, operator inbox (nse, mca, acra), and client traffic enters a private Compose network; the worker holds writer credentials and bounds input before writing MinIO, PostgreSQL, and ClickHouse; the API holds only reader identities and a bearer key](diagrams/trust-boundaries.svg)
 
 - **SEC and taxonomy content is untrusted.** ZIP members, filing packages, TSV
   rows, and taxonomy responses are bounded before allocation. Unsafe names,
@@ -70,12 +70,12 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   refuses to start without it. The Arelle child gets settings with both keys blanked,
   and the `worker-parse` container blanks them in its environment; the `api` service
   never receives them. Rotate a key on the regulator's site if it leaks.
-- **Operator inbox files are untrusted input** (`nse`, `mca`). The operator obtains
+- **Operator inbox files are untrusted input** (`nse`, `mca`, `acra`). The operator obtains
   them outside the warehouse and copies them, with `index.csv`, into
   `<XBRL_INBOX_DIR>/<code>/`; nothing is fetched, so inbox sources have no HTTP
   client, host policy, or egress lock, and the optional `source_url` column is stored
   as provenance and never requested. Every index field is validated (filing key,
-  ISO dates, the profile's ISIN or CIN pattern, fiscal period, entity scheme other
+  ISO dates, the profile's ISIN, CIN or UEN pattern, fiscal period, entity scheme other
   than the SEC CIK scheme, an `http(s)` `source_url` without credentials); a bad row is
   skipped. A row's `file` must be relative, without `..`, backslashes or a drive, and
   must resolve after every symlink to a path inside the resolved
@@ -94,6 +94,12 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   a package with no single instance is quarantined. The warehouse never writes to or
   deletes from the inbox. Whether a file may be loaded at all is the operator's call
   under the source's terms (OPERATIONS.md, "Operator file inbox").
+- **No ACRA credentials.** ACRA's BizFile+ retrieval needs a company officer's
+  Singpass login. The warehouse never automates BizFile+ or any ACRA or SGX site and
+  never stores or uses Singpass or other ACRA credentials; `acra` files arrive only
+  through the inbox, and `acra` stays off outside local testing until the operator
+  has recorded how files are obtained and confirmed the redistribution terms
+  (OPERATIONS.md, "ACRA financial statements (Singapore)").
 - **Taxonomy packages are pinned.** `taxonomy sync` is a separate outbound path: it
   downloads only registry URLs that use HTTPS on port 443, carry no credentials, and
   name a host in `XBRL_ARELLE_ALLOWED_TAXONOMY_HOSTS`. It uses the rate-limited
@@ -105,8 +111,10 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   Accounting Taxonomy) are on it for the `esef` source's pinned packages, and
   `disclosure.edinet-fsa.go.jp` (EDINET taxonomy namespaces) and
   `disclosure2dl.edinet-fsa.go.jp` (the FSA's taxonomy downloads) for the `edinet`
-  source's. DART's taxonomy host isn't on it yet, nor are the NSE/BSE and MCA
-  taxonomy hosts: add each once a canary confirms it.
+  source's. DART's taxonomy host isn't on it yet, nor are the NSE/BSE, MCA and ACRA
+  taxonomy hosts: add each once a canary confirms it (for `acra`, the host of
+  `source_required_prefixes.acra`, unverified `www.acra.gov.sg`, and the host ACRA
+  serves its taxonomy packages from).
   None of these is a source API host (`check_disjoint_hosts` keeps the source
   policies apart; the source hosts aren't taxonomy hosts).
   The W3C `xml.xsd` schemas are shipped with the application, so `www.w3.org` is never

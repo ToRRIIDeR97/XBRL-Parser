@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     # OpenDART disclosure-search page size (the API allows 1 to 100).
     dart_page_count: int = Field(default=100, ge=1, le=100)
     # Operator file inbox: `<inbox_dir>/<code>/index.csv` plus the files it lists, for
-    # sources without a usable API (`nse`, `mca`). Read only; nothing is fetched.
+    # sources without a usable API (`nse`, `mca`, `acra`). Read only; nothing is fetched.
     inbox_dir: Path = Path("data/inbox")
 
     sec_user_agent: str = "Your Name or Organization monitored-email@example.com"

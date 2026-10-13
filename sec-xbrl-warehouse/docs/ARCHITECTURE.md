@@ -10,14 +10,14 @@ This file is the master architecture document. It holds the UML views listed und
 [UML views](#uml-views) and the [coverage index](#coverage-index). The diagram below is
 the component view; the other views follow the prose sections.
 
-![UML component view: CLI and worker dispatch bulk, filing, and mapping components, which use the source registry (SEC, ESEF, EDINET and DART adapters with per-source HTTP clients to SEC EDGAR, filings.xbrl.org, EDINET and OpenDART, and inbox adapters for nse and mca reading the operator file inbox), Arelle, and validation and write PostgreSQL, MinIO/S3, and ClickHouse; the query API reads ClickHouse](diagrams/component-overview.svg)
+![UML component view: CLI and worker dispatch bulk, filing, and mapping components, which use the source registry (SEC, ESEF, EDINET and DART adapters with per-source HTTP clients to SEC EDGAR, filings.xbrl.org, EDINET and OpenDART, and inbox adapters for nse, mca and acra reading the operator file inbox), Arelle, and validation and write PostgreSQL, MinIO/S3, and ClickHouse; the query API reads ClickHouse](diagrams/component-overview.svg)
 
 | Component | Responsibility | Source |
 | --- | --- | --- |
 | CLI | Operator commands: migrations, catalog sync, backfill planning, filing enqueue and discovery, mapping review, taxonomy sync, job recovery. Writes jobs to PostgreSQL; never runs pipeline stages itself, except the SEC catalog and taxonomy syncs. | `cli.py` |
 | Worker | Claims jobs with `FOR UPDATE SKIP LOCKED`, heartbeats leases, dispatches one handler per `JobType`, classifies failures as retry or dead. | `worker.py` |
 | Source HTTP clients | `SourceHttpClient` enforces one source's `SourcePolicy` (host allowlist, also on every redirect hop; headers; rate; concurrency), byte limits, retries with jitter, `Retry-After`, and that source's PostgreSQL advisory lock `SourceEgressLock` (`xbrl:<source>-egress`), so one process sends each source's traffic. `SecHttpClient` is the SEC policy (user agent, `XBRL_SEC_*` rate) with `SecEgressLock` (`xbrl:sec-egress`). | `infrastructure/http/` |
-| Source registry and adapters | `SourceRegistry` holds one adapter per `XBRL_ENABLED_SOURCES` entry and routes by source code or filing key: discovery, package download, and filing fiscal fields. `SecSourceAdapter` wraps the SEC discovery, downloader, and dei fiscal focus unchanged. `EsefSourceAdapter` pages filings.xbrl.org's JSON:API, allocates entity keys from LEIs, stores the digest-checked report package as published, and sets `FY` and the period-end year. `EdinetSourceAdapter` (Japan) reads EDINET's daily document lists and `DartSourceAdapter` (Korea) pages OpenDART's disclosure search; both send the operator's API key only in the request (`SourcePolicy.secret_params`, masked everywhere else), store the zip as received with one instance entrypoint, and derive fiscal fields from jpdei facts or the DART report code (`sources/keyed.py` holds their shared key, redaction and package code). `InboxSourceAdapter` (`nse`, `mca` profiles for India) reads an operator-maintained `index.csv` and files under `XBRL_INBOX_DIR/<code>/` with no HTTP client, policy, or lock; `inbox check` validates the index without queueing. Source policies' host allowlists are disjoint. An unknown or disabled source raises `UnsupportedSourceError` (never retried). | `sources/` |
+| Source registry and adapters | `SourceRegistry` holds one adapter per `XBRL_ENABLED_SOURCES` entry and routes by source code or filing key: discovery, package download, and filing fiscal fields. `SecSourceAdapter` wraps the SEC discovery, downloader, and dei fiscal focus unchanged. `EsefSourceAdapter` pages filings.xbrl.org's JSON:API, allocates entity keys from LEIs, stores the digest-checked report package as published, and sets `FY` and the period-end year. `EdinetSourceAdapter` (Japan) reads EDINET's daily document lists and `DartSourceAdapter` (Korea) pages OpenDART's disclosure search; both send the operator's API key only in the request (`SourcePolicy.secret_params`, masked everywhere else), store the zip as received with one instance entrypoint, and derive fiscal fields from jpdei facts or the DART report code (`sources/keyed.py` holds their shared key, redaction and package code). `InboxSourceAdapter` (`nse`, `mca` profiles for India, `acra` for Singapore) reads an operator-maintained `index.csv` and files under `XBRL_INBOX_DIR/<code>/` with no HTTP client, policy, or lock; `inbox check` validates the index without queueing. Source policies' host allowlists are disjoint. An unknown or disabled source raises `UnsupportedSourceError` (never retried). | `sources/` |
 | Bulk backfill | FSNDS catalog, ZIP download to bronze, streaming TSV to Parquet and ClickHouse, reconciliation. SEC only; uses the SEC client directly. | `ingestion/bulk_*.py`, `ingestion/orchestrator.py`, `ingestion/sec_tsv.py` |
 | Filing ingestion | Discovery (`discover_filings`, through the source's adapter; SEC: daily indexes or submissions JSON), package download (`fetch_filing`, `SourceRegistry.download_package`), and extraction through publish (`parse_filing`, fiscal fields from `SourceRegistry.fiscal_focus`). | `ingestion/filing_discovery.py`, `filing_downloader.py`, `incremental.py` |
 | Arelle adapter | Runs Arelle in reusable child processes (a fresh controller per filing, no credentials) against pinned taxonomy packages and returns an `XbrlExtractionBundle`. | `infrastructure/xbrl/` |
@@ -50,7 +50,7 @@ The SEC bulk data is the fastest and most reliable historical backfill, but it i
 - EDINET (`type=1`) and OpenDART original-XBRL zips, stored byte-identical under the
   same key shape with the SHA-256 of the bytes received; the manifest flags the
   single `XBRL/PublicDoc/*.xbrl` (EDINET) or `.xbrl` (DART) instance.
-- Operator inbox files (`nse`, `mca`): a `.zip` stored byte-identical, or a single
+- Operator inbox files (`nse`, `mca`, `acra`): a `.zip` stored byte-identical, or a single
   instance file stored as a deterministic one-member zip, under the same key shape;
   the manifest flags the one instance member. The inbox file is never changed.
 - HTTP metadata, checksums, source URLs, and acquisition timestamps.
@@ -240,7 +240,7 @@ route. With `XBRL_ENABLED_SOURCES=sec,esef` the fetch worker also reaches
 reaches the ESMA and IFRS taxonomy hosts. `edinet` and `dart` add
 `api.edinet-fsa.go.jp` and `opendart.fss.or.kr` (each with its own lock and the
 operator's API key from `.env`, blanked in `worker-parse`), and `taxonomy sync` reaches
-the FSA's EDINET taxonomy hosts. Inbox sources (`nse`, `mca`) add no host: the fetch
+the FSA's EDINET taxonomy hosts. Inbox sources (`nse`, `mca`, `acra`) add no host: the fetch
 worker reads `XBRL_INBOX_DIR` (`/app/data/inbox` in the `app_data` volume). Each service connects with its own identity (OPERATIONS.md, "Identities and the
 admin service").
 
@@ -304,7 +304,7 @@ Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level fol
 | filings.xbrl.org (external, ESEF) | Component; deployment; trust boundaries | `sources/esef.py` (`ESEF_POLICY`) |
 | EDINET API v2 (external, Japan FSA) | Component; deployment; trust boundaries | `sources/edinet.py` (`EDINET_POLICY`) |
 | OpenDART (external, Korea FSS) | Component; deployment; trust boundaries | `sources/dart.py` (`DART_POLICY`) |
-| Operator file inbox (nse, mca) | Component; trust boundaries | `sources/inbox.py`; `XBRL_INBOX_DIR`; OPERATIONS.md, "Operator file inbox" |
+| Operator file inbox (nse, mca, acra) | Component; trust boundaries | `sources/inbox.py`; `XBRL_INBOX_DIR`; OPERATIONS.md, "Operator file inbox" and "ACRA financial statements (Singapore)" |
 | Taxonomy hosts (external) | Component; deployment; trust boundaries | `config/taxonomy_packages.yml` |
 | Prometheus and Grafana | Component; deployment | `observability/metrics.py`; `ops/` |
 | Workflow: filing ingest | Filing activity; filing sequence | as above |

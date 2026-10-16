@@ -85,7 +85,9 @@ user without delete); `provision_identities.sh` and `minio-init` create them, an
 queue-only operator commands (`catalog`, `backfill`, `filing`, `mapping`, `company`,
 `jobs`) work through either service. The `api` service has no writer credentials or
 data volume. It connects as `xbrl_api` to PostgreSQL and ClickHouse (see SECURITY.md). Docs are served at
-`http://127.0.0.1:8080/docs`. Avoid `docker compose down -v`, which deletes data volumes.
+`http://127.0.0.1:8080/docs` and the browser UI at `http://127.0.0.1:8080/ui/`. Agents
+can call the API through the stdio MCP server `xbrl-warehouse-mcp` (OPERATIONS.md,
+"Web UI and MCP server"). Avoid `docker compose down -v`, which deletes data volumes.
 
 ## Validate
 

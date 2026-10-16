@@ -23,7 +23,9 @@ the component view; the other views follow the prose sections.
 | Arelle adapter | Runs Arelle in reusable child processes (a fresh controller per filing, no credentials) against pinned taxonomy packages and returns an `XbrlExtractionBundle`. | `infrastructure/xbrl/` |
 | Validation | XBRL issues, filing reconciliation, data quality, schema drift, issue grouping. | `validation/` |
 | Canonical mapping | Applies approved concept mappings to raw facts, remaps published extractions, rebuilds `metric_series`. | `mapping/`, `query/series.py`, `normalization/series.py` |
-| Query API | FastAPI app with bearer auth and a concurrency limit; `QueryService` runs scan-bounded, budgeted SELECTs as the `xbrl_api` reader. | `api/`, `query/service.py` |
+| Query API | FastAPI app with bearer auth and a concurrency limit; `QueryService` runs scan-bounded, budgeted SELECTs as the `xbrl_api` reader. `/v1/companies` searches the `companies` mirror and lists a company's filings from `v_cover_pages_latest`; `/v1/metrics` returns the metric catalogue. | `api/`, `query/service.py` |
+| Web UI | One static page at `/ui` (`/` redirects there): company search, four headline metrics with year-over-year change, a five-year revenue chart, the latest three filings (linked to EDGAR), and five-year income, cash flow, and balance sheet tables from `/v1/series`. It holds no data; its `/v1` calls carry the bearer key the user enters. | `api/static/index.html` |
+| MCP server | `xbrl-warehouse-mcp`: stdio JSON-RPC Model Context Protocol server with one tool per read endpoint. It is an HTTP client of the query API (`XBRL_MCP_API_URL`, `XBRL_API_KEY`) and never connects to a store. | `mcp_server.py` |
 
 Key flows: filings move `discover_filings` → `fetch_filing` → `parse_filing` (see the
 [filing activity](#activity-views) and [sequence](#sequence-views)); bulk periods move
@@ -300,6 +302,7 @@ Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level fol
 | Statements, disclosures, fiscal fields | Class (bundle); filing activity (publish step) | `normalization/statements.py`, `disclosures.py`, `fiscal_focus.py`; `ClickHouseWarehouse.insert_xbrl_bundle` |
 | Canonical mapping and series | Component; class; filing activity and sequence | `mapping/`, `query/series.py`, `normalization/series.py`; `config/canonical_metrics.yml`, `concept_seed.yml` |
 | Query API | Component; API sequence; deployment; trust boundaries | `api/`, `query/service.py` |
+| Web UI and MCP server (API clients) | Component; API sequence; trust boundaries | `api/static/index.html`; `mcp_server.py` (`TOOLS`, `WarehouseTools`) |
 | PostgreSQL | Component; deployment; job and artifact state machines | `infrastructure/storage/postgres.py`, `postgres_models.py`; `migrations/`; `ops/provision/` |
 | MinIO / S3 | Component; deployment; filing and bulk activity | `infrastructure/storage/object_store.py`, `parquet.py`, `extraction_io.py`; `minio-init` in `docker-compose.yml` |
 | Storage maintenance | Deployment (admin service) | `infrastructure/storage/maintenance.py`, `inventory.py`; `cli.py` `storage` commands |

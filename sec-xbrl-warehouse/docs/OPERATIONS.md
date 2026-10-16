@@ -58,6 +58,26 @@ Each Compose service connects with the least privilege its job needs:
 - ClickHouse disk free space exceeds the configured safety threshold.
 - Quarantine and mapping-review queues are triaged.
 
+## Web UI and MCP server
+
+The API serves a browser UI at `http://127.0.0.1:8080/ui/` (`/` redirects there).
+Search a ticker, name, or CIK; only companies already loaded appear, so ingest a new
+one first (`filing discover --cik <CIK> --forms 10-K,10-Q`). When `XBRL_API_KEY` is
+set, enter it in the page's key field.
+
+`xbrl-warehouse-mcp` is a stdio MCP server for agents. It needs the API running and
+reads `XBRL_MCP_API_URL` (default `http://127.0.0.1:8080`) and `XBRL_API_KEY`. Tools:
+`search_companies`, `list_metrics`, `get_financial_series`, `list_company_filings`,
+`get_filing`, `get_filing_segments`, `get_filing_text_blocks`, `query_raw_facts`,
+`get_canonical_facts`. Register it with Claude Code from `sec-xbrl-warehouse/`:
+
+```bash
+claude mcp add xbrl-warehouse -e XBRL_MCP_API_URL=http://127.0.0.1:8080 -- "$PWD/.venv/bin/xbrl-warehouse-mcp"
+```
+
+For Claude Desktop or another client, use the same command with an `env` block in
+the client's MCP config; add `XBRL_API_KEY` there when the API requires one.
+
 ## SEC egress lock
 
 Only one process sends SEC traffic at a time (see SEC_ACCESS.md). If `catalog sync`,

@@ -147,11 +147,18 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 ## Authentication and authorization
 
 - **API.** When `XBRL_API_KEY` is set (at least 32 characters), every route except
-  `/health/live` and `/health/ready` requires `Authorization: Bearer <key>`, compared
-  in constant time. That includes `/docs`, `/metrics`, and queries. Without a key the API
+  `/health/live`, `/health/ready`, `/` (a redirect), and the static `/ui` page requires
+  `Authorization: Bearer <key>`, compared in constant time. That includes `/docs`,
+  `/metrics`, and queries. The UI page contains no data; its `/v1` requests send the
+  key the user types, which the browser keeps in that origin's `localStorage`. The
+  page renders API values as text only, never as HTML. Without a key the API
   is unauthenticated and is safe only on loopback, so `api serve` refuses a
   non-loopback bind without a key unless `XBRL_API_ALLOW_UNAUTHENTICATED_REMOTE=true`
   (Compose sets it: the container binds `0.0.0.0` behind a `127.0.0.1`-only port).
+- **MCP server.** `xbrl-warehouse-mcp` reaches data only through the HTTP API, with
+  the key in `XBRL_API_KEY` from its launcher's environment, so an agent gets the
+  reader's view under the same budgets and can't write. Tool results are capped at
+  200,000 characters.
 - **Production startup** (`XBRL_ENV=production`) fails unless an API key and a separate,
   non-empty ClickHouse reader identity are configured, and it rejects any credential
   that contains the development marker `dev_password`, plaintext ClickHouse

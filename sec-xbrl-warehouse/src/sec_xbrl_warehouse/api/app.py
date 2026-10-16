@@ -4,19 +4,23 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from clickhouse_connect.driver.exceptions import DatabaseError
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import make_asgi_app
 
 from sec_xbrl_warehouse import __version__
-from sec_xbrl_warehouse.api.routers import facts, filings, health, series
+from sec_xbrl_warehouse.api.routers import companies, facts, filings, health, series
 from sec_xbrl_warehouse.config import Settings, get_settings
 from sec_xbrl_warehouse.exceptions import ConfigurationError
 from sec_xbrl_warehouse.infrastructure.storage.clickhouse import ClickHouseWarehouse
 from sec_xbrl_warehouse.infrastructure.storage.postgres import PostgresControlRepository
 from sec_xbrl_warehouse.query.service import QueryService
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
@@ -61,7 +65,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         path = request.scope["path"]
-        if path == "/health/live":
+        # The UI is static HTML with no data; its /v1 calls carry the key.
+        if path in {"/", "/health/live", "/ui"} or path.startswith("/ui/"):
             return await call_next(request)
         if (
             path != "/health/ready"
@@ -88,6 +93,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(facts.router)
     app.include_router(filings.router)
     app.include_router(series.router)
+    app.include_router(companies.router)
+    app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/ui/")
+
     app.mount("/metrics", make_asgi_app())
     return app
 

@@ -54,6 +54,9 @@ class QueryService:
 
     def __init__(self, warehouse: Warehouse, metrics_path: Path | None = None) -> None:
         self.warehouse = warehouse
+        self.metrics: list[dict[str, Any]] = (
+            list(load_yaml(metrics_path).get("metrics", [])) if metrics_path else []
+        )
         self.derived = _derived_metrics(metrics_path) if metrics_path else {}
 
     def raw_facts(self, query: FactQuery) -> list[dict[str, Any]]:
@@ -267,6 +270,52 @@ class QueryService:
             {"ticker": symbol},
         )
         return int(rows[0]["cik"]) if rows else None
+
+    def search_companies(self, text: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Companies in the warehouse whose ticker or name matches `text` (tickers first)."""
+        term = text.strip()
+        if not 1 <= len(term) <= 64 or not 1 <= limit <= 100:
+            raise ValueError("Search text must be 1 to 64 characters and limit 1 to 100")
+        return self.warehouse.query(
+            """
+            SELECT cik, name, tickers, exchanges, sic, fiscal_year_end
+            FROM companies FINAL
+            WHERE has(tickers, upper(%(term)s))
+               OR positionCaseInsensitiveUTF8(name, %(term)s) > 0
+               OR toString(cik) = %(term)s
+            ORDER BY has(tickers, upper(%(term)s)) DESC, name
+            LIMIT %(limit)s
+            """,
+            {"term": term, "limit": limit},
+        )
+
+    def company_filings(
+        self, cik: int, *, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """One row per loaded filing of the company, newest first (from cover pages)."""
+        if cik < 0:
+            raise ValueError("Invalid company")
+        _check_page(limit, offset, max_limit=1_000)
+        rows = self.warehouse.query(
+            """
+            SELECT accession, form, filed_date, document_type, period_end_date,
+                   registrant_name, amendment, extraction_revision
+            FROM v_cover_pages_latest
+            WHERE cik = %(cik)s
+            ORDER BY filed_date DESC, accession DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            {"cik": cik, "limit": limit, "offset": offset},
+        )
+        for row in rows:
+            if row["amendment"] is not None:
+                row["amendment"] = bool(row["amendment"])
+        return rows
+
+    def metric_catalogue(self) -> list[dict[str, Any]]:
+        """Canonical metric codes with their name, statement, and unit family."""
+        keys = ("code", "name", "statement", "period_type", "unit_family", "description")
+        return [{key: item.get(key) for key in keys} for item in self.metrics]
 
     def filing_summary(
         self, accession: str, *, cik: int | None = None, filed_date: date | None = None

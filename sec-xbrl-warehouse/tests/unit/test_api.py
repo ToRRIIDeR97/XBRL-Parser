@@ -401,3 +401,39 @@ def test_disclosure_routes_validate_filter_and_shape_rows():
     assert "value_text AS text" not in sql and parameters["limit"] == 200
     assert "is_policy" not in parameters
     client.close()
+
+
+def test_company_search_filings_and_metric_catalogue():
+    warehouse = Warehouse()
+    app = create_app()
+    app.dependency_overrides[get_query_service] = lambda: QueryService(
+        warehouse, Path("config/canonical_metrics.yml")
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/v1/companies").status_code == 422
+    assert client.get("/v1/companies?q=" + "x" * 65).status_code == 422
+    assert client.get("/v1/companies/1/filings?limit=1001").status_code == 422
+    assert not warehouse.queries
+    assert client.get("/v1/companies?q=aapl").json()["count"] == 0
+    sql, parameters = warehouse.queries[-1]
+    assert "companies FINAL" in sql and parameters["term"] == "aapl"
+    assert client.get("/v1/companies/320193/filings?limit=5").status_code == 200
+    sql, parameters = warehouse.queries[-1]
+    assert "v_cover_pages_latest" in sql and parameters == {"cik": 320193, "limit": 5, "offset": 0}
+    metrics = client.get("/v1/metrics").json()["items"]
+    assert {"code": "revenue", "unit_family": "monetary"}.items() <= metrics[0].items()
+    client.close()
+
+
+def test_ui_is_served_without_key_but_data_still_requires_it():
+    from sec_xbrl_warehouse.config import Settings
+
+    app = create_app(Settings(_env_file=None, env="test", api_key="a" * 32))
+    app.dependency_overrides[get_query_service] = lambda: QueryService(Warehouse())
+    client = TestClient(app)
+    assert client.get("/", follow_redirects=False).headers["location"] == "/ui/"
+    page = client.get("/ui/")
+    assert page.status_code == 200 and "XBRL Warehouse" in page.text
+    assert client.get("/v1/companies?q=a").status_code == 401
+    assert client.get("/uix").status_code == 401
+    client.close()

@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -755,6 +756,11 @@ def _archive_entrypoint(names: list[str], filing: FilingRef) -> str | None:
     for candidate in (filing.instance_document, filing.primary_document):
         if candidate and candidate in names:
             return candidate
+    return _classic_instance(names)
+
+
+def _classic_instance(names: Iterable[str]) -> str | None:
+    """The first XBRL instance XML among `names`, skipping linkbases and SEC reports."""
     instances = sorted(
         name
         for name in names
@@ -852,6 +858,12 @@ def _choose_entrypoint(manifest: FilingPackageManifest) -> str:
         return _manifest_entrypoint(manifest, archived[0])
     if manifest.filing.instance_document:
         return _manifest_entrypoint(manifest, manifest.filing.instance_document)
+    # A classic (non-inline) filing's primary document is the HTML report, not
+    # XBRL; its instance is the standalone XML beside the linkbases.
+    if manifest.filing.is_inline_xbrl is False:
+        instance = _classic_instance(member.name for member in manifest.members)
+        if instance is not None:
+            return _manifest_entrypoint(manifest, instance)
     if manifest.filing.primary_document:
         return _manifest_entrypoint(manifest, manifest.filing.primary_document)
     # A flagged entrypoint (a report package's inline report) wins over other XML

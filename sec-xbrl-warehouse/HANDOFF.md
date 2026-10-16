@@ -24,37 +24,60 @@ identities (`xbrl_worker`, `xbrl_writer`, `xbrl_api` and its profile, the MinIO
 `xbrl_worker` user) are provisioned with the development passwords. The application
 images weren't rebuilt or started in this change. Unit and integration suites pass.
 
-Pending after the filing package selection, dei fiscal-field, and SEC inline
-transform changes (extraction revision 3, selection policy 2): re-extract the 42 loaded AAPL filings and ingest
-`0000320193-19-000010` from its `-xbrl.zip`, then compare member counts,
-`xmlSchema:syntax` counts, and fact counts against revision 2. Confirm
-`SELECT countIf(fiscal_year IS NULL) FROM xbrl.v_xbrl_facts_latest` returns 0. Confirm
-`SELECT count() FROM xbrl.v_xbrl_facts_latest WHERE value_text = '(ixTransformValueError)'`
-returns 0. Revision 3 also fixes fact `taxonomy_version` (it was `2001` for every fact). Then run
-`mapping import-metrics`, `mapping approve-seeds` (dry run first), `mapping remap`, and
-`worker run --job-type map_canonical`, and confirm AAPL canonical facts. Run `db upgrade-clickhouse --yes` for the new `accepted_at` and
-filing-context columns, then check AAPL operating cash flow FY2016-FY2025 in
-`GET /v1/series/320193?metrics=operating_cash_flow` (four quarters sum to FY). Use the per-revision diagnostics query in INGESTION_RUNBOOK.md to confirm
-which issues belong to the live revision. Before that, run
-`xbrl-warehouse taxonomy sync` (50 pinned FASB and SEC sources; `taxonomy status` must
-show no `uncovered` rows), set
-`XBRL_ARELLE_OFFLINE=true` for the re-extraction, and confirm no `webCache:*` issues.
-Until then the live data stays at revisions 1 and 2.
+Revision 3 re-extraction and canonical facts (16 October 2026, branch
+`ops/execute-handoff-backlog`): applied to the local stack from the host virtualenv.
+PostgreSQL was backed up (`data/backups/2026-10-16/control.dump`, SHA-256 in the
+`.sha256` file beside it, taken at 0007) and upgraded to `0008_filing_entity_keys`.
+`taxonomy sync` installed the 50 pinned packages; `taxonomy status` has no
+`uncovered` rows and `doctor` passes. `filing discover --cik 320193 --forms 10-K,10-Q
+--filed-from 2016-01-01` queued all 43 AAPL filings at revision 3, and all 43 are now
+at revision 3, including `0000320193-19-000010` (839 facts). The other 42 filings
+have the same fact counts as at revisions 1 and 2. `v_xbrl_facts_latest` has 42,172
+facts, none with a NULL `fiscal_year` or an `(ixTransformValueError)` value, with 14
+distinct `taxonomy_version` values. Revision 3 raised no `webCache:*` issues and 1,300
+`xmlSchema:syntax` occurrences. Two bugs were fixed on the way:
 
-Plans 12-15 are applied locally (Alembic at 0007, ClickHouse upgraded, identities
-provisioned with `ops/provision/provision_identities.sh`, which also grants
-`xbrl_api`). Filings are now
+- The 13 classic (non-inline) filings from 2016 to January 2019 parsed their HTML
+  primary document and failed with "Arelle extracted no facts". The parse entrypoint
+  for a filing with `is_inline_xbrl` false and no `instance_document` is now its
+  instance XML (ARCHITECTURE.md, bronze section), so `--instance-document` is no
+  longer needed for them. The failed attempts had saved an empty `extract`
+  checkpoint, which a plain `jobs retry` replays, so their `extract` and `validation`
+  checkpoints were deleted before the retry. Their first-attempt diagnostics (one
+  `xmlSchema:syntax`, one `exception:RecursionError` and the `XbrlExtractionError`
+  rows per filing) remain in `validation_issues` at revision 3.
+- Concurrent `map_canonical` jobs deadlocked on `mapping_reviews` upserts, and the
+  deadlock was classified as permanent. Review rows are now upserted in concept
+  order, and a SQLAlchemy error whose driver-level cause is unclassified is judged by
+  its message, so deadlocks retry.
+
+`mapping import-metrics` loaded 46 metrics. `mapping approve-seeds` (dry run first)
+approved 109 seed mappings with reviewer `ToRRIIDeR`, and `mapping remap --epoch
+2026-10-16` plus `map_canonical` produced 12,361 canonical facts over 40 metrics for
+all 43 filings. ClickHouse already had `accepted_at` and the filing-context columns
+(`doctor` reports compatible sort keys), so `db upgrade-clickhouse` wasn't needed.
+`GET /v1/series/320193?metrics=operating_cash_flow` returns FY2016-FY2025 with the
+four quarters summing exactly to each fiscal year (FY2025 111,482 and FY2024 118,254
+USD millions).
+
+Benchmark against the 43-minute serial baseline: with one SEC-active worker
+(`--job-type discover_filings --job-type fetch_filing`, concurrency 4) and an offline
+parse worker (concurrency 4, its own `XBRL_WORKER_METRICS_PORT`), discovery, all 43
+fetches, and the 30 inline parses finished in 2 minutes 12 seconds; the 13 classic
+parses took under 2 minutes after the fix. Two workers on one host need different
+`XBRL_WORKER_METRICS_PORT` values, or the second fails with "Address already in use".
+The `api`, `worker` and `admin` images were rebuilt from this branch.
+
+Plans 12-15 are applied locally (identities provisioned with
+`ops/provision/provision_identities.sh`, which also grants `xbrl_api`). Filings are
 `fetch_filing` → `parse_filing` jobs: run one SEC-active worker with
 `--job-type fetch_filing --job-type discover_filings` and a parse worker with
 `XBRL_ARELLE_OFFLINE=true XBRL_WORKER_CONCURRENCY=N --job-type parse_filing` (compose
-profile `parse`); give the SEC-active worker `XBRL_WORKER_CONCURRENCY=4` too. Rebuild
-the images (`docker compose build api worker admin`) before starting them. Then benchmark the AAPL re-ingest against the 43-minute serial
-baseline (OPERATIONS.md, capacity tuning).
+profile `parse`); give the SEC-active worker `XBRL_WORKER_CONCURRENCY=4` too.
 
 Plan 17 (source-neutral filing and entity keys) adds Alembic
-`0008_filing_entity_keys`, not yet applied to the live control database: back up
-PostgreSQL (BACKUP_RESTORE.md), run `alembic upgrade head` through the `admin`
-service, then `doctor`. ClickHouse and existing SEC rows and object keys are unchanged.
+`0008_filing_entity_keys`, applied to the live control database on 16 October 2026.
+ClickHouse and existing SEC rows and object keys are unchanged.
 
 Plan 18 (source adapters) routes discovery, fetch, and parse fiscal fields through a
 `SourceRegistry` built from `XBRL_ENABLED_SOURCES` (default `sec`). SEC requests, user

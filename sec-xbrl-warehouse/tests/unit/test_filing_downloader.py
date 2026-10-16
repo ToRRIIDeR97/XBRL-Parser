@@ -304,6 +304,38 @@ def test_entrypoint_must_be_contained_manifest_member(name):
         _choose_entrypoint(manifest)
 
 
+def test_classic_filing_entrypoint_is_instance_not_html_report():
+    from sec_xbrl_warehouse.ingestion.filing_downloader import _choose_entrypoint
+
+    names = (
+        "FilingSummary.xml",
+        "example-20251231.htm",
+        "example-20251231.xml",
+        "example-20251231.xsd",
+        "example-20251231_cal.xml",
+        "example-20251231_lab.xml",
+    )
+    members = tuple(
+        PackageMember(
+            name=name,
+            source_url=f"x/{name}",
+            checksum_sha256=None,
+            is_primary_document=name == "example-20251231.htm",
+            is_xbrl_entrypoint=name == "example-20251231.htm",
+        )
+        for name in names
+    )
+    classic = FilingPackageManifest(
+        filing=_filing().model_copy(update={"is_inline_xbrl": False}),
+        members=members,
+        acquired_at=datetime.now(UTC),
+    )
+    assert _choose_entrypoint(classic) == "example-20251231.xml"
+    # Unknown inline status keeps the primary document.
+    unknown = classic.model_copy(update={"filing": _filing()})
+    assert _choose_entrypoint(unknown) == "example-20251231.htm"
+
+
 class _NamedHttp:
     """Serves fixed bytes by file name and counts requests."""
 

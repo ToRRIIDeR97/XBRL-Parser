@@ -1,6 +1,6 @@
 # 01 — Download only the files Arelle needs
 
-Status: plan only. Code follows after this plan is reviewed.
+Status: implemented and merged to main.
 
 ## Problem
 

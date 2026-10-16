@@ -1,6 +1,6 @@
 # 22 — Singapore ACRA financial statements (inbox profile)
 
-Status: draft for review (11 October 2026). Depends on plan 21 (inbox adapter), and
+Status: implemented, verified (accept) and merged to main. Depends on plan 21 (inbox adapter), and
 through it on plans 17 and 18.
 
 ## Problem

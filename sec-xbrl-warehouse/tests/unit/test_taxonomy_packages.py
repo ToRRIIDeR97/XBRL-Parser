@@ -77,7 +77,7 @@ def test_package_url_policy(tmp_path: Path, url: str | None) -> None:
 
 
 def test_repository_registry_entries_are_on_allowed_hosts() -> None:
-    settings = Settings(env="test")
+    settings = Settings(_env_file=None, env="test")
     registry = load_yaml(REPO_CONFIG / "taxonomy_packages.yml")
     for entry in registry["packages"]:
         validate_package_url(entry["url"], settings)

@@ -1,6 +1,6 @@
 # 19 — EU/UK ESEF filings through filings.xbrl.org
 
-Status: draft for review (11 October 2026). Depends on plans 17 (filing and entity
+Status: implemented, verified (accept) and merged to main. Depends on plans 17 (filing and entity
 keys) and 18 (source adapters). First real non-SEC source.
 
 ## Problem

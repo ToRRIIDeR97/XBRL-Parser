@@ -1,6 +1,6 @@
 # 18 — Source adapters: per-regulator fetch, discovery, and egress
 
-Status: draft for review (11 October 2026). Depends on plan 17 (filing keys, entity
+Status: implemented, verified (accept) and merged to main. Depends on plan 17 (filing keys, entity
 keys, `UnsupportedSourceError`). Second of the multi-exchange plans; plans 19–22 each
 add one adapter on top of this one.
 

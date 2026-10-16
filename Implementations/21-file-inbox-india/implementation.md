@@ -1,6 +1,6 @@
 # 21 — Operator file inbox, with India (NSE and MCA) profiles
 
-Status: draft for review (11 October 2026). Depends on plans 17 and 18. Plan 22
+Status: implemented, verified (accept) and merged to main. Depends on plans 17 and 18. Plan 22
 reuses this adapter for Singapore.
 
 ## Problem

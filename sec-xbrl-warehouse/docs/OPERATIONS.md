@@ -619,9 +619,12 @@ Stop producers first, then wait for active jobs to checkpoint. Stop workers only
 
 ## Capacity tuning
 
-Benchmark (operator follow-up): re-ingest the AAPL filings with one fetch worker and
-one parse worker at concurrency 4; compare `xbrl_stage_latency_seconds` per stage and
-the total wall time with the 43-minute serial baseline (2 October 2026).
+Benchmark (16 October 2026): re-ingesting the 43 AAPL filings with one fetch worker
+and one parse worker at concurrency 4 took about 4 minutes of worker time (discovery,
+43 fetches and 30 inline parses in 2 minutes 12 seconds; the 13 classic parses in under
+2 minutes), against the 43-minute serial baseline (2 October 2026). Workers started on
+the same host each need their own `XBRL_WORKER_METRICS_PORT` (default 9091); the
+second one otherwise exits with "Address already in use".
 
 1. Start with one worker and one recent artifact while measuring RSS, temporary disk, object throughput, ClickHouse insert latency, and SEC throttle time.
 2. Set `XBRL_ARROW_BATCH_ROWS` so one batch plus conversion overhead fits comfortably inside the worker memory limit; 50,000 is only a starting point.

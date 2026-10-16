@@ -1,6 +1,6 @@
 # 16 — Read endpoints for cover pages, segment breakdowns, and text blocks
 
-Status: approved for implementation (11 October 2026). Runs as an implementer
+Status: implemented, verified (accept) and merged to main. Runs as an implementer
 session, then a separate verifier session. Builds on plan 12, which stores the data but left its
 "optional read endpoints" unbuilt.
 

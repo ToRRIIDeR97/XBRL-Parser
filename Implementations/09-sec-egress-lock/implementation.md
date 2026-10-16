@@ -1,6 +1,6 @@
 # 09 — Enforce one SEC-active process with a PostgreSQL advisory lock
 
-Status: plan only. Code follows after this plan is reviewed.
+Status: implemented and merged to main.
 
 ## Problem
 

@@ -90,6 +90,10 @@ Filing packages contain only the files Arelle needs (selection policy 2,
   `-xbrl.zip` itself and its expanded members; those members record the archive in
   `source_archive`, and the flagged instance becomes the entrypoint. A rejected
   `-xbrl.zip` is stored loose under its checksum key for diagnosis.
+- The parse entrypoint is the filing's `instance_document` when set. For a classic
+  (non-inline) filing (`is_inline_xbrl` false) without one, it is the standalone
+  instance XML (not a linkbase, `FilingSummary.xml`, or `R<n>` page), because the
+  primary document is the HTML report. Otherwise it is the primary document.
 
 The manifest cache key includes the selection policy version. Manifests cached
 under an earlier policy stay in place and are not reused. The Arelle adapter

@@ -52,6 +52,7 @@ dev = [
 
 [project.scripts]
 xbrl-warehouse = "sec_xbrl_warehouse.cli:app"
+xbrl-warehouse-mcp = "sec_xbrl_warehouse.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sec_xbrl_warehouse"]

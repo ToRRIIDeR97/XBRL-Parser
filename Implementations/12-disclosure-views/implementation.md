@@ -1,6 +1,6 @@
 # 12 — Cover page, segment and geographic breakdowns, and text blocks
 
-Status: plan only. Code follows after this plan is reviewed. Benefits from plans 02
+Status: implemented and merged to main. Benefits from plans 02
 and 03 (correct dei values) and plan 10 (roles).
 
 ## Problem

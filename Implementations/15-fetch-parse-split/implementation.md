@@ -1,6 +1,6 @@
 # 15 — Split SEC-bound fetching from CPU-bound parsing, and run parse jobs in parallel
 
-Status: plan only. Code follows after this plan is reviewed. Builds on plan 01
+Status: implemented and merged to main. Builds on plan 01
 (fewer, concurrent downloads), plan 04 (offline taxonomies), plan 09 (egress lock)
 and plan 13 (one archive per filing).
 

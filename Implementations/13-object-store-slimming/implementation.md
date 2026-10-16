@@ -1,6 +1,6 @@
 # 13 — Cut object-store usage: compressed extraction checkpoints, one bronze archive per filing
 
-Status: plan only. Code follows after this plan is reviewed. Pairs well with plan 01,
+Status: implemented and merged to main. Pairs well with plan 01,
 which stops downloading unneeded files.
 
 ## Problem

@@ -1,6 +1,6 @@
 # 08 — Job queue hardening: retries, dead-job recovery, backoff and queue metrics
 
-Status: plan only. Code follows after this plan is reviewed.
+Status: implemented and merged to main.
 
 ## Problem
 

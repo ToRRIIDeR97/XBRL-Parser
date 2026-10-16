@@ -384,6 +384,18 @@ def test_retryable_exception_unwraps_causes_and_database_errors() -> None:
     assert is_retryable_exception(DatabaseError("deadlock detected"))
     assert not is_retryable_exception(DatabaseError("invalid statement"))
 
+    # SQLAlchemy chains the asyncpg driver error as the cause; the message still decides.
+    class DeadlockDetectedError(Exception):
+        pass
+
+    DeadlockDetectedError.__module__ = "asyncpg.exceptions"
+    chained = DatabaseError("deadlock detected")
+    chained.__cause__ = DeadlockDetectedError("deadlock detected")
+    assert is_retryable_exception(chained)
+    permanent = DatabaseError("invalid statement")
+    permanent.__cause__ = DeadlockDetectedError("syntax error")
+    assert not is_retryable_exception(permanent)
+
 
 def test_worker_claims_only_requested_job_types() -> None:
     from sec_xbrl_warehouse.config import Settings

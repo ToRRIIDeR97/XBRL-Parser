@@ -1,6 +1,6 @@
 # 11 — Standardized metric series with point-in-time views
 
-Status: plan only. Code follows after this plan is reviewed. Depends on plan 02
+Status: implemented and merged to main. Depends on plan 02
 (fiscal fields) and plan 06 (metrics, approved mappings, `priority` on seeds).
 
 ## Problem

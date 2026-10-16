@@ -1,6 +1,6 @@
 # 14 — Slim the ClickHouse schema: shared taxonomy concepts, binary hashes, conditional raw values
 
-Status: plan only. Code follows after this plan is reviewed.
+Status: implemented and merged to main.
 
 ## Problem
 

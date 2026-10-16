@@ -1,6 +1,6 @@
 # 17 — Source-neutral filing keys and entity keys
 
-Status: draft for review (11 October 2026). First of the multi-exchange plans. Depends
+Status: implemented, verified (accept) and merged to main. First of the multi-exchange plans. Depends
 on plan 16 being accepted (its routes take the new key form too).
 
 Multi-exchange sequence (each a separate implementer + verifier round):

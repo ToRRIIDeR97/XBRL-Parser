@@ -1,6 +1,6 @@
 # 20 — Japan EDINET and Korea DART sources
 
-Status: draft for review (11 October 2026). Depends on plans 17 and 18. Independent of
+Status: implemented, verified (accept) and merged to main. Depends on plans 17 and 18. Independent of
 plan 19 (can run before or after it).
 
 ## Problem

@@ -1,6 +1,6 @@
 # 04 — Pinned local taxonomy packages and offline parsing
 
-Status: plan only. Code follows after this plan is reviewed.
+Status: implemented and merged to main.
 
 ## Problem
 

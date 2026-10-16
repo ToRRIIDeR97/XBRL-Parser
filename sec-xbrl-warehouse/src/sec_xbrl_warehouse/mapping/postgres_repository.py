@@ -369,7 +369,9 @@ class PostgresMappingRepository:
                 samples[concept] = fact_samples[:5]
 
         review_ids: dict[tuple[str, str], UUID] = {}
-        items = list(merged.items())
+        # Concept order fixes the row-lock order, so concurrent filings sharing
+        # concepts can't deadlock on the upsert.
+        items = sorted(merged.items())
         for offset in range(0, len(items), 500):
             chunk = items[offset : offset + 500]
             rows = [

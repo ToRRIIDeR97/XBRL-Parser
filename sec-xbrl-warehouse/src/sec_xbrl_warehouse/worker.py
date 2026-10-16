@@ -828,9 +828,10 @@ def is_retryable_exception(exc: BaseException) -> bool:
         return status in RETRYABLE_HTTP_STATUSES or status >= 500
     if _is_transient_storage_error(exc):
         return True
-    if exc.__cause__ is not None:
-        return is_retryable_exception(exc.__cause__)
-    # PostgreSQL transient error classes surface through SQLAlchemy.
+    if exc.__cause__ is not None and is_retryable_exception(exc.__cause__):
+        return True
+    # PostgreSQL transient error classes surface through SQLAlchemy, whose
+    # driver-level cause (asyncpg) isn't classified above.
     module = type(exc).__module__
     if module.startswith("sqlalchemy"):
         text = str(exc).lower()

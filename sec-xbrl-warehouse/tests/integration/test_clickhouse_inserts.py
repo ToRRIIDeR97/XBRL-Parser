@@ -86,6 +86,25 @@ def test_sec_bulk_tables_load_and_dedupe(warehouse: ClickHouseWarehouse) -> None
         assert rows[0]["n"] == 1, table
 
 
+def test_company_search_filters_before_result_limit(warehouse: ClickHouseWarehouse) -> None:
+    from sec_xbrl_warehouse.domain.models import Company
+    from sec_xbrl_warehouse.query.service import QueryService
+
+    for cik, name, ticker, exchange in (
+        (22222, "A first", "TSTA", "NYSE"),
+        (22223, "Z correct", "TSTB", "Nasdaq"),
+        (10000000001, "Foreign", "TSTC", "Nasdaq"),
+    ):
+        warehouse.upsert_company_mirror(
+            Company(cik=cik, name=name, tickers=(ticker,), exchanges=(exchange,))
+        )
+    service = QueryService(warehouse)
+    rows = service.search_companies("tst", limit=1, exchange="nasdaq", source="sec")
+    assert [row["cik"] for row in rows] == [22223]
+    assert service.search_companies("tst", exchange="LSE") == []
+    assert service.search_companies("tst", source="edinet") == []
+
+
 def test_xbrl_publication_and_canonical_views_are_replay_safe(
     warehouse: ClickHouseWarehouse, clickhouse_settings: Settings
 ) -> None:
@@ -109,6 +128,14 @@ def test_xbrl_publication_and_canonical_views_are_replay_safe(
         == 0
     )
     warehouse.publish_xbrl_bundle(bundle, counts)
+
+    from sec_xbrl_warehouse.query.service import QueryService
+
+    service = QueryService(warehouse)
+    summary = service.filing_summary(filing.accession, cik=filing.cik, filed_date=filing.filed_date)
+    assert summary is not None and summary["fact_count"] == 3
+    assert service.filing_summary(filing.accession, cik=2) is None
+    assert service.filing_summary(filing.accession, filed_date=date(2026, 2, 16)) is None
 
     revenue = next(fact for fact in bundle.facts if fact.concept_name == "Revenue")
     canonical = CanonicalFact(

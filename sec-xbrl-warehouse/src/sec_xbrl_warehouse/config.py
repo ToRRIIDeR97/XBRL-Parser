@@ -244,10 +244,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_cross_field_settings(self) -> Settings:
-        if not self.retain_filing_source_files:
-            raise ValueError(
-                "Raw source retention is required; cleanup must be a separate operation"
-            )
         placeholder_tokens = ("monitored-email@example.com", "Your Name or Organization")
         if self.env != "test" and any(token in self.sec_user_agent for token in placeholder_tokens):
             # Keep settings instantiable for `--help`; doctor and network clients call

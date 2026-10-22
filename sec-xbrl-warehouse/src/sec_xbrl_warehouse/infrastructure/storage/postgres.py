@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import aliased
 
 from sec_xbrl_warehouse.config import Settings
 from sec_xbrl_warehouse.domain.enums import ArtifactState, JobState, JobType
@@ -528,6 +529,61 @@ class PostgresControlRepository:
         async with self.sessions() as session:
             payload = await session.scalar(statement)
         return dict(payload) if payload else None
+
+    async def completed_filing_sources(self) -> list[dict[str, Any]]:
+        """Package, extraction and completion proofs from successful filing jobs."""
+        package, extracted, complete = (aliased(JobCheckpointRow) for _ in range(3))
+        statement = select(
+            package.payload.label("package"),
+            extracted.payload.label("extract"),
+            complete.payload.label("complete"),
+        ).select_from(IngestionJobRow)
+        for checkpoint, stage in (
+            (package, "package"),
+            (extracted, "extract"),
+            (complete, "complete"),
+        ):
+            statement = statement.join(
+                checkpoint,
+                and_(
+                    checkpoint.job_id == IngestionJobRow.id,
+                    checkpoint.stage == stage,
+                    checkpoint.checkpoint_key == "default",
+                ),
+            )
+        statement = statement.where(
+            IngestionJobRow.job_type.in_((JobType.INGEST_FILING.value, JobType.PARSE_FILING.value)),
+            IngestionJobRow.state == JobState.COMPLETE.value,
+        ).order_by(IngestionJobRow.updated_at.desc())
+        async with self.sessions() as session:
+            return [dict(row) for row in (await session.execute(statement)).mappings()]
+
+    async def source_package_in_use(self, accession: str, exclude_job: UUID | None = None) -> bool:
+        """Do not retire a package needed by another queued or active filing job."""
+        statement = (
+            select(IngestionJobRow.id)
+            .where(
+                IngestionJobRow.job_type.in_(
+                    (
+                        JobType.INGEST_FILING.value,
+                        JobType.FETCH_FILING.value,
+                        JobType.PARSE_FILING.value,
+                    )
+                ),
+                IngestionJobRow.state.in_(
+                    (JobState.PENDING.value, JobState.RUNNING.value, JobState.RETRY.value)
+                ),
+                or_(
+                    IngestionJobRow.payload["filing"]["accession"].astext == accession,
+                    IngestionJobRow.payload["accession"].astext == accession,
+                ),
+            )
+            .limit(1)
+        )
+        if exclude_job is not None:
+            statement = statement.where(IngestionJobRow.id != exclude_job)
+        async with self.sessions() as session:
+            return (await session.scalar(statement)) is not None
 
     async def legacy_extraction_pointers(self) -> list[dict[str, str]]:
         """Distinct saved-extraction pointers of completed jobs that are plain `.json`."""

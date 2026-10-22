@@ -1034,3 +1034,41 @@ async def test_esef_discovery_gives_one_entity_key_per_lei(
         assert list(stored) == [company.cik]
     finally:
         await repo.close()
+
+
+async def test_source_cleanup_proofs_require_completed_jobs_and_exclude_active_consumers(
+    postgres_settings: Settings,
+) -> None:
+    repo = PostgresControlRepository(postgres_settings)
+    accession = _filing().accession
+    try:
+        job_id = await repo.enqueue_job(
+            job_type="parse_filing",
+            idempotency_key="source-cleanup",
+            payload={"accession": accession, "extraction_revision": 1},
+        )
+        assert await repo.source_package_in_use(accession)
+        assert not await repo.source_package_in_use(accession, job_id)
+        job = await repo.claim_job("retention-test", 900)
+        assert job is not None
+        with checkpoint_lease(job):
+            for stage in ("package", "extract", "complete"):
+                await repo.save_checkpoint(job.id, stage, {"proof": stage})
+        assert await repo.completed_filing_sources() == []
+        await repo.complete_job(job.id, {}, worker_id="retention-test", attempt=job.attempts)
+        assert not await repo.source_package_in_use(accession)
+        assert await repo.completed_filing_sources() == [
+            {
+                "package": {"proof": "package"},
+                "extract": {"proof": "extract"},
+                "complete": {"proof": "complete"},
+            }
+        ]
+        await repo.enqueue_job(
+            job_type="fetch_filing",
+            idempotency_key="new-fetch",
+            payload={"filing": {"accession": accession}},
+        )
+        assert await repo.source_package_in_use(accession)
+    finally:
+        await repo.close()

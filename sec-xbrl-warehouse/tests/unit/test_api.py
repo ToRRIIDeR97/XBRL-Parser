@@ -209,7 +209,9 @@ def test_filing_summary_validates_accession_and_uses_known_bounds():
         service.filing_summary("bad")
     service.filing_summary("0000000001-26-000001", cik=1, filed_date=date(2026, 1, 2))
     sql, parameters = warehouse.queries[-1]
-    assert "AND cik = %(cik)s" in sql
+    assert "AND facts.cik = %(cik)s" in sql
+    assert "AND facts.filed_date = %(filed_date)s" in sql
+    assert "any(facts.cik) AS cik" in sql
     assert parameters["filed_date"] == date(2026, 1, 2)
 
 
@@ -436,4 +438,32 @@ def test_ui_is_served_without_key_but_data_still_requires_it():
     assert page.status_code == 200 and "XBRL Warehouse" in page.text
     assert client.get("/v1/companies?q=a").status_code == 401
     assert client.get("/uix").status_code == 401
+    client.close()
+
+
+def test_company_search_filters_source_and_exchange_before_limiting():
+    import pytest
+
+    warehouse = Warehouse()
+    service = QueryService(warehouse)
+    app = create_app()
+    app.dependency_overrides[get_query_service] = lambda: service
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/v1/companies?q=aa&exchange=Nasdaq&source=sec").status_code == 200
+    sql, params = warehouse.queries[-1]
+    assert params == {"term": "aa", "limit": 20, "exchange": "Nasdaq"}
+    assert sql.index("AND arrayExists(e") < sql.index("LIMIT")
+    assert "cik < 10000000000" in sql
+    assert "startsWith(upperUTF8(t)" in sql
+    assert client.get("/v1/companies?q=Toyota&source=edinet").status_code == 200
+    sql, params = warehouse.queries[-1]
+    assert params["source_prefix"] == "edinet-"
+    assert "SELECT cik FROM v_cover_pages_latest" in sql
+    before = len(warehouse.queries)
+    for suffix in ("exchange=", "exchange=%20%20", "source=unknown", "exchange=" + "x" * 65):
+        assert client.get("/v1/companies?q=aa&" + suffix).status_code == 422
+    assert len(warehouse.queries) == before
+    for kwargs in ({"source": "unknown"}, {"exchange": " "}):
+        with pytest.raises(ValueError):
+            service.search_companies("aa", **kwargs)
     client.close()

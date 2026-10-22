@@ -54,6 +54,10 @@ class ObjectStore(Protocol):
 
 @runtime_checkable
 class ControlRepository(Protocol):
+    async def source_package_in_use(
+        self, accession: str, exclude_job: UUID | None = None
+    ) -> bool: ...
+
     async def get_source_artifact(self, artifact_id: UUID) -> SourceArtifactRef: ...
 
     async def get_checkpoint(

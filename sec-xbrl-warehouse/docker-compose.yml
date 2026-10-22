@@ -94,6 +94,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-xbrl_minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-xbrl_minio_dev_password}
       XBRL_OBJECT_STORE_BUCKET: ${XBRL_OBJECT_STORE_BUCKET:-sec-xbrl}
+      XBRL_RETAIN_FILING_SOURCE_FILES: ${XBRL_RETAIN_FILING_SOURCE_FILES:-true}
       XBRL_WORKER_OBJECT_STORE_ACCESS_KEY: ${XBRL_WORKER_OBJECT_STORE_ACCESS_KEY:-xbrl_worker}
       XBRL_WORKER_OBJECT_STORE_SECRET_KEY: ${XBRL_WORKER_OBJECT_STORE_SECRET_KEY:-xbrl_worker_dev_password}
     entrypoint:
@@ -106,7 +107,11 @@ services:
         mc version enable "local/$${XBRL_OBJECT_STORE_BUCKET}"
         mc ilm rule ls "local/$${XBRL_OBJECT_STORE_BUCKET}" >/dev/null 2>&1 || mc ilm rule add --noncurrent-expire-days 30 "local/$${XBRL_OBJECT_STORE_BUCKET}"
         policy="$$(mktemp)"
-        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket","s3:ListBucketMultipartUploads"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Resource":["arn:aws:s3:::%s/*"]}]}' "$${XBRL_OBJECT_STORE_BUCKET}" "$${XBRL_OBJECT_STORE_BUCKET}" > "$$policy"
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:ListBucket","s3:ListBucketMultipartUploads"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],"Resource":["arn:aws:s3:::%s/*"]}' "$${XBRL_OBJECT_STORE_BUCKET}" "$${XBRL_OBJECT_STORE_BUCKET}" > "$$policy"
+        if [ "$${XBRL_RETAIN_FILING_SOURCE_FILES}" = "false" ]; then
+          printf ',{"Effect":"Allow","Action":["s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/bronze/*/filings/*/*/packages/sha256=*/package.zip"]}' "$${XBRL_OBJECT_STORE_BUCKET}" >> "$$policy"
+        fi
+        printf ']}' >> "$$policy"
         mc admin policy create local xbrl-worker "$$policy"
         mc admin user add local "$${XBRL_WORKER_OBJECT_STORE_ACCESS_KEY}" "$${XBRL_WORKER_OBJECT_STORE_SECRET_KEY}"
         mc admin policy attach local xbrl-worker --user "$${XBRL_WORKER_OBJECT_STORE_ACCESS_KEY}"
@@ -166,7 +171,7 @@ services:
     env_file: .env
     environment: &worker-identity
       # Least privilege: DML-only PostgreSQL role, SELECT/INSERT ClickHouse user,
-      # and an object-store user without delete (provision: OPERATIONS.md). The
+      # and an object-store user with scoped source cleanup when enabled. The
       # owner, admin, and root credentials that `.env` carries are blanked here.
       XBRL_POSTGRES_DSN: postgresql+asyncpg://xbrl_worker:${XBRL_WORKER_POSTGRES_PASSWORD:-xbrl_worker_dev_password}@postgres:5432/${POSTGRES_DB:-xbrl_control}
       XBRL_CLICKHOUSE_HOST: clickhouse

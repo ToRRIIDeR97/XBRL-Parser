@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from sec_xbrl_warehouse.config import Settings
+from sec_xbrl_warehouse.domain.models import FilingPackageManifest
+from sec_xbrl_warehouse.domain.ports import ObjectStore
 from sec_xbrl_warehouse.domain.sources import is_filing_key
+from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_file
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle
 
@@ -32,6 +35,92 @@ REVISIONED_TABLES = (
     "canonical_facts",
 )
 _CHUNK = 500
+
+
+def delete_filing_source(
+    store: ObjectStore,
+    settings: Settings,
+    manifest: FilingPackageManifest,
+    extraction: dict[str, Any],
+    revision: int,
+    *,
+    apply: bool = False,
+) -> bool:
+    """Verify the replay checkpoint before retiring exactly one source package."""
+    from sec_xbrl_warehouse.ingestion.filing_downloader import filing_package_key
+
+    if apply and settings.retain_filing_source_files:
+        raise ValueError("Set XBRL_RETAIN_FILING_SOURCE_FILES=false before deleting sources")
+    checksum = manifest.package_checksum_sha256 or ""
+    key = manifest.package_object_key
+    if (
+        not key
+        or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
+        or key != filing_package_key(manifest.filing, checksum)
+    ):
+        raise ArtifactIntegrityError("Source cleanup requires a checksum-addressed filing package")
+    if not store.exists(key):
+        return False
+    sha = extraction.get("sha256", "")
+    prefix = f"silver/xbrl/extractions/accession={manifest.filing.accession}/revision={revision}/"
+    if re.fullmatch(r"[0-9a-f]{64}", sha) is None or extraction.get("object_key") not in {
+        f"{prefix}sha256={sha}.json",
+        f"{prefix}sha256={sha}.json.zst",
+    }:
+        raise ArtifactIntegrityError("Source cleanup requires the filing's saved extraction")
+    settings.ensure_directories()
+    with tempfile.TemporaryDirectory(prefix="source-retention-", dir=settings.temp_dir) as tmp:
+        saved = store.get_file(
+            extraction["object_key"], Path(tmp) / "extract", max_bytes=settings.extraction_max_bytes
+        )
+        if saved.checksum_sha256 != sha:
+            raise ArtifactIntegrityError("Saved extraction checksum mismatch; source retained")
+    if apply:
+        store.delete(key)
+    return True
+
+
+async def prune_filing_sources(
+    control: Any, warehouse: _Warehouse, store: Any, settings: Settings, *, apply: bool = False
+) -> dict[str, Any]:
+    """Retire source ZIPs referenced by completed, published ingestion jobs only."""
+    import asyncio
+
+    if apply and settings.retain_filing_source_files:
+        raise ValueError("Set XBRL_RETAIN_FILING_SOURCE_FILES=false before deleting sources")
+    published = {
+        (str(row["accession"]), int(row["revision"]))
+        for row in warehouse.query(
+            "SELECT accession, extraction_revision AS revision FROM xbrl_extractions "
+            "GROUP BY accession, extraction_revision"
+        )
+    }
+    sizes = dict(store.list_objects("bronze/"))
+    report: dict[str, Any] = {"dry_run": not apply, "packages": [], "bytes": 0, "skipped": []}
+    seen: set[str] = set()
+    for item in await control.completed_filing_sources():
+        manifest = FilingPackageManifest.model_validate(item["package"])
+        key = manifest.package_object_key
+        complete = item["complete"]
+        revision = int(complete.get("extraction_revision", 0))
+        if not key or key in seen or key not in sizes:
+            continue
+        if (
+            complete.get("status") != "complete"
+            or complete.get("accession") != manifest.filing.accession
+            or (manifest.filing.accession, revision) not in published
+            or await control.source_package_in_use(manifest.filing.accession)
+        ):
+            report["skipped"].append(key)
+            continue
+        ready = await asyncio.to_thread(
+            delete_filing_source, store, settings, manifest, item["extract"], revision, apply=apply
+        )
+        if ready:
+            seen.add(key)
+            report["packages"].append(key)
+            report["bytes"] += sizes[key]
+    return report
 
 
 class _Warehouse(Protocol):

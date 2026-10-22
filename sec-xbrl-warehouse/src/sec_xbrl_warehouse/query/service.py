@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sec_xbrl_warehouse.config_files import load_yaml
 from sec_xbrl_warehouse.domain.ports import Warehouse
 from sec_xbrl_warehouse.domain.sources import (
+    ENTITY_KEY_BASE,
     FILING_KEY_MAX_LENGTH,
     FILING_KEY_PATTERN,
     is_filing_key,
@@ -271,22 +272,48 @@ class QueryService:
         )
         return int(rows[0]["cik"]) if rows else None
 
-    def search_companies(self, text: str, *, limit: int = 20) -> list[dict[str, Any]]:
-        """Companies in the warehouse whose ticker or name matches `text` (tickers first)."""
+    def search_companies(
+        self,
+        text: str,
+        *,
+        limit: int = 20,
+        exchange: str | None = None,
+        source: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Imported companies by ticker prefix, name, or ID; exact tickers first."""
         term = text.strip()
         if not 1 <= len(term) <= 64 or not 1 <= limit <= 100:
             raise ValueError("Search text must be 1 to 64 characters and limit 1 to 100")
+        params: dict[str, Any] = {"term": term, "limit": limit}
+        filters = ""
+        if exchange is not None:
+            exchange = exchange.strip()
+            if not 1 <= len(exchange) <= 64:
+                raise ValueError("Exchange must be 1 to 64 characters")
+            filters = " AND arrayExists(e -> lowerUTF8(e) = lowerUTF8(%(exchange)s), exchanges)"
+            params["exchange"] = exchange
+        if source is not None:
+            if source not in {"sec", "esef", "edinet", "dart", "nse", "mca", "acra"}:
+                raise ValueError("Unknown filing source")
+            if source == "sec":
+                filters += f" AND cik < {ENTITY_KEY_BASE}"
+            else:
+                filters += (
+                    " AND cik IN (SELECT cik FROM v_cover_pages_latest"
+                    " WHERE startsWith(accession, %(source_prefix)s))"
+                )
+                params["source_prefix"] = source + "-"
         return self.warehouse.query(
-            """
+            f"""
             SELECT cik, name, tickers, exchanges, sic, fiscal_year_end
             FROM companies FINAL
-            WHERE has(tickers, upper(%(term)s))
+            WHERE (arrayExists(t -> startsWith(upperUTF8(t), upperUTF8(%(term)s)), tickers)
                OR positionCaseInsensitiveUTF8(name, %(term)s) > 0
-               OR toString(cik) = %(term)s
+               OR toString(cik) = %(term)s){filters}
             ORDER BY has(tickers, upper(%(term)s)) DESC, name
             LIMIT %(limit)s
             """,
-            {"term": term, "limit": limit},
+            params,
         )
 
     def company_filings(
@@ -324,25 +351,25 @@ class QueryService:
         filters = ""
         params: dict[str, Any] = {"accession": accession}
         if cik is not None:
-            filters += " AND cik = %(cik)s"
+            filters += " AND facts.cik = %(cik)s"
             params["cik"] = cik
         if filed_date is not None:
-            filters += " AND filed_date = %(filed_date)s"
+            filters += " AND facts.filed_date = %(filed_date)s"
             params["filed_date"] = filed_date
         rows = self.warehouse.query(
             f"""
             SELECT
                 accession,
-                any(cik) AS cik,
-                any(company_name) AS company_name,
-                any(form) AS form,
-                any(filed_date) AS filed_date,
+                any(facts.cik) AS cik,
+                any(facts.company_name) AS company_name,
+                any(facts.form) AS form,
+                any(facts.filed_date) AS filed_date,
                 count() AS fact_count,
                 uniqExact(concept_qname) AS concept_count,
                 uniqExact(context_hash) AS context_count,
                 max(extraction_revision) AS latest_extraction_revision
-            FROM v_xbrl_facts_latest
-            WHERE accession = %(accession)s {filters}
+            FROM v_xbrl_facts_latest AS facts
+            WHERE facts.accession = %(accession)s {filters}
             GROUP BY accession
             """,
             params,

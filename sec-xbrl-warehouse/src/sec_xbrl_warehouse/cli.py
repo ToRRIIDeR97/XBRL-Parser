@@ -1015,6 +1015,29 @@ def storage_retire_revisions(
     console.print_json(data=report)
 
 
+@storage_app.command("prune-filing-sources")
+def storage_prune_filing_sources(
+    yes: bool = typer.Option(False, "--yes", help="Delete source packages; otherwise dry run."),
+) -> None:
+    """Retire source ZIPs of completed, published filings; retain replay data."""
+    from sec_xbrl_warehouse.infrastructure.storage.maintenance import prune_filing_sources
+
+    settings = get_settings()
+
+    async def run() -> dict[str, object]:
+        control = PostgresControlRepository(settings)
+        warehouse = ClickHouseWarehouse(settings)
+        try:
+            return await prune_filing_sources(
+                control, warehouse, create_object_store(settings), settings, apply=yes
+            )
+        finally:
+            await control.close()
+            warehouse.close()
+
+    console.print_json(data=asyncio.run(run()))
+
+
 @storage_app.command("recompress-extractions")
 def storage_recompress_extractions(
     yes: bool = typer.Option(False, "--yes", help="Rewrite and repoint; without it, dry run."),

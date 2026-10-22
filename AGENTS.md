@@ -45,7 +45,7 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
   `XBRL_WORKER_CONCURRENCY=N XBRL_ARELLE_OFFLINE=true worker run --job-type parse_filing`
   beside it. Legacy queued `ingest_filing` jobs still run. Completed parses queue a
   coalesced `rebuild_series` job per company, which those workers also claim.
-- Retain Arelle semantics, immutable raw artifacts, reversible canonical mappings,
+- Retain Arelle semantics, immutable retained artifacts, reversible canonical mappings,
   idempotent replay, and diagnostics for rejected or drifting inputs.
 - Keep secrets out of source control. Preserve query budgets, download and parser
   limits, and checkpoint-ownership protections.
@@ -62,7 +62,7 @@ MinIO/S3, and serves them through a CLI and a FastAPI query API (`/docs`).
 
 From `sec-xbrl-warehouse/`. Copy `.env.example` to `.env` only on a fresh install;
 preserve an existing `.env`. Set `XBRL_SEC_USER_AGENT` to a real name and monitored email,
-and keep `XBRL_RETAIN_FILING_SOURCE_FILES=true`. Use `docker-compose` if the
+and choose source retention with `XBRL_RETAIN_FILING_SOURCE_FILES` (default `true`). Use `docker-compose` if the
 `docker compose` plugin isn't installed.
 
 ```bash
@@ -81,7 +81,7 @@ docker compose up -d api
 Privileged commands (migrations, `db`, `taxonomy`, `storage` maintenance, `doctor`) run
 through the on-demand `admin` service, which holds the owner credentials. Workers
 connect as least-privilege identities (`xbrl_worker`, `xbrl_writer`, and an object-store
-user without delete); `provision_identities.sh` and `minio-init` create them, and
+user with optional package-only delete); `provision_identities.sh` and `minio-init` create them, and
 queue-only operator commands (`catalog`, `backfill`, `filing`, `mapping`, `company`,
 `jobs`) work through either service. The `api` service has no writer credentials or
 data volume. It connects as `xbrl_api` to PostgreSQL and ClickHouse (see SECURITY.md). Docs are served at

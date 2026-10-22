@@ -1,5 +1,33 @@
 # Engineering Handoff
 
+## Latest update — 22 October 2026
+
+The stock/filing explorer now supports source and exchange filters, paged filing
+history, regional acquisition guidance, and filing extraction summaries. Automatic
+global stock discovery/import remains outside this UI change.
+
+Source retention still defaults to true. The operator explicitly chose false in
+the local ignored `.env` and approved the worker's package-only delete grant.
+`api`, `worker`, and `admin` images were rebuilt, `minio-init` applied the scoped
+policy, and the API was restarted and is ready. No ingestion worker was started.
+Future checkpointed ingestions delete their source ZIP only after successful
+publication/completion and verifying the retained extraction. Older completed jobs
+can be cleaned with `storage prune-filing-sources` (dry run first).
+
+The local cleanup deleted 85 proven successfully loaded source ZIPs (35,136,866
+bytes; 33.51 MiB) from the current MinIO namespace. Three unverified packages remain.
+All non-package objects are unchanged. All 85 deleted objects still have recoverable
+versions; lifecycle expires noncurrent versions after 30 days, so physical disk
+space is not immediately reclaimed. PostgreSQL still has 43 filings and ClickHouse
+still publishes 42,172 facts at revision 3. Receipt and before/after inventories
+are in ignored `data/retention/2026-10-22/`.
+
+Validation: compilation, Ruff checks/format, mypy (92 source files), 636 unit tests,
+54 integration tests, three frontend tests, zero stub markers, a source re-fetch
+regression test, and live API/storage verification passed. No CI was started.
+See OPERATIONS.md, "Filing source retention", and SECURITY.md before changing the
+policy or re-parsing a filing whose original source has been retired.
+
 Latest operational state (3 October 2026): the local warehouse was reset. The Colima Docker disk filled up (a 25 GB uncapped ClickHouse console log plus warehouse data), which crashed PostgreSQL. At the operator's request the PostgreSQL, ClickHouse, and MinIO volumes were deleted and recreated empty; migrations, ClickHouse DDL, and `doctor` pass. The earlier bulk progress (April, May, June, and July 2026 Notes jobs, their checkpoints, and quarantines) and the AAPL 2025 10-K no longer exist locally; the September handover files describe history, not live state. Recreated containers use the Compose log limits. Use `worker run --job-type ingest_filing` to process filing jobs without claiming bulk loads. AAPL (CIK 320193) 10-K/10-Q filings from 2016 to July 2026 are loaded: 42 of 43, with 41,333 facts in the latest views. 26 filings were re-extracted at revision 2 after the taxonomy-encoding fix. The January 2019 10-Q (`0000320193-19-000010`) is missing because SEC's `index.json` for it lists only the `.txt` bundle and `-xbrl.zip`, which the filing downloader can't read yet. Pre-2019 classic-XBRL filings need `filing enqueue --instance-document`. Validation: 183 unit tests and 23 integration tests passed. See the [8 September remediation](docs/history/HARDENING_REMEDIATION_2026-09-08.md) for hardening scope; the API credential split still requires provisioning before deployment.
 
 Storage, speed, and security audit (8 October 2026, branch
@@ -140,7 +168,7 @@ additional checkpoint fencing, bounded cache/taxonomy reads and reconciliation,
 mandatory raw retention, API readiness protection, and container changes.
 The local storage containers have been recreated with loopback-only ports.
 Existing application volumes need UID/GID `10001:10001` ownership before upgrade;
-`XBRL_RETAIN_FILING_SOURCE_FILES=false` is now rejected.
+Source retention defaults to true; the explicit opt-out is described above.
 
 Run the same gates before release:
 

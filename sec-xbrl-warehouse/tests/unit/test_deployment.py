@@ -79,4 +79,40 @@ def test_workers_use_least_privilege_identities_and_parse_has_no_internet():
     assert config["networks"]["backend"]["internal"] is True
     assert "env_file" in services["admin"] and services["admin"]["profiles"] == ["admin"]
     init = services["minio-init"]["entrypoint"][2]
-    assert "mc version enable" in init and "s3:DeleteObject" not in init
+    assert "mc version enable" in init
+    assert '"Action":["s3:DeleteObject"]' in init
+    assert "/bronze/*/filings/*/*/packages/sha256=*/package.zip" in init
+    assert "s3:DeleteObjectVersion" not in init
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Compose init runs in a POSIX container")
+@pytest.mark.parametrize("retain", ["true", "false"])
+def test_minio_source_delete_policy_is_opt_in_and_limited(tmp_path, retain):
+    import json
+
+    services = yaml.safe_load(Path("docker-compose.yml").read_text())["services"]
+    init = services["minio-init"]["entrypoint"][2]
+    script = init[init.index('policy="$$(mktemp)"') : init.index("mc admin policy create")].replace(
+        "$$", "$"
+    )
+    result = subprocess.run(
+        ["sh", "-ec", script + '\ncat "$policy"\nrm "$policy"'],
+        env={
+            **os.environ,
+            "TMPDIR": str(tmp_path),
+            "XBRL_OBJECT_STORE_BUCKET": "test-bucket",
+            "XBRL_RETAIN_FILING_SOURCE_FILES": retain,
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    policy = json.loads(result.stdout)
+    deletes = [
+        statement for statement in policy["Statement"] if "s3:DeleteObject" in statement["Action"]
+    ]
+    assert len(deletes) == (0 if retain == "true" else 1)
+    if deletes:
+        assert deletes[0]["Resource"] == [
+            "arn:aws:s3:::test-bucket/bronze/*/filings/*/*/packages/sha256=*/package.zip"
+        ]

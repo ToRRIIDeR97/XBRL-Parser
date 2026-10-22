@@ -19,7 +19,7 @@ Each Compose service connects with the least privilege its job needs:
 
 | Service | PostgreSQL | ClickHouse | Object store |
 | --- | --- | --- | --- |
-| `worker`, `worker-parse` | `xbrl_worker`: DML on the control tables | `xbrl_writer`: SELECT, INSERT | `xbrl_worker`: get, put, list (no delete) |
+| `worker`, `worker-parse` | `xbrl_worker`: DML on the control tables | `xbrl_writer`: SELECT, INSERT | `xbrl_worker`: get, put, list; package-only delete when retention is disabled |
 | `api` | `xbrl_api`: CONNECT only | `xbrl_api`: SELECT, `xbrl_api_profile` budgets | none |
 | `admin` (on demand) | owner (`POSTGRES_USER`) | admin (`CLICKHOUSE_USER`) | root |
 
@@ -49,6 +49,48 @@ Each Compose service connects with the least privilege its job needs:
   Operator commands that only queue or read jobs (`filing`, `backfill`, `mapping`,
   `company`, `jobs`, `catalog`) work through either service.
 
+## Filing source retention
+
+`XBRL_RETAIN_FILING_SOURCE_FILES` defaults to `true`. Set it to `false` to
+retire the source ZIP after checkpointed parsing, validation, silver/ClickHouse
+loading, canonical mapping, publication, reconciliation, and saving the completion
+checkpoint. Cleanup verifies the saved extraction's SHA-256 before deletion.
+A failed load keeps its input. A failed deletion retries through the completed-job
+path without re-parsing. Non-checkpointed ingestion refuses automatic cleanup.
+
+Manifests, extraction checkpoints, silver Parquet, quarantine, database rows, bulk
+ZIPs, and operator inbox files are retained. Packages needed by other pending,
+running, or retrying filing jobs are deferred; run the admin cleanup after those
+jobs finish to collect any deferred packages. This check is not a lock against new
+jobs: do not enqueue new source consumers during an admin cleanup. For a new parser
+revision after a source is retired, run discovery/fetch again before parsing;
+completed-job replay and canonical remapping can use the retained snapshots.
+
+Apply the policy and rebuild worker images after changing `.env`:
+
+```bash
+docker compose build api worker admin
+docker compose up -d minio-init
+# Recreate any running worker/worker-parse to load the changed setting.
+# Do not start workers merely to apply retention to existing completed jobs.
+docker compose run --rm admin storage prune-filing-sources
+docker compose run --rm admin storage prune-filing-sources --yes
+```
+
+The cleanup defaults to a dry run and lists exact keys and bytes. It selects only
+packages referenced by completed filing jobs with package/extraction/completion
+checkpoints and a matching ClickHouse publication marker. An unproven source is
+left alone. `--yes` requires retention to be disabled. The worker's opt-in delete
+grant matches source ZIP paths only; it cannot delete replay files or object
+versions. Re-enable retention and rerun `minio-init` to revoke the grant.
+
+On the versioned local bucket, deletion creates a delete marker. The source bytes
+remain recoverable as noncurrent versions for 30 days; disk space is reclaimed
+when lifecycle expiry removes those versions, not immediately. On an unversioned
+store, deletion is permanent. The application does not purge object versions.
+
+![Source retention sequence](diagrams/sequence-source-retention.svg)
+
 ## Routine checks
 
 - `/health/ready` is green.
@@ -61,9 +103,34 @@ Each Compose service connects with the least privilege its job needs:
 ## Web UI and MCP server
 
 The API serves a browser UI at `http://127.0.0.1:8080/ui/` (`/` redirects there).
-Search a ticker, name, or CIK; only companies already loaded appear, so ingest a new
-one first (`filing discover --cik <CIK> --forms 10-K,10-Q`). When `XBRL_API_KEY` is
-set, enter it in the page's key field.
+Search by ticker prefix, company name, or warehouse company ID. Optional filing-source
+and exact exchange filters apply before the result limit (100 in the UI). Outside
+the SEC adapter, company names are the useful search key: the current adapters do
+not import ticker or exchange metadata. Source-filtered non-SEC results require a
+published cover page. A missing match means no matching imported company, not an
+unlisted stock.
+
+Selecting a company shows its financial overview and filing library. Filings load
+100 at a time; type, filed-year and text filters apply to pages loaded so far.
+“Load more filings” includes older pages, within the API's offset limit. “View
+record” opens the extraction summary. Financial cards/tables show only USD series.
+
+The regional cards cover `sec`, `esef`, `edinet`, `dart`, `nse`, `mca` and `acra`.
+Their labels describe acquisition requirements, not enabled/healthy status. The
+external links open a source portal; EDGAR receives the search text, while other
+portals require entering the company name there. They never enqueue ingestion.
+For import procedures and requirements, use the source sections below. Singapore
+ACRA is not an SGX feed; MCA is not an exchange directory. There is no all-exchange
+stock directory or automatic browser-to-worker import in this release.
+
+When `XBRL_API_KEY` is set, enter it under “API access”.
+
+Frontend checks (Node.js, development only; no frontend build or runtime dependency):
+
+```bash
+node --check src/sec_xbrl_warehouse/api/static/app.mjs
+node --test tests/frontend/explorer.test.mjs
+```
 
 `xbrl-warehouse-mcp` is a stdio MCP server for agents. It needs the API running and
 reads `XBRL_MCP_API_URL` (default `http://127.0.0.1:8080`) and `XBRL_API_KEY`. Tools:

@@ -3,319 +3,53 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>XBRL Warehouse</title>
-<style>
-:root {
-  color-scheme: light dark;
-  --bg: #fafaf8; --card: #f1f0ec; --text: #1d1d1b; --muted: #6b6a64; --faint: #9c9a92; --line: #e3e2dc;
-  --accent: #185fa5; --bar: #378add; --up: #3b6d11; --down: #a32d2d; --radius: 8px;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #161615; --card: #232321; --text: #ecebe6; --muted: #a8a69e; --faint: #77756e; --line: #34332f;
-          --accent: #85b7eb; --up: #97c459; --down: #f09595; }
-}
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.5; }
-main { max-width: 880px; margin: 0 auto; padding: 24px 16px 48px; }
-input, button { font: inherit; color: inherit; }
-.top { display: flex; gap: 8px; margin-bottom: 28px; }
-.search { position: relative; flex: 1; }
-.search input, #key { width: 100%; background: transparent; border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 12px; }
-#key { width: 150px; }
-#results { position: absolute; top: 100%; left: 0; right: 0; z-index: 5; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); margin-top: 4px; display: none; overflow: hidden; }
-#results div { padding: 9px 12px; cursor: pointer; }
-#results div:hover, #results div.active { background: var(--card); }
-.head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-.head h1 { font-size: 22px; font-weight: 500; margin: 0; display: inline; }
-.muted { color: var(--muted); }
-.faint { color: var(--faint); font-size: 13px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 28px; }
-.card { background: var(--card); border-radius: var(--radius); padding: 14px 16px; }
-.card .label { font-size: 13px; color: var(--muted); margin: 0; }
-.card .value { font-size: 24px; font-weight: 500; }
-.up { color: var(--up); } .down { color: var(--down); }
-.label { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-#chart { width: 100%; height: 160px; display: block; margin-bottom: 24px; }
-#chart text { fill: var(--muted); font-size: 12px; }
-.filings a { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); color: inherit; text-decoration: none; font-size: 14px; }
-.filings a:last-child { border-bottom: 1px solid var(--line); }
-.filings a:hover span:first-child { color: var(--accent); }
-.tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--line); margin: 36px 0 4px; }
-.tabs button { background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 0; color: var(--muted); cursor: pointer; }
-.tabs button.on { color: var(--text); border-bottom-color: var(--text); }
-.scroll { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { padding: 10px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; font-weight: 400; }
-th:first-child, td:first-child { text-align: left; }
-th { color: var(--muted); font-size: 13px; }
-td.neg { color: var(--down); }
-.empty { text-align: center; padding: 64px 16px; }
-#status { color: var(--down); margin-bottom: 12px; }
-</style>
+<title>XBRL Warehouse · Stock & filing explorer</title>
+<link rel="stylesheet" href="./style.css">
+<script type="module" src="./app.mjs"></script>
 </head>
 <body>
+<header><a href="./" class="brand"><span class="mark" aria-hidden="true">X</span> XBRL Warehouse</a><span class="muted">Company research / Filing explorer</span><details class="access"><summary>API access</summary><label for="key">API key</label><input id="key" type="password" placeholder="Only if required" autocomplete="off"><p class="faint">Saved in this browser. Used only for warehouse requests.</p></details></header>
 <main>
-  <div class="top">
-    <div class="search">
-      <input id="q" placeholder="Ticker, company name, or CIK" autocomplete="off" aria-label="Search companies">
-      <div id="results" role="listbox"></div>
-    </div>
-    <input id="key" type="password" placeholder="API key" aria-label="API key (only if the API requires one)" title="Only needed if the API requires a key">
-  </div>
-  <div id="status"></div>
-  <div id="empty" class="empty">
-    <p>Search for a company to see its financials.</p>
-    <p class="faint">Only companies already loaded in the warehouse appear. Add one with
-      <code>xbrl-warehouse filing discover --cik &lt;CIK&gt; --forms 10-K,10-Q</code>.</p>
-  </div>
-  <section id="company" hidden>
-    <div class="head">
-      <div><h1 id="name"></h1> <span id="ticker" class="muted"></span></div>
-      <span id="source" class="faint"></span>
-    </div>
+  <div class="intro"><div class="eyebrow">STOCK & FILING EXPLORER</div><h1>Start with a company.<br>Get to the filing.</h1><p class="muted">Search your warehouse, explore filing history, or continue to a regional source for reports you haven’t imported yet.</p></div>
+  <section class="search-panel" aria-label="Find a company">
+    <form id="search-form">
+      <div class="search-grid">
+        <div><label for="market">Market / filing source</label><select id="market"><option value="">All source regions</option></select></div>
+        <div><label for="exchange">Exchange</label><input id="exchange" list="exchange-options" placeholder="All exchanges" maxlength="64"><datalist id="exchange-options"></datalist></div>
+        <div class="search"><label for="q">Stock symbol or company</label><input id="q" placeholder="e.g. AAPL, Apple, or company ID" autocomplete="off" maxlength="64" aria-describedby="search-help"></div>
+        <button type="submit" class="primary">Search warehouse</button>
+      </div>
+      <p id="search-help" class="faint">Warehouse results contain imported companies. Outside the US, search by company name; most adapters do not import ticker or exchange metadata.</p>
+    </form>
+    <div class="examples"><span class="faint">Try a search</span><button type="button" data-query="AAPL">AAPL</button><button type="button" data-query="MSFT">MSFT</button><button type="button" data-query="Toyota">Toyota</button><button type="button" data-query="DBS">DBS</button></div>
+    <div id="status" role="alert"></div>
+    <div id="search-status" role="status" aria-live="polite"></div>
+    <div id="results" aria-label="Warehouse search results"></div>
+  </section>
+  <section class="coverage" aria-label="Find reports outside the warehouse">
+    <div class="section-head"><div><h2>Find reports outside the warehouse</h2><p class="faint" id="coverage-help">Choose a region to see its filing source and acquisition requirements.</p></div><span class="badge">7 source adapters</span></div>
+    <div id="source-cards" class="source-grid"></div>
+    <p class="faint">Source links open external sites; they do not import files. A supported region does not mean every exchange or company is covered.</p>
+  </section>
+  <section id="empty" class="empty"><h2>Your research starts here</h2><p class="muted">Choose a market and search for a company. Select a warehouse result to browse its financials and filings.</p></section>
+  <section id="company" hidden aria-label="Selected company">
+    <div class="head"><div><div class="eyebrow">SELECTED COMPANY</div><h2 id="name"></h2><div id="ticker" class="muted"></div></div><span id="source" class="faint"></span></div>
+    <div id="company-status" role="status"></div>
     <div class="cards" id="cards"></div>
-    <div class="label" id="chart-label">Revenue</div>
-    <svg id="chart" role="img" aria-label="Revenue by fiscal year"></svg>
-    <div class="label">Latest filings</div>
-    <div class="filings" id="filings"></div>
-    <div class="tabs" role="tablist">
-      <button data-tab="income" class="on" role="tab">Income</button>
-      <button data-tab="cash" role="tab">Cash flow</button>
-      <button data-tab="balance" role="tab">Balance sheet</button>
-      <span id="unit" class="faint" style="margin-left:auto;align-self:center"></span>
+    <div class="panel"><h3 id="chart-label">Revenue</h3><svg id="chart" role="img" aria-label="Revenue by fiscal year"></svg>
+      <div class="tabs" role="tablist" aria-label="Financial statements"><button data-tab="income" class="on" role="tab" aria-selected="true">Income</button><button data-tab="cash" role="tab" aria-selected="false">Cash flow</button><button data-tab="balance" role="tab" aria-selected="false">Balance sheet</button><span id="unit" class="faint"></span></div>
+      <div class="scroll"><table id="table" aria-label="Financial statement values"></table></div>
     </div>
-    <div class="scroll"><table id="table"></table></div>
+    <div class="panel">
+      <div class="section-head"><div><h2>Filing library</h2><p class="faint">Original source links and warehouse records, newest first.</p></div><span id="filing-count" class="badge"></span></div>
+      <div class="filing-controls"><div><label for="filing-form">Filing type</label><select id="filing-form"><option value="">All types</option></select></div><div><label for="filing-year">Filed year</label><select id="filing-year"><option value="">All years</option></select></div><div><label for="filing-text">Find in loaded filings</label><input id="filing-text" placeholder="Accession, form, or period"></div></div>
+      <p id="filing-status" class="faint" role="status"></p>
+      <div class="scroll"><table id="filings"><thead><tr><th>Report</th><th>Period ended</th><th>Filed</th><th>Source / actions</th></tr></thead><tbody></tbody></table></div>
+      <button id="more-filings" type="button" hidden>Load more filings</button>
+    </div>
+    <section class="panel" id="filing-detail" hidden aria-label="Filing details"><div class="section-head"><h2 id="detail-title"></h2><button id="close-detail" type="button">Close</button></div><p id="detail-status" role="status"></p><dl id="detail-content"></dl></section>
   </section>
 </main>
-<script>
-const CARDS = [["revenue", "Revenue"], ["net_income", "Net income"], ["free_cash_flow", "Free cash flow"], ["diluted_eps", "Diluted EPS"]];
-const TABS = {
-  income: [["revenue", "Revenue"], ["gross_profit", "Gross profit"], ["operating_income", "Operating income"], ["net_income", "Net income"], ["diluted_eps", "Diluted EPS ($)"]],
-  cash: [["operating_cash_flow", "Operating cash flow"], ["capital_expenditures", "Capital expenditures"], ["free_cash_flow", "Free cash flow"], ["share_repurchases", "Share buybacks"], ["dividends_paid", "Dividends paid"]],
-  balance: [["cash_and_equivalents", "Cash and equivalents"], ["total_assets", "Total assets"], ["total_liabilities", "Total liabilities"], ["long_term_debt", "Long-term debt"], ["stockholders_equity", "Shareholders' equity"]],
-};
-const METRICS = [...new Set([...CARDS, ...Object.values(TABS).flat()].map(([code]) => code))];
-const PER_SHARE = new Set(["diluted_eps"]);
-const state = { company: null, years: [], values: {}, tab: "income", scale: 1e9 };
-const $ = (id) => document.getElementById(id);
-const el = (tag, text, attrs = {}) => {
-  const node = document.createElement(tag);
-  if (text !== undefined && text !== null) node.textContent = text;
-  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
-  return node;
-};
-
-try { $("key").value = localStorage.getItem("xbrl_api_key") || ""; } catch {}
-$("key").addEventListener("change", () => { try { localStorage.setItem("xbrl_api_key", $("key").value); } catch {} });
-
-async function api(path) {
-  const headers = $("key").value ? { Authorization: "Bearer " + $("key").value } : {};
-  const response = await fetch(path, { headers });
-  if (!response.ok) {
-    let detail = response.statusText;
-    try { const body = await response.json(); detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail); } catch {}
-    throw new Error(response.status === 401 ? "The API needs a key. Enter it in the API key box." : `${response.status}: ${detail}`);
-  }
-  return response.json();
-}
-const fail = (error) => { $("status").textContent = error.message; };
-
-let timer, active = -1;
-$("q").addEventListener("input", () => {
-  clearTimeout(timer);
-  const q = $("q").value.trim();
-  if (!q) { $("results").style.display = "none"; return; }
-  timer = setTimeout(async () => {
-    try {
-      const data = await api("/v1/companies?q=" + encodeURIComponent(q));
-      $("status").textContent = "";
-      const box = $("results");
-      box.replaceChildren();
-      active = -1;
-      if (!data.items.length) box.append(el("div", `No loaded company matches "${q}"`, { class: "muted" }));
-      for (const c of data.items) {
-        const item = el("div", `${c.tickers[0] || "-"} · ${c.name}`, { role: "option" });
-        item.company = c;
-        item.addEventListener("click", () => select(c));
-        box.append(item);
-      }
-      box.style.display = "block";
-    } catch (e) { fail(e); }
-  }, 200);
-});
-$("q").addEventListener("keydown", (event) => {
-  const items = [...$("results").children].filter((n) => n.company);
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    active = Math.max(0, Math.min(items.length - 1, active + (event.key === "ArrowDown" ? 1 : -1)));
-    items.forEach((n, i) => n.classList.toggle("active", i === active));
-    event.preventDefault();
-  } else if (event.key === "Enter" && items.length) {
-    select(items[Math.max(active, 0)].company);
-  } else if (event.key === "Escape") {
-    $("results").style.display = "none";
-  }
-});
-document.addEventListener("click", (event) => { if (!event.target.closest(".search")) $("results").style.display = "none"; });
-
-async function select(company) {
-  state.company = company;
-  $("results").style.display = "none";
-  $("q").value = company.tickers[0] || company.name;
-  $("name").textContent = company.name;
-  $("ticker").textContent = [company.tickers[0], company.exchanges[0]].filter(Boolean).join(" · ");
-  history.replaceState(null, "", "#" + encodeURIComponent(company.tickers[0] || company.cik));
-  try {
-    const params = new URLSearchParams({ metrics: METRICS.join(","), limit: "10000" });
-    params.append("period_type", "annual");
-    params.append("period_type", "instant");
-    const [series, filings] = await Promise.all([
-      api(`/v1/series/${company.cik}?${params}`),
-      api(`/v1/companies/${company.cik}/filings?limit=50`),
-    ]);
-    $("status").textContent = "";
-    buildYears(series.items);
-    $("empty").hidden = true;
-    $("company").hidden = false;
-    renderCards();
-    renderChart();
-    renderFilings(filings.items);
-    renderTable();
-  } catch (e) { fail(e); }
-}
-
-// Annual values by fiscal year; balance-sheet instants join on the fiscal year's end date.
-function buildYears(points) {
-  const values = {}, yearEnd = {};
-  for (const p of points) {
-    if (p.period_type !== "annual" || !p.fiscal_year) continue;
-    (values[p.metric] ||= {})[p.fiscal_year] = Number(p.value);
-    yearEnd[p.period_end] = p.fiscal_year;
-  }
-  for (const p of points) {
-    const year = yearEnd[p.period_end];
-    if (p.period_type === "instant" && year) (values[p.metric] ||= {})[year] = Number(p.value);
-  }
-  const years = [...new Set(Object.values(values).flatMap((v) => Object.keys(v).map(Number)))].sort();
-  state.years = years.slice(-5);
-  state.values = values;
-  const size = Math.max(0, ...state.years.map((y) => Math.abs(values.revenue?.[y] ?? values.total_assets?.[y] ?? 0)));
-  state.scale = size >= 1e10 ? 1e9 : 1e6;
-}
-
-const value = (code, year) => state.values[code]?.[year];
-function money(code, v, withUnit = true) {
-  if (v === undefined) return "–";
-  if (PER_SHARE.has(code)) return (withUnit ? "$" : "") + v.toFixed(2);
-  const scaled = v / state.scale;
-  const text = Math.abs(scaled).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-  return (v < 0 ? "−" : "") + (withUnit ? "$" + text + (state.scale === 1e9 ? "B" : "M") : text);
-}
-
-function renderCards() {
-  const [last, prev] = [state.years.at(-1), state.years.at(-2)];
-  $("cards").replaceChildren(...CARDS.map(([code, label]) => {
-    const card = el("div", null, { class: "card" });
-    const now = value(code, last), before = value(code, prev);
-    card.append(el("div", label, { class: "label" }), el("div", money(code, now), { class: "value" }));
-    if (now !== undefined && before) {
-      const change = (now / before - 1) * 100 * Math.sign(before);
-      card.append(el("div", `${change >= 0 ? "+" : "−"}${Math.abs(change).toFixed(1)}% vs FY${prev}`, { class: change >= 0 ? "up" : "down", style: "font-size:13px" }));
-    } else {
-      card.append(el("div", " ", { style: "font-size:13px" }));
-    }
-    return card;
-  }));
-}
-
-function renderChart() {
-  const svg = $("chart"), ns = "http://www.w3.org/2000/svg";
-  svg.replaceChildren();
-  const width = svg.clientWidth || 840, height = 160, top = 22, bottom = 24;
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  const bars = state.years.map((year) => ({ year, v: value("revenue", year) }));
-  $("chart-label").textContent = `Revenue, last ${bars.length} years`;
-  const max = Math.max(0, ...bars.map((b) => b.v ?? 0));
-  if (!max) return;
-  const slot = width / bars.length;
-  const add = (tag, attrs, text) => {
-    const node = document.createElementNS(ns, tag);
-    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
-    if (text !== undefined) node.textContent = text;
-    svg.append(node);
-  };
-  bars.forEach((b, i) => {
-    const x = i * slot, centre = x + slot / 2;
-    add("text", { x: centre, y: height - 6, "text-anchor": "middle" }, `FY${String(b.year).slice(2)}`);
-    if (b.v === undefined || b.v <= 0) return;
-    const h = (b.v / max) * (height - top - bottom);
-    add("rect", { x: x + slot * 0.18, y: height - bottom - h, width: slot * 0.64, height: h, rx: 3, fill: "var(--bar)" });
-    add("text", { x: centre, y: height - bottom - h - 6, "text-anchor": "middle" }, money("revenue", b.v, false));
-  });
-}
-window.addEventListener("resize", () => { if (state.company) renderChart(); });
-
-const dateText = (iso) => iso ? new Date(iso + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
-
-function renderFilings(filings) {
-  const annual = filings.find((f) => f.form.startsWith("10-K") || f.form.startsWith("20-F"));
-  $("source").textContent = annual ? `FY${state.years.at(-1)} · ${annual.form} filed ${dateText(annual.filed_date)}` : "";
-  $("filings").replaceChildren(...filings.slice(0, 3).map((f) => {
-    const period = f.form.startsWith("10-Q") ? "quarter ended" : "period ended";
-    const href = /^\d{10}-\d{2}-\d{6}$/.test(f.accession)
-      ? `https://www.sec.gov/Archives/edgar/data/${state.company.cik}/${f.accession.replaceAll("-", "")}/` : "#";
-    const row = el("a", null, { href, target: "_blank", rel: "noopener", title: f.accession });
-    row.append(el("span", `${f.form}${f.amendment ? " (amended)" : ""} · ${period} ${dateText(f.period_end_date)}`), el("span", dateText(f.filed_date), { class: "faint" }));
-    return row;
-  }));
-  if (!filings.length) $("filings").append(el("div", "No filings loaded.", { class: "faint" }));
-}
-
-document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
-  state.tab = b.dataset.tab;
-  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
-  renderTable();
-}));
-
-function spark(values) {
-  const known = values.filter((v) => v !== undefined);
-  if (known.length < 2) return el("span");
-  const min = Math.min(...known), max = Math.max(...known), ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("width", "64"); svg.setAttribute("height", "22"); svg.setAttribute("aria-hidden", "true");
-  const line = document.createElementNS(ns, "polyline");
-  line.setAttribute("points", values.map((v, i) => v === undefined ? null : `${2 + i * 15},${19 - ((v - min) / (max - min || 1)) * 16}`).filter(Boolean).join(" "));
-  line.setAttribute("fill", "none"); line.setAttribute("stroke", "var(--bar)"); line.setAttribute("stroke-width", "1.5");
-  svg.append(line);
-  return svg;
-}
-
-function renderTable() {
-  $("unit").textContent = `USD ${state.scale === 1e9 ? "billions" : "millions"}`;
-  const table = $("table");
-  table.replaceChildren();
-  const head = el("tr");
-  head.append(el("th", ""), ...state.years.map((y) => el("th", `FY${y}`)), el("th", "Trend"));
-  table.appendChild(el("thead")).append(head);
-  const body = table.appendChild(el("tbody"));
-  for (const [code, label] of TABS[state.tab]) {
-    const row = el("tr");
-    const values = state.years.map((y) => value(code, y));
-    row.append(el("td", label));
-    for (const v of values) row.append(el("td", money(code, v, false), v < 0 ? { class: "neg" } : {}));
-    row.appendChild(el("td")).append(spark(values));
-    body.append(row);
-  }
-}
-
-(async () => {
-  const wanted = decodeURIComponent(location.hash.slice(1));
-  if (!wanted) return;
-  try {
-    const match = (await api("/v1/companies?q=" + encodeURIComponent(wanted))).items[0];
-    if (match) select(match);
-  } catch (e) { fail(e); }
-})();
-</script>
+<footer>As-filed reports and traceable financial data · Warehouse coverage depends on imported filings.</footer>
 </body>
 </html>

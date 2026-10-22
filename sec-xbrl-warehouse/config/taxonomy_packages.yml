@@ -577,6 +577,27 @@ packages:
       - https://xbrl.sec.gov/invest/2013/invest-2013-01-31.xsd
     notes: >-
       Published as individual files only (no zip). Filings import only this entry-point schema, so it stands in for the family/year.
+  # IFRS Accounting Taxonomy (ESEF). Checksums recorded on 22 October 2026. The
+  # IFRS Foundation publishes 2021 onward only behind an account login, which
+  # `taxonomy sync` can't follow, so those years stay unpinned.
+  - id: ifrs-2019-03-27
+    kind: package
+    filename: IFRST_2019-03-27.zip
+    url: https://www.ifrs.org/content/dam/ifrs/standards/taxonomy/ifrs-taxonomies/IFRST_2019-03-27.zip
+    sha256: 4d4aa6f86fea4f8e1e038a80631306f5f4cc1076b874c134e568fdb6160a1b33
+    size_bytes: 1814706
+    enabled: true
+    prefixes:
+      - https://xbrl.ifrs.org/taxonomy/2019-03-27/
+  - id: ifrs-2020-03-16
+    kind: package
+    filename: IFRST_2020-03-16.zip
+    url: https://www.ifrs.org/content/dam/ifrs/standards/taxonomy/ifrs-taxonomies/IFRST_2020-03-16.zip
+    sha256: 26f054a3ab233cfedc8f9fda6b1ea1c1c856df5860ccd1edd1eda6a7be6d540b
+    size_bytes: 1831601
+    enabled: true
+    prefixes:
+      - https://xbrl.ifrs.org/taxonomy/2020-03-16/
 
 # Taxonomy family/years the corpus uses (scheme-less URI prefixes). Each must be
 # served by an enabled entry above, or `taxonomy status` and `doctor` fail.
@@ -676,8 +697,8 @@ required_prefixes:
 
 # Extra prefixes per source, required only while that source is in
 # XBRL_ENABLED_SOURCES. ESEF (filings.xbrl.org): the ESMA ESEF taxonomy and the IFRS
-# Accounting Taxonomy years the ESEF RTS name. They have no pinned entry yet, so with
-# `esef` enabled `taxonomy status` and `doctor` report them `uncovered` and offline
+# Accounting Taxonomy years the ESEF RTS name. Only IFRS 2019 and 2020 are pinned, so
+# with `esef` enabled `taxonomy status` and `doctor` report the rest `uncovered` and offline
 # extraction refuses to start until the operator pins the packages (OPERATIONS.md,
 # "ESEF filings"). Keep this list equal to `ESEF_TAXONOMY_PREFIXES` in sources/esef.py.
 source_required_prefixes:

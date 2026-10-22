@@ -6,6 +6,13 @@ The stock/filing explorer now supports source and exchange filters, paged filing
 history, regional acquisition guidance, and filing extraction summaries. Automatic
 global stock discovery/import remains outside this UI change.
 
+IFRS Accounting Taxonomy 2019-03-27 and 2020-03-16 are now pinned
+(`config/taxonomy_packages.yml`), checked offline through Arelle against a minimal
+`ifrs-full:Revenue` instance. Run `taxonomy sync` after pulling, or `doctor` reports
+them missing. The 2021-2024 IFRS packages need an IFRS account to download and the
+ESMA ESEF packages weren't reachable from the build environment, so `esef` still
+fails `doctor` until the operator pins them (OPERATIONS.md, "ESEF filings").
+
 Source retention still defaults to true. The operator explicitly chose false in
 the local ignored `.env` and approved the worker's package-only delete grant.
 `api`, `worker`, and `admin` images were rebuilt, `minio-init` applied the scoped

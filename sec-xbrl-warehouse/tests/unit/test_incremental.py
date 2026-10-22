@@ -85,6 +85,10 @@ class _FakeControl:
     def __init__(self) -> None:
         self.upserts: list[FilingRef] = []
         self.checkpoints = {}
+        self.source_busy = False
+
+    async def source_package_in_use(self, accession, exclude_job=None):
+        return self.source_busy
 
     async def upsert_filing(self, filing: FilingRef) -> None:
         self.upserts.append(filing)
@@ -193,9 +197,10 @@ def test_ingest_runs_pipeline(tmp_path: Path) -> None:
     assert warehouse.bundles[0].filing.accession == "0000000001-26-000001"
 
 
-def test_ingestion_cannot_disable_raw_retention():
-    with pytest.raises(ValueError, match="Raw source retention is required"):
-        Settings(_env_file=None, env="test", retain_filing_source_files=False)
+def test_ingestion_can_opt_out_of_source_retention():
+    assert not Settings(
+        _env_file=None, env="test", retain_filing_source_files=False
+    ).retain_filing_source_files
 
 
 def test_reconcile_reports_bulk_absence() -> None:
@@ -489,3 +494,110 @@ def test_ingestor_routes_packages_and_fiscal_focus_through_the_source_registry()
     assert control.upserts[-1].fiscal_year == 2031
     assert warehouse.bundles[0].filing.fiscal_year == 2031
     assert issue in warehouse.bundles[0].validation_issues
+
+
+def _retention_ingestor(tmp_path, *, retain=False):
+    from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes
+    from sec_xbrl_warehouse.infrastructure.storage.parquet import ParquetBatchWriter
+    from sec_xbrl_warehouse.ingestion.filing_downloader import filing_package_key
+
+    settings = Settings(
+        _env_file=None,
+        env="test",
+        retain_filing_source_files=retain,
+        data_dir=tmp_path / "data",
+        temp_dir=tmp_path / "tmp",
+        config_dir=tmp_path / "config",
+    )
+    store = LocalObjectStore(tmp_path / "objects")
+    checksum = sha256_bytes(b"original package")
+    key = filing_package_key(_filing(), checksum)
+
+    class Packages(_FakePackageStore):
+        def archive_package(self, manifest, source):
+            self.archives += 1
+            store.put_bytes(b"original package", key)
+            return manifest.model_copy(
+                update={"package_object_key": key, "package_checksum_sha256": checksum}
+            )
+
+    control, packages, extractor, warehouse = (
+        _FakeControl(),
+        Packages(),
+        _FakeExtractor(),
+        _FakeWarehouse(),
+    )
+    ingestor = IncrementalFilingIngestor(
+        control,
+        packages,
+        extractor,
+        ParquetBatchWriter(settings, store),
+        warehouse,
+        settings=settings,
+        object_store=store,
+    )
+    return ingestor, control, store, packages, extractor, warehouse, key
+
+
+@pytest.mark.parametrize("retain", [True, False])
+def test_source_retention_runs_only_after_publication_and_keeps_replay_data(tmp_path, retain):
+    ingestor, control, store, packages, extractor, warehouse, key = _retention_ingestor(
+        tmp_path, retain=retain
+    )
+    job = uuid4()
+    assert asyncio.run(ingestor.ingest(_filing(), job_id=job))["status"] == "complete"
+    assert store.exists(key) is retain
+    assert warehouse.published
+    assert store.exists(control.checkpoints[("extract", "default")]["object_key"])
+    assert control.checkpoints[("silver:facts", "default")]["object_records"]
+    assert asyncio.run(ingestor.ingest(_filing(), job_id=job))["status"] == "complete"
+    assert packages.downloads == 1 and extractor.calls == 1
+
+
+def test_source_retained_on_load_failure_and_while_other_jobs_need_it(tmp_path):
+    ingestor, control, store, _, _, warehouse, key = _retention_ingestor(tmp_path)
+    job = uuid4()
+    warehouse.fail_once = True
+    with pytest.raises(ConnectionError):
+        asyncio.run(ingestor.ingest(_filing(), job_id=job))
+    assert store.exists(key)
+    assert ("complete", "default") not in control.checkpoints
+    control.source_busy = True
+    asyncio.run(ingestor.ingest(_filing(), job_id=job))
+    assert store.exists(key)
+    control.source_busy = False
+    asyncio.run(ingestor.ingest(_filing(), job_id=job))
+    assert not store.exists(key)
+
+
+def test_failed_source_cleanup_retries_without_reparsing(tmp_path, monkeypatch):
+    ingestor, control, store, packages, extractor, warehouse, key = _retention_ingestor(tmp_path)
+    original = store.delete
+
+    def denied(target):
+        assert warehouse.published and control.checkpoints[("complete", "default")]
+        raise PermissionError("delete denied")
+
+    monkeypatch.setattr(store, "delete", denied)
+    job = uuid4()
+    with pytest.raises(PermissionError):
+        asyncio.run(ingestor.ingest(_filing(), job_id=job))
+    assert store.exists(key)
+    monkeypatch.setattr(store, "delete", original)
+    asyncio.run(ingestor.ingest(_filing(), job_id=job))
+    assert not store.exists(key)
+    assert packages.downloads == 1 and extractor.calls == 1
+
+
+def test_cleanup_refuses_missing_replay_checkpoint_and_noncheckpointed_runs(tmp_path):
+    ingestor, control, store, _, _, _, key = _retention_ingestor(tmp_path)
+    with pytest.raises(ValueError, match="checkpointed"):
+        asyncio.run(ingestor.ingest(_filing()))
+    control.source_busy = True
+    job = uuid4()
+    asyncio.run(ingestor.ingest(_filing(), job_id=job))
+    control.source_busy = False
+    store.delete(control.checkpoints[("extract", "default")]["object_key"])
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(ingestor.ingest(_filing(), job_id=job))
+    assert store.exists(key)

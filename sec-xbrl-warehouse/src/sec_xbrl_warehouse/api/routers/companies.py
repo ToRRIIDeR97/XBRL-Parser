@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -14,14 +14,18 @@ router = APIRouter(tags=["companies"])
 def search_companies(
     q: str = Query(..., min_length=1, max_length=64, description="Ticker, CIK, or name text."),
     limit: int = Query(default=20, ge=1, le=100),
+    exchange: str | None = Query(default=None, min_length=1, max_length=64),
+    source: Literal["sec", "esef", "edinet", "dart", "nse", "mca", "acra"] | None = None,
     service: QueryService = Depends(get_query_service),
 ) -> dict[str, Any]:
-    """Companies loaded in the warehouse matching a ticker, CIK, or part of the name.
+    """Imported companies matching a ticker prefix, company ID, or part of the name.
+
+    Optional source and exact, case-insensitive exchange filters run before LIMIT.
 
     Example: `/v1/companies?q=AAPL`.
     """
     try:
-        rows = service.search_companies(q, limit=limit)
+        rows = service.search_companies(q, limit=limit, exchange=exchange, source=source)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"items": rows, "count": len(rows), "limit": limit}

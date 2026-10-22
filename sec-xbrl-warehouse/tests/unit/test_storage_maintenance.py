@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from sec_xbrl_warehouse.config import Settings
@@ -115,3 +115,149 @@ def test_recompress_rewrites_json_as_zstd_and_repoints(tmp_path: Path) -> None:
     restored = tmp_path / "restored.json.zst"
     store.get_file(new_key, restored)
     assert read_bundle(restored, 1_000_000) == bundle
+
+
+def test_source_cleanup_requires_exact_package_and_verified_replay(tmp_path: Path) -> None:
+    import pytest
+
+    from sec_xbrl_warehouse.domain.models import FilingPackageManifest
+    from sec_xbrl_warehouse.exceptions import ArtifactIntegrityError
+    from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes
+    from sec_xbrl_warehouse.infrastructure.storage.maintenance import delete_filing_source
+    from sec_xbrl_warehouse.ingestion.filing_downloader import filing_package_key
+
+    settings = Settings(
+        _env_file=None,
+        env="test",
+        retain_filing_source_files=False,
+        data_dir=tmp_path / "data",
+        temp_dir=tmp_path / "tmp",
+    )
+    store = LocalObjectStore(tmp_path)
+    filing = FilingRef(
+        accession=A,
+        cik=1,
+        company_name="Example",
+        form="10-K",
+        filed_date=date(2026, 1, 1),
+        archive_directory_url="https://www.sec.gov/Archives/edgar/data/1/1",
+    )
+    checksum = sha256_bytes(b"package")
+    key = filing_package_key(filing, checksum)
+    store.put_bytes(b"package", key)
+    manifest = FilingPackageManifest(
+        filing=filing,
+        acquired_at=datetime.now(UTC),
+        members=(),
+        package_object_key=key,
+        package_checksum_sha256=checksum,
+    )
+    snapshot = store.put_bytes(
+        b"saved extraction",
+        f"silver/xbrl/extractions/accession={A}/revision=1/sha256={sha256_bytes(b'saved extraction')}.json.zst",
+    )
+    extraction = {"object_key": snapshot.key, "sha256": snapshot.checksum_sha256}
+    assert delete_filing_source(store, settings, manifest, extraction, 1)
+    assert store.exists(key)
+    for bad in (
+        manifest.model_copy(update={"package_object_key": snapshot.key}),
+        manifest.model_copy(update={"package_checksum_sha256": "bad"}),
+    ):
+        with pytest.raises(ArtifactIntegrityError):
+            delete_filing_source(store, settings, bad, extraction, 1, apply=True)
+    with pytest.raises(ArtifactIntegrityError):
+        delete_filing_source(store, settings, manifest, extraction, 2, apply=True)
+    with pytest.raises(ValueError, match="false"):
+        delete_filing_source(
+            store,
+            settings.model_copy(update={"retain_filing_source_files": True}),
+            manifest,
+            extraction,
+            1,
+            apply=True,
+        )
+    assert store.exists(key) and store.exists(snapshot.key)
+    replay_path = store.bucket_root / snapshot.key
+    replay_path.write_bytes(b"corrupted extraction")
+    with pytest.raises(ArtifactIntegrityError, match="checksum mismatch"):
+        delete_filing_source(store, settings, manifest, extraction, 1, apply=True)
+    assert store.exists(key)
+    replay_path.write_bytes(b"saved extraction")
+    assert delete_filing_source(store, settings, manifest, extraction, 1, apply=True)
+    assert not store.exists(key) and store.exists(snapshot.key)
+    assert not delete_filing_source(store, settings, manifest, extraction, 1, apply=True)
+
+
+async def test_source_cleanup_only_includes_completed_published_packages(tmp_path: Path) -> None:
+    from sec_xbrl_warehouse.domain.models import FilingPackageManifest
+    from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes
+    from sec_xbrl_warehouse.infrastructure.storage.maintenance import prune_filing_sources
+    from sec_xbrl_warehouse.ingestion.filing_downloader import filing_package_key
+
+    settings = Settings(
+        _env_file=None,
+        env="test",
+        retain_filing_source_files=False,
+        data_dir=tmp_path / "data",
+        temp_dir=tmp_path / "tmp",
+    )
+    store = LocalObjectStore(tmp_path)
+    items = []
+    for accession in (A, B):
+        filing = FilingRef(
+            accession=accession,
+            cik=1,
+            company_name="Example",
+            form="10-K",
+            filed_date=date(2026, 1, 1),
+            archive_directory_url="https://www.sec.gov/Archives/edgar/data/1/1",
+        )
+        checksum = sha256_bytes(b"package")
+        key = filing_package_key(filing, checksum)
+        store.put_bytes(b"package", key)
+        snapshot_key = (
+            f"silver/xbrl/extractions/accession={accession}/revision=1/sha256={checksum}.json.zst"
+        )
+        store.put_bytes(b"package", snapshot_key)
+        items.append(
+            {
+                "package": FilingPackageManifest(
+                    filing=filing,
+                    acquired_at=datetime.now(UTC),
+                    members=(),
+                    package_object_key=key,
+                    package_checksum_sha256=checksum,
+                ).model_dump(mode="json"),
+                "extract": {"object_key": snapshot_key, "sha256": checksum},
+                "complete": {
+                    "status": "complete",
+                    "accession": accession,
+                    "extraction_revision": 1,
+                },
+            }
+        )
+
+    class Control:
+        busy = False
+
+        async def completed_filing_sources(self):
+            return [*items, items[0]]
+
+        async def source_package_in_use(self, accession):
+            return self.busy
+
+    class Warehouse:
+        def query(self, *args):
+            return [{"accession": A, "revision": 1}]
+
+    control = Control()
+    dry = await prune_filing_sources(control, Warehouse(), store, settings)
+    assert len(dry["packages"]) == 1 and dry["bytes"] == 7 and dry["dry_run"]
+    control.busy = True
+    assert not (await prune_filing_sources(control, Warehouse(), store, settings, apply=True))[
+        "packages"
+    ]
+    control.busy = False
+    done = await prune_filing_sources(control, Warehouse(), store, settings, apply=True)
+    assert len(done["packages"]) == 1
+    assert store.exists(items[1]["package"]["package_object_key"])

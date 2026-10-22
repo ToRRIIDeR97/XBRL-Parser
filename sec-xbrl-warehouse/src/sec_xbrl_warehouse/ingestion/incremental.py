@@ -32,6 +32,7 @@ from sec_xbrl_warehouse.infrastructure.storage.clickhouse import (
     xbrl_entity_records,
 )
 from sec_xbrl_warehouse.infrastructure.storage.hashing import sha256_bytes, sha256_file
+from sec_xbrl_warehouse.infrastructure.storage.maintenance import delete_filing_source
 from sec_xbrl_warehouse.infrastructure.storage.parquet import verify_checkpoint_objects
 from sec_xbrl_warehouse.infrastructure.xbrl.extraction_io import read_bundle, write_json
 from sec_xbrl_warehouse.mapping.canonical_mapper import CanonicalMapper
@@ -332,6 +333,7 @@ class IncrementalFilingIngestor:
                     "status": "complete",
                 }
                 await self._save(job_id, "complete", result)
+                await self._cleanup_source(job_id, result)
                 return result
         except EgressBusyError:
             # A deferral, not a failure: the worker reschedules the job, so record no
@@ -342,6 +344,10 @@ class IncrementalFilingIngestor:
             raise
 
     def _check_arguments(self, extraction_revision: int, job_id: UUID | None) -> None:
+        if not self.settings.retain_filing_source_files and (
+            job_id is None or self.object_store is None
+        ):
+            raise ValueError("Source cleanup requires checkpointed ingestion with object storage")
         if extraction_revision < 1:
             raise ValueError("Extraction revisions start at 1")
         if job_id and self.object_store is None:
@@ -362,7 +368,35 @@ class IncrementalFilingIngestor:
             await asyncio.to_thread(
                 verify_checkpoint_objects, checkpoint, self.object_store, self.settings
             )
+        await self._cleanup_source(job_id, completed)
         return completed
+
+    async def _cleanup_source(self, job_id: UUID | None, completed: dict[str, Any]) -> None:
+        if self.settings.retain_filing_source_files:
+            return
+        if self.object_store is None or job_id is None:
+            raise ValueError("Source cleanup requires checkpointed ingestion with object storage")
+        accession = completed["accession"]
+        if await self.control.source_package_in_use(accession, job_id):
+            return
+        package = await self._checkpoint(job_id, "package")
+        extraction = await self._checkpoint(job_id, "extract")
+        if not package or not extraction:
+            raise ArtifactIntegrityError(
+                "Source cleanup requires package and extraction checkpoints"
+            )
+        manifest = FilingPackageManifest.model_validate(package)
+        if manifest.filing.accession != accession:
+            raise ArtifactIntegrityError("Source cleanup checkpoint belongs to another filing")
+        await asyncio.to_thread(
+            delete_filing_source,
+            self.object_store,
+            self.settings,
+            manifest,
+            extraction,
+            completed["extraction_revision"],
+            apply=True,
+        )
 
     async def _record_failure(
         self, accession: str, exc: Exception, extraction_revision: int | None

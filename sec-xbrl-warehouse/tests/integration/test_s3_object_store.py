@@ -93,6 +93,12 @@ async def test_minio_archive_only_package_listing_and_report(tmp_path: Path) -> 
         assert report["usage"]["bronze_packages"]["objects"] == 1
         assert report["reclaimable"]["loose_members_in_archives"]["objects"] == 0
         assert [key for key, _ in store.list_objects()] == keys
+        # An explicitly retired source can be fetched again for a new parser revision.
+        assert manifest.package_object_key is not None
+        store.delete(manifest.package_object_key)
+        restored = await downloader.download_package(filing)
+        assert restored.package_checksum_sha256 == manifest.package_checksum_sha256
+        assert store.exists(restored.package_object_key)
     finally:
         response = store.client.list_objects_v2(Bucket=bucket)
         for item in response.get("Contents", []):

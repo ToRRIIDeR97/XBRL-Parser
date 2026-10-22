@@ -24,7 +24,7 @@ the component view; the other views follow the prose sections.
 | Validation | XBRL issues, filing reconciliation, data quality, schema drift, issue grouping. | `validation/` |
 | Canonical mapping | Applies approved concept mappings to raw facts, remaps published extractions, rebuilds `metric_series`. | `mapping/`, `query/series.py`, `normalization/series.py` |
 | Query API | FastAPI app with bearer auth and a concurrency limit; `QueryService` runs scan-bounded, budgeted SELECTs as the `xbrl_api` reader. `/v1/companies` searches the `companies` mirror and lists a company's filings from `v_cover_pages_latest`; `/v1/metrics` returns the metric catalogue. | `api/`, `query/service.py` |
-| Web UI | One static page at `/ui` (`/` redirects there): company search, four headline metrics with year-over-year change, a five-year revenue chart, the latest three filings (linked to EDGAR), and five-year income, cash flow, and balance sheet tables from `/v1/series`. It holds no data; its `/v1` calls carry the bearer key the user enters. | `api/static/index.html` |
+| Web UI | Static HTML/CSS and browser modules at `/ui` (`/` redirects there): company search with filing-source and exchange filters, acquisition guidance for seven source adapters, four headline metrics, a five-year USD revenue chart and statement tables, and a paged filing library (type/year/text filters and extraction summaries). Original SEC filings link to EDGAR; other sources link to their portals. External links do not ingest files or provide a global stock directory. It holds no data; its `/v1` calls carry the bearer key the user enters. | `api/static/index.html` |
 | MCP server | `xbrl-warehouse-mcp`: stdio JSON-RPC Model Context Protocol server with one tool per read endpoint. It is an HTTP client of the query API (`XBRL_MCP_API_URL`, `XBRL_API_KEY`) and never connects to a store. | `mcp_server.py` |
 
 Key flows: filings move `discover_filings` → `fetch_filing` → `parse_filing` (see the
@@ -72,6 +72,19 @@ that aren't manifest members, and verifies each extracted member's SHA-256 and s
 archives them as before.
 
 Bronze object keys include a source revision or checksum. Existing objects are never overwritten with different bytes.
+
+Source ZIP retention defaults to enabled. An explicit opt-out deletes only a
+checksum-addressed package after successful publication and a saved completion
+checkpoint, verifies its saved extraction checksum first, and leaves manifests,
+Parquet, extraction snapshots and database rows intact. Completed-job replay retries
+cleanup without parsing. Other pending/active source consumers defer cleanup.
+The admin `storage prune-filing-sources` command covers older completed jobs and
+requires matching publication/checkpoint proofs. New parsing after retirement
+requires fetching the original package again. Bulk inputs and inbox files are
+outside this policy. See [operations](OPERATIONS.md#filing-source-retention).
+
+![Source retention sequence](diagrams/sequence-source-retention.svg)
+
 
 Filing packages contain only the files Arelle needs (selection policy 2,
 `select_package_files`):
@@ -285,6 +298,25 @@ The recovery activity (failed jobs and restore drills) lives with its procedures
 
 ![UML sequence view of GET /v1/facts: bearer check, concurrency limit, FactQuery validation, budgeted ClickHouse query, and the 401, 503, 422, and 200 replies](diagrams/sequence-api-query.svg)
 
+### Company search and filing library
+
+`GET /v1/companies` accepts optional `source` and `exchange` filters. Ticker
+prefixes and name substrings match; exact tickers rank first. Exchange matching is
+case-insensitive and exact against imported metadata. Filters run before the
+100-result maximum. SEC companies use the CIK range; other sources use membership
+in published cover pages with the source's filing-key prefix. Non-SEC companies
+without a published filing are therefore absent from source-filtered results.
+All queries retain the reader's scan, memory, time, and response budgets.
+
+The UI discards stale searches/selections, loads company filings in pages of 100,
+and filters only the pages loaded so far. A series failure does not hide the filing
+library. The financial presentation accepts USD and USD/share series; other
+currencies remain available through filing records and original reports.
+Acquisition labels describe adapter requirements, not live configuration status.
+Non-US adapters currently provide no ticker/exchange metadata; use company names.
+
+![Company search and filing library sequence](diagrams/sequence-company-search.svg)
+
 ## Coverage index
 
 Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level folder.
@@ -302,10 +334,10 @@ Paths are under `src/sec_xbrl_warehouse/` unless they start with a top-level fol
 | Statements, disclosures, fiscal fields | Class (bundle); filing activity (publish step) | `normalization/statements.py`, `disclosures.py`, `fiscal_focus.py`; `ClickHouseWarehouse.insert_xbrl_bundle` |
 | Canonical mapping and series | Component; class; filing activity and sequence | `mapping/`, `query/series.py`, `normalization/series.py`; `config/canonical_metrics.yml`, `concept_seed.yml` |
 | Query API | Component; API sequence; deployment; trust boundaries | `api/`, `query/service.py` |
-| Web UI and MCP server (API clients) | Component; API sequence; trust boundaries | `api/static/index.html`; `mcp_server.py` (`TOOLS`, `WarehouseTools`) |
+| Web UI and MCP server (API clients) | Component; API and company-search sequences; trust boundaries | `api/static/` (`index.html`, `style.css`, `app.mjs`, `explorer.mjs`); `mcp_server.py` (`TOOLS`, `WarehouseTools`) |
 | PostgreSQL | Component; deployment; job and artifact state machines | `infrastructure/storage/postgres.py`, `postgres_models.py`; `migrations/`; `ops/provision/` |
 | MinIO / S3 | Component; deployment; filing and bulk activity | `infrastructure/storage/object_store.py`, `parquet.py`, `extraction_io.py`; `minio-init` in `docker-compose.yml` |
-| Storage maintenance | Deployment (admin service) | `infrastructure/storage/maintenance.py`, `inventory.py`; `cli.py` `storage` commands |
+| Storage maintenance and optional source retirement | Deployment; source retention sequence | `infrastructure/storage/maintenance.py` (`delete_filing_source`, `prune_filing_sources`), `inventory.py`; `ingestion/incremental.py` (`_cleanup_source`); `postgres.py` (`completed_filing_sources`, `source_package_in_use`); `cli.py` `storage` commands |
 | ClickHouse | Component; deployment; filing and API sequences | `infrastructure/storage/clickhouse.py`; `sql/clickhouse/`; `docker/clickhouse/` |
 | SEC EDGAR (external) | Component; deployment; filing sequence; trust boundaries | `config/sources.yml` |
 | filings.xbrl.org (external, ESEF) | Component; deployment; trust boundaries | `sources/esef.py` (`ESEF_POLICY`) |

@@ -7,7 +7,7 @@ Dated audit and hardening reports record how it got here; this file holds the cu
 
 | Asset | Where it lives | Why it matters |
 | --- | --- | --- |
-| Raw source artifacts (bronze) | MinIO/S3 bucket | The replay source. Ingestion never deletes them, and `XBRL_RETAIN_FILING_SOURCE_FILES=false` is rejected. |
+| Raw source artifacts (bronze) | MinIO/S3 bucket | Retained by default. Explicit `XBRL_RETAIN_FILING_SOURCE_FILES=false` retires successful filing ZIPs only after publication and replay-checkpoint verification. |
 | Silver Parquet and checkpoints | Object store | The ClickHouse rebuild source. Checkpoints bind the source checksum, code hashes, schema, and row counts. |
 | Control state | PostgreSQL | Jobs, leases, artifacts, validation issues, mapping versions, and review decisions. |
 | Warehouse facts | ClickHouse | Raw and canonical facts served by the API. |
@@ -121,9 +121,13 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   contacted.
 - **The object store is trusted.** Manifest-cache and checkpoint verification detect
   corruption and mismatched reuse. They don't defend against a malicious storage administrator.
-  The bucket is versioned (noncurrent versions expire after 30 days), and the workers'
-  object-store user can't delete, so a compromised worker can't remove or overwrite
-  bronze objects.
+  The bucket is versioned (noncurrent versions expire after 30 days), and the default worker policy cannot delete objects. With source retention disabled,
+  `minio-init` grants `s3:DeleteObject` only on
+  `bronze/*/filings/*/*/packages/sha256=*/package.zip`. It never grants
+  `s3:DeleteObjectVersion`, so the worker cannot purge old versions. A compromised
+  worker can hide matching source ZIPs while that opt-in grant is active; extraction
+  checkpoints, Parquet, manifests, quarantine and other keys remain outside its
+  delete scope. See the [retention sequence](diagrams/sequence-source-retention.svg).
 - **The Arelle child parses untrusted XML and has no credentials.** It gets settings
   with the database, object-store, and API secrets blanked and removes credential
   variables (`*PASSWORD*`, `*SECRET*`, `*DSN*`, `*API_KEY*`, `*ACCESS_KEY*`) from its
@@ -136,7 +140,7 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   "Identities and the admin service"):
   - workers use `xbrl_worker` (PostgreSQL DML only, no DDL or superuser), `xbrl_writer`
     (ClickHouse SELECT and INSERT), and an object-store user with get, put, and list
-    but no delete; Compose blanks the owner, admin, root, and API secrets that `.env`
+    and optional package-only delete (never version purge); Compose blanks the owner, admin, root, and API secrets that `.env`
     holds in their environment;
   - the API gets an explicit environment allowlist with no `.env`, no writer or MinIO
     credentials, and no application-data volume;
@@ -155,6 +159,13 @@ Dated audit and hardening reports record how it got here; this file holds the cu
   is unauthenticated and is safe only on loopback, so `api serve` refuses a
   non-loopback bind without a key unless `XBRL_API_ALLOW_UNAUTHENTICATED_REMOTE=true`
   (Compose sets it: the container binds `0.0.0.0` behind a `127.0.0.1`-only port).
+- **Company explorer.** Source codes are allowlisted, exchange text is bounded, and
+  search values are bound SQL parameters. External portal links are fixed HTTPS
+  destinations with `noopener noreferrer`; user text is URL-encoded for EDGAR.
+  API credentials stay on same-origin warehouse requests. The UI renders imported
+  values with `textContent`. Search and filing browsing enqueue no jobs and add no
+  regulator clients or writer credentials to the API. The browser-to-portal handoff
+  is shown in the [company search sequence](diagrams/sequence-company-search.svg).
 - **MCP server.** `xbrl-warehouse-mcp` reaches data only through the HTTP API, with
   the key in `XBRL_API_KEY` from its launcher's environment, so an agent gets the
   reader's view under the same budgets and can't write. Tool results are capped at

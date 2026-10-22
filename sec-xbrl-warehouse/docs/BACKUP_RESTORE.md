@@ -7,6 +7,13 @@
 - **ClickHouse:** optional snapshots for faster recovery; not the sole copy of raw data.
 - **Configuration/code:** Git tag, dependency lock, SQL migration versions, and Arelle/parser version.
 
+With source retention explicitly disabled, successful filing ZIPs may already be
+retired. Keep extraction snapshots, silver Parquet and manifests in backups: they
+preserve extracted facts and mapping replay, but cannot reconstruct every original
+source byte or rerun a different parser. Restore a retired ZIP's prior MinIO version
+within the 30-day noncurrent retention window, or reacquire it from its permitted
+source. Re-enabling retention does not restore previously deleted objects.
+
 ## Backup procedure
 
 1. Pause new producers.

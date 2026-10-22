@@ -211,9 +211,14 @@ Enable it (each step that sends traffic needs the operator's approval):
 
 1. **Pin the taxonomies.** `config/taxonomy_packages.yml` lists
    `source_required_prefixes.esef` (the ESMA ESEF taxonomy and IFRS Accounting
-   Taxonomy years) but no pinned entries, so with `esef` enabled `taxonomy status`
-   shows those prefixes `uncovered`, `doctor` fails, and offline extraction refuses to
-   start. For each ESEF taxonomy (`www.esma.europa.eu`) and IFRS Accounting Taxonomy
+   Taxonomy years). Only IFRS 2019-03-27 and 2020-03-16 are pinned, so with `esef`
+   enabled `taxonomy status` shows the other prefixes `uncovered`, `doctor` fails, and
+   offline extraction refuses to start. The IFRS Foundation serves 2021 onward only
+   after an account login, which `taxonomy sync` can't follow: download those zips
+   while signed in, add an entry for each as below, and place the file under its
+   `filename` in `XBRL_ARELLE_TAXONOMY_PACKAGES_DIR` (sync skips a file whose SHA-256
+   already matches). Check the IFRS terms and conditions before sharing them.
+   For each remaining ESEF taxonomy (`www.esma.europa.eu`) and IFRS Accounting Taxonomy
    (`www.ifrs.org` or `xbrl.ifrs.org`) package: download it once from the publisher,
    record its SHA-256 and size, and add an entry as in "Adding a taxonomy year"
    (`package` when it carries `META-INF/taxonomyPackage.xml`). Then run

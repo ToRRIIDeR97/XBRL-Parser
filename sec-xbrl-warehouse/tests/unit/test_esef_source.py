@@ -557,8 +557,9 @@ def test_esef_taxonomy_prefixes_fail_closed_until_pinned(tmp_path) -> None:
     with_esef = _settings(tmp_path, config_dir=REPO_CONFIG, enabled_sources=("sec", "esef"))
     assert not set(ESEF_TAXONOMY_PREFIXES) & set(required_prefixes(sec_only))
     assert set(ESEF_TAXONOMY_PREFIXES) <= set(required_prefixes(with_esef))
+    pinned = {"xbrl.ifrs.org/taxonomy/2019-03-27/", "xbrl.ifrs.org/taxonomy/2020-03-16/"}
     gaps = coverage_gaps(with_esef, registered_packages(with_esef))
-    assert set(ESEF_TAXONOMY_PREFIXES) <= set(gaps)
+    assert set(gaps) & set(ESEF_TAXONOMY_PREFIXES) == set(ESEF_TAXONOMY_PREFIXES) - pinned
     assert not set(ESEF_TAXONOMY_PREFIXES) & set(
         coverage_gaps(sec_only, registered_packages(sec_only))
     )
